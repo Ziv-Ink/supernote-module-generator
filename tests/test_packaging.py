@@ -47,3 +47,15 @@ def test_pypi_readme_is_self_contained():
     assert "MIT License" in readme
     assert "github.com/Ziv-Ink/supernote-module-generator" in readme
     assert not re.search(r"(?<!!)\[[^\]]+\]\((?!https?://|mailto:)[^)]+\)", readme)
+
+
+def test_pypi_release_uses_scoped_trusted_publishing():
+    workflow = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+
+    assert "release:" in workflow
+    assert "types: [published]" in workflow
+    assert "name: pypi" in workflow
+    assert "id-token: write" in workflow
+    assert "pypa/gh-action-pypi-publish@v1.14.2" in workflow
+    assert "password:" not in workflow
+    assert "PYPI_TOKEN" not in workflow

@@ -29,30 +29,46 @@ supernote-module --version
 supernote-module --help
 ```
 
-## TestPyPI first
+## Configure trusted publishing once
 
-Create API tokens through the PyPI and TestPyPI account interfaces. Do not put a
-token in this repository.
+This repository publishes through GitHub's `pypi` environment and PyPI trusted
+publishing. It does not store a long-lived PyPI token.
+
+Before the first release, add a pending GitHub publisher on the PyPI account's
+Publishing page with these exact values:
+
+- PyPI project name: `supernote-module-generator`
+- Owner: `Ziv-Ink`
+- Repository: `supernote-module-generator`
+- Workflow: `publish.yml`
+- Environment: `pypi`
+
+The pending publisher creates the PyPI project during the first successful
+workflow run. The project name is not reserved until that upload happens.
+
+## Publish a release
+
+Confirm the `main` CI workflow is green. Then create a GitHub release whose tag
+matches the package version:
 
 ```bash
-python3 -m twine upload --repository testpypi dist/*
+gh release create v1.0.0 --title "v1.0.0" --generate-notes
 ```
 
-Install the exact uploaded version into a new environment:
+Publishing the release runs `.github/workflows/publish.yml`. The workflow builds
+and checks new artifacts from the tag, transfers them to an isolated publishing
+job, obtains a short-lived PyPI credential through OpenID Connect, and uploads
+the distributions.
+
+After the workflow succeeds, install from the public index in a clean virtual
+environment:
 
 ```bash
-python3 -m pip install --index-url https://test.pypi.org/simple/ \
-  --no-deps supernote-module-generator==1.0.0
-supernote-module --version
-supernote-module --help
-```
-
-## Publish the verified files
-
-Upload the same files that passed TestPyPI verification:
-
-```bash
-python3 -m twine upload dist/*
+python3 -m venv /tmp/supernote-module-generator-smoke
+/tmp/supernote-module-generator-smoke/bin/python -m pip install \
+  supernote-module-generator==1.0.0
+/tmp/supernote-module-generator-smoke/bin/supernote-module --version
+/tmp/supernote-module-generator-smoke/bin/supernote-module --help
 ```
 
 PyPI does not permit replacing a file or reusing a published version. If an
