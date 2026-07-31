@@ -101,8 +101,19 @@ commit or back it up first.
 From the parent plugin root:
 
 ```bash
-bash deploy_plugin.sh
+./buildPlugin.sh
 ```
+
+On Windows PowerShell, run `.\buildPlugin.ps1` instead. Install the generated
+`build/outputs/<plugin-name>.snplg` with ADB (replace the placeholder with the
+generated filename):
+
+```bash
+adb push "build/outputs/<plugin-name>.snplg" /storage/emulated/0/MyStyle/
+```
+
+Alternatively, manually copy the `.snplg` file into the device's `MyStyle`
+folder. Then open **Settings > Apps > Plugins** and choose **Add Plugin**.
 
 The generator normally installs the local dependency during `add`; npm/Yarn
 links the package but does not compile or deploy it. If `--skip-install` was

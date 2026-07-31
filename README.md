@@ -36,11 +36,24 @@ Then:
 3. Enter the local package name, such as `local-math`.
 4. Accept the grey suggestions with Enter, or type replacements.
 5. Open the generated `local_modules/<package-name>/README.md`, edit the
-   user-owned example, and build/deploy the plugin:
+   user-owned example, and package the plugin from the plugin root:
 
 ```bash
-bash deploy_plugin.sh
+./buildPlugin.sh
 ```
+
+On Windows PowerShell, run `.\buildPlugin.ps1` instead. The package is written
+to `build/outputs/<plugin-name>.snplg`. Install it with ADB (replace the
+placeholder with the generated filename):
+
+```bash
+adb push "build/outputs/<plugin-name>.snplg" /storage/emulated/0/MyStyle/
+```
+
+Alternatively, manually copy the `.snplg` file into the device's `MyStyle`
+folder. Then open **Settings > Apps > Plugins** and choose **Add Plugin**. See
+Supernote's official [Package the Plugin](https://docs.supernote.com/en/first-plugin#package-the-plugin)
+instructions.
 
 Add executes after the final valid answer. It normally installs the new local
 npm/Yarn dependency; that links the package but does not compile or deploy the

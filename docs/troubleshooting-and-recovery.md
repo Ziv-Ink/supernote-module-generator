@@ -7,8 +7,19 @@ parent plugin. That operation does not compile Android code or deploy the
 plugin. After changing a native export, run from the plugin root:
 
 ```bash
-bash deploy_plugin.sh
+./buildPlugin.sh
 ```
+
+On Windows PowerShell, run `.\buildPlugin.ps1` instead. Install the generated
+`build/outputs/<plugin-name>.snplg` with ADB (replace the placeholder with the
+generated filename):
+
+```bash
+adb push "build/outputs/<plugin-name>.snplg" /storage/emulated/0/MyStyle/
+```
+
+Alternatively, manually copy the `.snplg` file into the device's `MyStyle`
+folder. Then open **Settings > Apps > Plugins** and choose **Add Plugin**.
 
 If `--skip-install` was used, run the parent project's package-manager install
 before building.

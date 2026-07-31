@@ -89,11 +89,22 @@ computation, or anything else that may block.
 From the parent plugin root:
 
 ```bash
-bash deploy_plugin.sh
+./buildPlugin.sh
 ```
 
-The Android build regenerates bridge code and `index.d.ts`. npm or Yarn only
-links the local package; it does not compile or deploy the plugin.
+On Windows PowerShell, run `.\buildPlugin.ps1` instead. The Android build
+regenerates bridge code and `index.d.ts`, then writes the plugin package to
+`build/outputs/<plugin-name>.snplg`. npm or Yarn only links the local package;
+it does not compile or deploy the plugin.
+
+To install with ADB, replace the placeholder with the generated filename:
+
+```bash
+adb push "build/outputs/<plugin-name>.snplg" /storage/emulated/0/MyStyle/
+```
+
+Alternatively, manually copy the `.snplg` file into the device's `MyStyle`
+folder. Then open **Settings > Apps > Plugins** and choose **Add Plugin**.
 
 You may also request a build during Add, Update, or Validate with `--build`.
 

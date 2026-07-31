@@ -92,8 +92,19 @@ module—including user source—so commit or back it up first.
 From the parent plugin root:
 
 ```bash
-bash deploy_plugin.sh
+./buildPlugin.sh
 ```
+
+On Windows PowerShell, run `.\buildPlugin.ps1` instead. Install the generated
+`build/outputs/<plugin-name>.snplg` with ADB (replace the placeholder with the
+generated filename):
+
+```bash
+adb push "build/outputs/<plugin-name>.snplg" /storage/emulated/0/MyStyle/
+```
+
+Alternatively, manually copy the `.snplg` file into the device's `MyStyle`
+folder. Then open **Settings > Apps > Plugins** and choose **Add Plugin**.
 
 npm/Yarn links the local package; it does not compile or deploy it. This module
 uses `minSdk 27`, `compileSdk 35`, JDK 17, C23, C++23, and `arm64-v8a`.

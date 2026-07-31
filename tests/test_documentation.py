@@ -149,8 +149,29 @@ def test_generated_module_readmes_are_complete(
     assert "## Names" in readme
     assert "## Ownership" in readme
     assert "## Build and troubleshoot" in readme
-    assert "bash deploy_plugin.sh" in readme
+    assert "./buildPlugin.sh" in readme
+    assert ".\\buildPlugin.ps1" in readme
+    assert "adb push" in readme
+    assert "/storage/emulated/0/MyStyle/" in readme
+    assert "manually copy" in readme
+    assert "deploy_plugin" not in readme
     assert not re.search(r"\$[A-Z][A-Z0-9_]*", readme)
+
+
+def test_current_documentation_does_not_reference_private_deploy_script():
+    documents = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
+    build_guides = {
+        ROOT / "README.md",
+        ROOT / "docs/writing-modules.md",
+        ROOT / "docs/troubleshooting-and-recovery.md",
+    }
+    for document in documents:
+        content = document.read_text(encoding="utf-8")
+        assert "deploy_plugin" not in content, document
+        if document in build_guides:
+            assert "./buildPlugin.sh" in content
+            assert "adb push" in content
+            assert "manually copy" in content
 
 
 def test_historical_audit_is_archived_and_marked_superseded():
