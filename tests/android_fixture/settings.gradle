@@ -1,0 +1,26 @@
+pluginManagement {
+    includeBuild(
+        new File(
+            System.getenv("SUPERNOTE_TEST_PLUGIN_ROOT"),
+            "node_modules/@react-native/gradle-plugin",
+        ),
+    )
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "supernote-module-generator-integration"
+include(":generated")
+project(":generated").projectDir =
+    new File(System.getenv("SUPERNOTE_TEST_MODULE_ANDROID"))

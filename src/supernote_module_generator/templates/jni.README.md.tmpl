@@ -1,0 +1,92 @@
+# $NPM_NAME_RAW
+
+This package is a **Native JNI module (Kotlin/Java with C/C++ called via JNI)**
+inside its parent Supernote plugin. You write ordinary C/C++; the generator
+owns Kotlin bridge methods, JNI conversion and registration, native loading,
+CMake, autolinking, and TypeScript declarations.
+
+## Write an exported function
+
+Put exports in any `.cc`, `.cpp`, or `.cxx` file beneath
+`android/src/main/cpp`:
+
+```cpp
+// @SupernoteExport
+double add(double left, double right) {
+  return left + right;
+}
+
+// @SupernoteExport(name = "greet")
+std::string makeGreeting(std::string name) {
+  return "Hello, " + name;
+}
+```
+
+`math.cpp`, `text.cpp`, `helpers.c`, and `helpers.h` are live, user-owned
+examples. The starter `add`, `negate`, and `greet` exports may be edited or
+removed.
+
+Tagged functions must be top-level C++ definitions with external C++ linkage,
+named parameters, and unique C++/JavaScript names across the module. Supported
+boundary types are exactly `bool`, `double`, and UTF-8 `std::string` by value,
+plus `void` returns. Overloads, namespaces, templates, `static`, `inline`,
+`constexpr`, `extern "C"`, default arguments, variadics, pointers, and
+references are unsupported.
+
+C files compile as C23 and may provide internal helpers, but cannot export.
+C++ files and generated bindings compile as C++23. Use ordinary `extern "C"`
+guards in headers when C++ calls a C helper.
+
+Do not define JNI functions, HostFunctions, `JNI_OnLoad`, native registration,
+loaders, or competing generated bootstrap symbols. Do not edit CMake.
+
+## Call it
+
+Value-returning exports are asynchronous promises:
+
+```typescript
+import $MODULE_NAME_RAW from '$NPM_NAME_RAW';
+
+const total = await $MODULE_NAME_RAW.add(20, 22);
+```
+
+`void` calls are fire-and-forget. Value failures reject their promise; `void`
+failures are logged. Generated JNI uses UTF-8 byte arrays for strings rather
+than JNI modified UTF-8.
+
+For file I/O, parsing, compression, networking, or other potentially blocking
+native work, this backend is preferable to synchronous JSI.
+
+## Ownership
+
+User-owned:
+
+- The complete `android/src/main/cpp/` tree.
+- Calls in the parent plugin's JavaScript and TypeScript source.
+
+Replaceable generator infrastructure:
+
+- `.supernote-module.json`, `package.json`, `index.js`,
+  `react-native.config.js`, `index.d.ts`, and this README.
+- `android/build.gradle.kts`, the manifest, and
+  `android/.supernote-module/`.
+- Generated Kotlin beneath `android/src/main/java/.../generated/`.
+- `android/build/generated/supernote/` and other Android build output.
+
+`update` preserves the complete C/C++ source tree. `remove` deletes the entire
+module—including user source—so commit or back it up first.
+
+## Build and troubleshoot
+
+From the parent plugin root:
+
+```bash
+bash deploy_plugin.sh
+```
+
+npm/Yarn links the local package; it does not compile or deploy it. This module
+uses `minSdk 27`, `compileSdk 35`, JDK 17, C23, C++23, and `arm64-v8a`.
+
+If `$MODULE_NAME_RAW` is not available, reinstall the local package if
+`--skip-install` was used, rebuild and redeploy, then inspect
+`SupernoteNative$MODULE_NAME_RAW` and `ReactNativeJS` in logcat.

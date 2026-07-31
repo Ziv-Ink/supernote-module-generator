@@ -1,0 +1,11 @@
+import {NativeModules, Platform} from 'react-native';
+
+const LINKING_ERROR =
+  '$MODULE_NAME_RAW from package $NPM_NAME_RAW is not available. Backend: Native JNI module (Kotlin/Java with C/C++ called via JNI). Install the local npm/Yarn dependency, then rebuild and redeploy the Supernote plugin. Check SupernoteNative$MODULE_NAME_RAW and ReactNativeJS in logcat.';
+const $MODULE_NAME_RAW =
+  Platform.OS === 'android' ? NativeModules.$MODULE_NAME_RAW : null;
+if (!$MODULE_NAME_RAW) {
+  throw new Error(LINKING_ERROR);
+}
+
+export default $MODULE_NAME_RAW;

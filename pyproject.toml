@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supernote-module-generator"
+version = "1.0.0"
+description = "Generate Kotlin/Java, JNI C/C++, and JSI modules for Supernote plugins"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{name = "Supernote module generator contributors"}]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+supernote-module = "supernote_module_generator.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+supernote_module_generator = ["templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

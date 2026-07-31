@@ -1,0 +1,115 @@
+plugins {
+  id("com.android.library")
+  kotlin("android")
+}
+
+android {
+  namespace = "$NAMESPACE"
+  compileSdk = 35
+
+  defaultConfig {
+    minSdk = $MIN_SDK
+    ndk {
+      abiFilters += "arm64-v8a"
+    }
+    externalNativeBuild {
+      cmake {
+        arguments += "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+
+  buildFeatures {
+    prefab = true
+  }
+
+  externalNativeBuild {
+    cmake {
+      path = file(".supernote-module/CMakeLists.txt")
+      version = "3.22.1"
+    }
+  }
+
+  sourceSets.getByName("main").java.srcDir(
+    layout.buildDirectory.dir("generated/supernote/java"),
+  )
+
+  compileOptions {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+  }
+
+  packaging {
+    jniLibs.excludes += setOf(
+      "**/libc++_shared.so",
+      "**/libfbjni.so",
+      "**/libhermes.so",
+      "**/libjsi.so",
+      "**/libreactnative.so",
+    )
+  }
+}
+
+val reactNativeVersion: String =
+  System.getenv("SUPERNOTE_REACT_NATIVE_VERSION")
+    ?: run {
+      val packageFile =
+        rootProject.projectDir.parentFile.resolve(
+          "node_modules/react-native/package.json",
+        )
+      require(packageFile.isFile) {
+        "Cannot find the parent plugin's React Native package at $packageFile"
+      }
+      val packageJson =
+        groovy.json.JsonSlurper().parseText(packageFile.readText()) as Map<*, *>
+      packageJson["version"] as? String
+        ?: error("React Native package.json has no version")
+    }
+
+dependencies {
+  implementation("com.facebook.react:react-android:$reactNativeVersion")
+}
+
+kotlin {
+  jvmToolchain(17)
+}
+
+val generateSupernoteBindings = tasks.register<Exec>("generateSupernoteBindings") {
+  val sourceRoot = file("src/main/cpp")
+  inputs.files(
+    fileTree(sourceRoot) {
+      include("**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx")
+      include(
+        "**/*.h",
+        "**/*.hh",
+        "**/*.hpp",
+        "**/*.hxx",
+        "**/*.inl",
+        "**/*.inc",
+        "**/*.ipp",
+        "**/*.tpp",
+      )
+    },
+  )
+  inputs.file(file(".supernote-module/codegen.py"))
+  inputs.file(file(".supernote-module/codegen-config.json"))
+  outputs.dir(layout.buildDirectory.dir("generated/supernote"))
+  outputs.file(file("../index.d.ts"))
+  workingDir(projectDir.parentFile)
+  commandLine(
+    System.getenv("SUPERNOTE_PYTHON") ?: "python3",
+    file(".supernote-module/codegen.py").absolutePath,
+    "--module-root",
+    projectDir.parentFile.absolutePath,
+  )
+}
+
+tasks.named("preBuild").configure {
+  dependsOn(generateSupernoteBindings)
+}
+
+tasks.configureEach {
+  if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
+    dependsOn(generateSupernoteBindings)
+  }
+}

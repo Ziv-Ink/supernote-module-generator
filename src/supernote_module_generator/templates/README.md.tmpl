@@ -1,0 +1,116 @@
+# $NPM_NAME_RAW
+
+This package is a **Native module (Kotlin/Java)** inside its parent Supernote
+plugin. It is not a separate plugin.
+
+## Write an exported method
+
+Edit Kotlin/Java files beneath:
+
+```text
+android/src/main/java/$PACKAGE_PATH/
+```
+
+`Example.kt` is live, user-owned starter code. You may edit or delete its
+example exports.
+
+```kotlin
+package $NAMESPACE
+
+import $ANNOTATION_FQCN
+
+class Example {
+  @SupernoteExport
+  fun add(left: Double, right: Double): Double = left + right
+
+  @SupernoteExport(name = "greet")
+  fun makeGreeting(name: String): String = "Hello, $name"
+}
+```
+
+Java uses the same annotation:
+
+```java
+@SupernoteExport
+public boolean negate(boolean value) {
+  return !value;
+}
+```
+
+Exported classes may have a public constructor taking
+`ReactApplicationContext`, a public constructor taking `android.content.Context`,
+or a public zero-argument constructor, in that preference order. Use injected
+Context for Android services, permissions, and content resolvers. Activity and
+arbitrary constructor injection are unsupported.
+
+Supported boundary types are `Boolean`/`boolean`, `Double`/`double`, `String`,
+and `Unit`/`void` returns. Exports may be spread across multiple Kotlin/Java
+files.
+
+## Call it
+
+Value-returning methods are asynchronous promises:
+
+```typescript
+import $MODULE_NAME_RAW from '$NPM_NAME_RAW';
+
+const total = await $MODULE_NAME_RAW.add(20, 22);
+```
+
+`Unit`/`void` methods are fire-and-forget:
+
+```typescript
+$MODULE_NAME_RAW.setEnabled(true);
+```
+
+Value failures reject their promise. Failures from `Unit`/`void` exports are
+logged with module/export context. The Android build regenerates `index.d.ts`.
+
+## Names
+
+| Name | Value |
+| --- | --- |
+| Package/import | `$NPM_NAME_RAW` |
+| JavaScript module | `$MODULE_NAME_RAW` |
+| Android namespace | `$NAMESPACE` |
+
+## Ownership
+
+User-owned:
+
+- Kotlin/Java implementation source beneath
+  `android/src/main/java/$PACKAGE_PATH/`.
+- Calls in the parent plugin's JavaScript and TypeScript source.
+
+Replaceable generator infrastructure:
+
+- `.supernote-module.json`, `package.json`, `index.js`,
+  `react-native.config.js`, `index.d.ts`, and this README.
+- `android/build.gradle.kts`, `android/autolink/`, and the manifest.
+- `android/.native-module/` and Android/KSP build output.
+- The marked registration block in the parent `android/settings.gradle`.
+
+Do not hand-edit replaceable files. `update` preserves implementation source.
+`remove` deletes the **entire** module directory, including user source, so
+commit or back it up first.
+
+## Build and troubleshoot
+
+From the parent plugin root:
+
+```bash
+bash deploy_plugin.sh
+```
+
+The generator normally installs the local dependency during `add`; npm/Yarn
+links the package but does not compile or deploy it. If `--skip-install` was
+used, run the relevant package-manager install before building.
+
+| Problem | Fix |
+| --- | --- |
+| `SupernoteExport` is unresolved | Import `$ANNOTATION_FQCN`. |
+| A new method is missing | Check supported types and `@SupernoteExport`, then rebuild. |
+| Context-dependent API cannot be used | Add a supported public Context constructor. |
+| Module is unavailable or not linked | Reinstall the local dependency, rebuild, redeploy, and inspect `ReactNativeJS` in logcat. |
+
+This package uses `minSdk 27`, `compileSdk 35`, and JDK 17.

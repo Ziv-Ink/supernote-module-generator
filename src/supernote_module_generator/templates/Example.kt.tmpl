@@ -1,0 +1,20 @@
+package $NAMESPACE
+
+import $ANNOTATION_FQCN
+
+/** Edit or delete this example after trying it from App.tsx. */
+class Example {
+  @SupernoteExport
+  fun add(left: Double, right: Double): Double = left + right
+
+  @SupernoteExport
+  fun greet(name: String): String = "Hello, $name"
+
+  @SupernoteExport
+  fun negate(value: Boolean): Boolean = !value
+
+  @SupernoteExport
+  fun setEnabled(enabled: Boolean) {
+    println("Enabled: $enabled")
+  }
+}
