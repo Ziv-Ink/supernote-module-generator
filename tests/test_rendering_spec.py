@@ -1,18 +1,30 @@
 from __future__ import annotations
 
 import io
+import time
+
+import pytest
 
 from supernote_module_generator.models import (
     CommandResult,
     DoctorCheckResult,
     DoctorResult,
     ErrorInfo,
+    WarningInfo,
 )
-from supernote_module_generator.rendering import Renderer, TerminalCapabilities
+from supernote_module_generator.rendering import (
+    ProgressReporter,
+    Renderer,
+    TerminalCapabilities,
+)
 
 
 def capabilities() -> TerminalCapabilities:
     return TerminalCapabilities(False, False, False, False, 80, 24)
+
+
+def cursor_capabilities() -> TerminalCapabilities:
+    return TerminalCapabilities(True, True, False, True, 80, 24)
 
 
 def test_doctor_report_goes_to_stdout_and_failure_summary_to_stderr():
@@ -38,7 +50,7 @@ def test_doctor_report_goes_to_stdout_and_failure_summary_to_stderr():
 
     renderer.render(result)
 
-    assert "Doctor — All" in stdout.getvalue()
+    assert "Doctor - All" in stdout.getvalue()
     assert "Node.js was not found." in stdout.getvalue()
     assert "Doctor found 1 required issue" in stderr.getvalue()
 
@@ -64,7 +76,7 @@ def test_successful_doctor_report_and_final_result_are_stdout_only():
         )
     )
 
-    assert "Doctor — Native Module" in stdout.getvalue()
+    assert "Doctor - Native Module" in stdout.getvalue()
     assert "Doctor found no required issues" in stdout.getvalue()
     assert stderr.getvalue() == ""
 
@@ -92,7 +104,7 @@ def test_quiet_doctor_keeps_advisories_but_suppresses_report_detail():
 
     assert stdout.getvalue() == "Doctor found no required issues\n"
     assert "Connected device: No authorized device is connected." in stderr.getvalue()
-    assert "Doctor — All" not in stdout.getvalue()
+    assert "Doctor - All" not in stdout.getvalue()
 
 
 def test_internal_error_wording_and_traceback_are_debug_only():
@@ -119,3 +131,80 @@ def test_internal_error_wording_and_traceback_are_debug_only():
     assert "Traceback text" not in ordinary_err.getvalue()
     assert "Transaction: abc123" in debug_err.getvalue()
     assert "Traceback text" in debug_err.getvalue()
+
+
+def test_animated_progress_clears_the_active_line_when_work_raises():
+    stderr = io.StringIO()
+    renderer = Renderer("human", cursor_capabilities(), stderr=stderr)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with ProgressReporter(renderer).phase("Waiting", "Waited"):
+            time.sleep(0.3)
+            raise RuntimeError("boom")
+
+    output = stderr.getvalue()
+    assert "Waiting" in output
+    assert output.endswith("\r\033[2K")
+
+
+def test_verbose_progress_is_static_while_subprocess_output_is_streamed():
+    stderr = io.StringIO()
+    renderer = Renderer("verbose", cursor_capabilities(), stderr=stderr)
+
+    with ProgressReporter(renderer).phase("Installing", "Installed"):
+        print("dependency output", file=renderer.stderr)
+
+    assert stderr.getvalue() == (
+        "... Installing\n"
+        "dependency output\n"
+        "✓ Installed\n"
+    )
+
+
+def test_plain_mode_overrides_cursor_capability_and_omits_elapsed_time():
+    stderr = io.StringIO()
+    renderer = Renderer(
+        "human",
+        cursor_capabilities(),
+        stderr=stderr,
+        plain=True,
+    )
+
+    with ProgressReporter(renderer).phase("Installing dependency", "Installed dependency"):
+        pass
+
+    assert stderr.getvalue() == (
+        "... Installing dependency\n"
+        "[OK] Installed dependency\n"
+    )
+    assert "\033" not in stderr.getvalue()
+
+
+def test_unicode_capable_doctor_keeps_the_interactive_em_dash():
+    stdout = io.StringIO()
+    renderer = Renderer("human", cursor_capabilities(), stdout=stdout)
+
+    renderer.render(
+        CommandResult(
+            "doctor",
+            doctor=DoctorResult("all", True, 0, 0, []),
+        )
+    )
+
+    assert "Doctor — All" in stdout.getvalue()
+
+
+def test_unicode_unsafe_fallback_guards_dynamic_text_and_navigation_symbols():
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    renderer = Renderer(
+        "human",
+        capabilities(),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    renderer.warning(WarningInfo("warning", "Café — ↑/↓ 🙂", "test"))
+
+    assert stderr.getvalue() == "[!] Caf\\xe9 - ^/v \\U0001f642\n"
+    assert stderr.getvalue().isascii()

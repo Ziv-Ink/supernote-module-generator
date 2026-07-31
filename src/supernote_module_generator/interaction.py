@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable, IO, Iterator, List, Optional, Sequence
 
 from .rendering import Renderer
+from .terminal_text import terminal_width
 
 
 class BackRequested(Exception):
@@ -37,6 +38,9 @@ class MenuItem:
     search_terms: Sequence[str] = field(default_factory=tuple)
     separator_before: bool = False
     completed_label: Optional[str] = None
+    plain_description: Optional[str] = None
+    plain_completed_label: Optional[str] = None
+    explanation: str = ""
 
 
 class KeyReader:
@@ -83,11 +87,11 @@ class KeyReader:
                 return {"H": "up", "P": "down", "K": "left", "M": "right", "S": "delete", "G": "home", "O": "end"}.get(msvcrt.getwch(), "ignore")
             return _single_event(first)
         descriptor = self.stream.fileno()
-        first = os.read(descriptor, 1).decode("utf-8", errors="ignore")
-        if not first:
+        first_byte = os.read(descriptor, 1)
+        if not first_byte:
             return "eof"
-        if first != "\x1b":
-            return _single_event(first)
+        if first_byte != b"\x1b":
+            return _single_event(_read_utf8_scalar(descriptor, first_byte))
         sequence = self._escape_sequence(descriptor)
         if sequence == "[200~":
             return "paste:" + self._paste(descriptor)
@@ -127,6 +131,28 @@ class KeyReader:
         return data.decode("utf-8", errors="replace")
 
 
+def _read_utf8_scalar(descriptor: int, first_byte: bytes) -> str:
+    lead = first_byte[0]
+    expected = (
+        1
+        if lead < 0x80
+        else 2
+        if 0xC2 <= lead <= 0xDF
+        else 3
+        if 0xE0 <= lead <= 0xEF
+        else 4
+        if 0xF0 <= lead <= 0xF4
+        else 1
+    )
+    data = bytearray(first_byte)
+    while len(data) < expected:
+        following = os.read(descriptor, expected - len(data))
+        if not following:
+            break
+        data.extend(following)
+    return bytes(data).decode("utf-8", errors="replace")
+
+
 def _single_event(character: str) -> str:
     return {
         "\r": "enter",
@@ -155,18 +181,20 @@ class Interaction:
         self.terminal = renderer.stderr
         self.keys = KeyReader(stdin, self.terminal, key_source)
         self.line_source = line_source
-        self.plain = not renderer.capabilities.cursor
+        self.plain = renderer.plain or not renderer.capabilities.cursor
 
     def header(self, command: Optional[str] = None) -> None:
         print(self.renderer.style("heading", "Supernote Module Generator"), file=self.terminal)
         if command:
             print(f"\n{self.renderer.style('heading', command)}", file=self.terminal)
+        print(file=self.terminal)
 
     def supporting_answer(self, label: str, value: str) -> None:
         print(self.renderer.style("dim", f"{label}:  {value}"), file=self.terminal)
 
     def answer(self, label: str, value: str) -> None:
-        print(f"{label}:  {value}", file=self.terminal)
+        separator = "" if label.endswith("?") else ":"
+        print(f"{label}{separator}  {value}", file=self.terminal)
 
     def info(self, text: str, *, dim: bool = False) -> None:
         print(self.renderer.style("dim" if dim else "bold", text), file=self.terminal)
@@ -176,6 +204,16 @@ class Interaction:
 
     def error(self, text: str) -> None:
         print(self.renderer.style("error", text), file=self.terminal)
+
+    def _clear_cursor_block(self, line_count: int) -> None:
+        """Clear a completed transient block and return to its first row."""
+        if line_count <= 0:
+            return
+        self.terminal.write(f"\033[{line_count}A")
+        for _ in range(line_count):
+            self.terminal.write("\r\033[2K\n")
+        self.terminal.write(f"\033[{line_count}A\r")
+        self.terminal.flush()
 
     def menu(
         self,
@@ -202,8 +240,17 @@ class Interaction:
         if label:
             print(f"{label}:", file=self.terminal)
         for index, item in enumerate(items, 1):
-            description = f" — {item.description}" if item.description else ""
+            plain_description = (
+                item.plain_description
+                if item.plain_description is not None
+                else item.description
+            )
+            description = f" - {plain_description}" if plain_description else ""
             print(f"  {index}. {item.label}{description}", file=self.terminal)
+            if item.explanation:
+                width = max(10, self.renderer.capabilities.columns - 5)
+                for line in textwrap.wrap(item.explanation, width=width):
+                    print(f"     {line}", file=self.terminal)
         accepts_package_name = searchable and label == "Module"
         prompt = (
             "Choose a number or package name: "
@@ -212,7 +259,11 @@ class Interaction:
         )
         print('Type ":back" for the previous question or ":cancel" to exit.', file=self.terminal)
         while True:
-            answer = self._line(prompt).strip()
+            raw_answer = self._line(prompt)
+            if "\n" in raw_answer or "\r" in raw_answer:
+                self.error("This field accepts one line. Paste a single value.")
+                continue
+            answer = raw_answer.strip()
             if answer == ":back":
                 raise BackRequested
             if answer == ":cancel":
@@ -226,10 +277,13 @@ class Interaction:
                 selected = next((item for item in items if item.value == answer), None)
             if selected is not None:
                 if collapse_label or label:
+                    completed = selected.completed_label or selected.label
                     self.answer(
                         collapse_label or label,
-                        selected.completed_label or selected.label,
+                        selected.plain_completed_label
+                        or completed.replace(" — ", " - "),
                     )
+                    print(file=self.terminal)
                 return selected.value
             self.error(
                 "Enter a listed number or exact package name."
@@ -252,6 +306,7 @@ class Interaction:
         filtering = False
         drawn = 0
         notice: Optional[str] = None
+        chosen: Optional[MenuItem] = None
         if label:
             print(f"{label}:", file=self.terminal)
 
@@ -264,7 +319,12 @@ class Interaction:
                 for index, item in enumerate(items)
                 if any(
                     lowered in value.casefold()
-                    for value in (item.label, item.description, *item.search_terms)
+                    for value in (
+                        item.label,
+                        item.description,
+                        item.explanation,
+                        *item.search_terms,
+                    )
                 )
             ]
 
@@ -297,6 +357,12 @@ class Interaction:
                 else:
                     row = f"{marker} {item.label}"
                 lines.append(self.renderer.style("active", row) if index == selected else row)
+                if item.explanation:
+                    width = max(10, terminal_size.columns - 4)
+                    for explanation_line in textwrap.wrap(item.explanation, width=width):
+                        lines.append(
+                            self.renderer.style("dim", f"    {explanation_line}")
+                        )
             if start + len(page) < len(visible_indexes):
                 lines.append("↓ more")
             if len(visible_indexes) > viewport:
@@ -323,8 +389,10 @@ class Interaction:
                 event = self.keys.read()
                 visible_indexes = matches()
                 if event == "cancel":
+                    self._clear_cursor_block(drawn + (1 if label else 0))
                     raise InterruptRequested
                 if event == "eof":
+                    self._clear_cursor_block(drawn + (1 if label else 0))
                     raise InputClosed
                 if event == "enter":
                     if selected is None or selected not in visible_indexes:
@@ -334,18 +402,8 @@ class Interaction:
                         continue
                     notice = None
                     chosen = items[selected]
-                    if drawn:
-                        self.terminal.write(f"\033[{drawn}A")
-                        for _ in range(drawn):
-                            self.terminal.write("\r\033[2K\n")
-                        self.terminal.write(f"\033[{drawn}A")
-                    self.terminal.flush()
-                    if collapse_label or label:
-                        self.answer(
-                            collapse_label or label,
-                            chosen.completed_label or chosen.label,
-                        )
-                    return chosen.value
+                    self._clear_cursor_block(drawn + (1 if label else 0))
+                    break
                 if event in {"up", "down"} and visible_indexes:
                     notice = None
                     if selected not in visible_indexes:
@@ -364,6 +422,7 @@ class Interaction:
                         selected = original
                         redraw()
                     else:
+                        self._clear_cursor_block(drawn + (1 if label else 0))
                         raise BackRequested
                     continue
                 if searchable and event == "char:/" and not filtering:
@@ -383,6 +442,14 @@ class Interaction:
                 if filtering and event.startswith("char:"):
                     query += event[5:]
                     redraw()
+        assert chosen is not None
+        if collapse_label or label:
+            self.answer(
+                collapse_label or label,
+                chosen.completed_label or chosen.label,
+            )
+            print(file=self.terminal)
+        return chosen.value
 
     def text(
         self,
@@ -426,15 +493,11 @@ class Interaction:
         bracket_default: bool,
     ) -> str:
         while True:
-            suffix = f" [{default}]" if default is not None and bracket_default else ""
-            print(f"{label}:{suffix}", file=self.terminal)
             if guidance:
-                print(f"  {guidance}", file=self.terminal)
-            prompt = (
-                f"[{default}] "
-                if default is not None and not bracket_default
-                else ""
-            )
+                print(self.renderer.style("dim", f"  {guidance}"), file=self.terminal)
+            prompt = f"{label}: "
+            if default is not None:
+                prompt += f"[{default}] "
             value = self._line(prompt)
             if value == ":back":
                 raise BackRequested
@@ -461,6 +524,7 @@ class Interaction:
                 self.error(str(exc))
                 continue
             self.answer(label.replace(" (optional)", ""), value)
+            print(file=self.terminal)
             return value
 
     def _cursor_text(
@@ -474,62 +538,97 @@ class Interaction:
         bracket_default: bool,
     ) -> str:
         while True:
-            suffix = f" [{default}]" if default is not None and bracket_default else ""
-            print(f"{label}:{suffix}", file=self.terminal)
+            block_lines = 1 + (1 if guidance else 0)
             if guidance:
-                print(f"  {guidance}", file=self.terminal)
+                print(self.renderer.style("dim", f"  {guidance}"), file=self.terminal)
             buffer = list(default or "") if not bracket_default else []
             cursor = len(buffer)
-            self.terminal.write(self.renderer.symbols["active"] + " ")
-            self.terminal.write("".join(buffer))
+            prompt = f"{label}: "
+            self.terminal.write(prompt)
+            initial = "".join(buffer)
+            self.terminal.write(
+                initial
+                if initial or default is None or not bracket_default
+                else self.renderer.style("dim", default)
+            )
             self.terminal.flush()
-            rejected_paste = False
-            with self.keys.raw():
-                while True:
-                    event = self.keys.read()
-                    if event == "cancel":
-                        raise InterruptRequested
-                    if event == "eof":
-                        raise InputClosed
-                    if event == "escape":
-                        raise BackRequested
-                    if event == "enter":
-                        break
-                    if event.startswith("paste:"):
-                        pasted = event[6:]
-                        if "\n" in pasted or "\r" in pasted:
-                            rejected_paste = True
+            try:
+                with self.keys.raw():
+                    while True:
+                        event = self.keys.read()
+                        if event == "cancel":
+                            raise InterruptRequested
+                        if event == "eof":
+                            raise InputClosed
+                        if event == "escape":
+                            raise BackRequested
+                        if event == "enter":
                             break
-                        buffer[cursor:cursor] = list(pasted)
-                        cursor += len(pasted)
-                    elif event.startswith("char:"):
-                        value = event[5:]
-                        buffer[cursor:cursor] = [value]
-                        cursor += 1
-                    elif event == "left":
-                        cursor = max(0, cursor - 1)
-                    elif event == "right":
-                        cursor = min(len(buffer), cursor + 1)
-                    elif event == "home":
-                        cursor = 0
-                    elif event == "end":
-                        cursor = len(buffer)
-                    elif event == "backspace" and cursor:
-                        del buffer[cursor - 1]
-                        cursor -= 1
-                    elif event == "delete" and cursor < len(buffer):
-                        del buffer[cursor]
-                    elif event == "clear":
-                        buffer = []
-                        cursor = 0
-                    self.terminal.write("\r\033[2K" + self.renderer.symbols["active"] + " " + "".join(buffer))
-                    if len(buffer) > cursor:
-                        self.terminal.write(f"\033[{len(buffer) - cursor}D")
-                    self.terminal.flush()
-            self.terminal.write("\n")
-            if rejected_paste:
-                self.error("This field accepts one line. Paste a single value.")
-                continue
+                        if event.startswith("paste:"):
+                            pasted = event[6:]
+                            if "\n" in pasted or "\r" in pasted:
+                                message = self.renderer.style(
+                                    "error",
+                                    "This field accepts one line. Paste a single value.",
+                                )
+                                self.terminal.write(
+                                    "\r\033[2K"
+                                    + message
+                                    + "\r\n"
+                                    + prompt
+                                    + (
+                                        "".join(buffer)
+                                        if buffer or default is None or not bracket_default
+                                        else self.renderer.style("dim", default)
+                                    )
+                                )
+                                block_lines += 1
+                                self.terminal.flush()
+                                continue
+                            buffer[cursor:cursor] = list(pasted)
+                            cursor += len(pasted)
+                        elif event.startswith("char:"):
+                            inserted = event[5:]
+                            buffer[cursor:cursor] = list(inserted)
+                            cursor += len(inserted)
+                        elif event == "left":
+                            cursor = max(0, cursor - 1)
+                        elif event == "right":
+                            cursor = min(len(buffer), cursor + 1)
+                        elif event == "home":
+                            cursor = 0
+                        elif event == "end":
+                            cursor = len(buffer)
+                        elif event == "backspace" and cursor:
+                            del buffer[cursor - 1]
+                            cursor -= 1
+                        elif event == "delete" and cursor < len(buffer):
+                            del buffer[cursor]
+                        elif event == "clear":
+                            buffer = []
+                            cursor = 0
+                        content = "".join(buffer)
+                        displayed = (
+                            content
+                            if content or default is None or not bracket_default
+                            else self.renderer.style("dim", default)
+                        )
+                        self.terminal.write(
+                            "\r\033[2K" + prompt + displayed
+                        )
+                        if content:
+                            move_left = terminal_width(content) - terminal_width(
+                                "".join(buffer[:cursor])
+                            )
+                            if move_left > 0:
+                                self.terminal.write(f"\033[{move_left}D")
+                        self.terminal.flush()
+            except (InterruptRequested, InputClosed, BackRequested):
+                self.terminal.write("\r\n")
+                self._clear_cursor_block(block_lines)
+                raise
+            self.terminal.write("\r\n")
+            self._clear_cursor_block(block_lines)
             value = "".join(buffer)
             if not value and default is not None:
                 value = default
@@ -549,6 +648,7 @@ class Interaction:
                 self.error(str(exc))
                 continue
             self.answer(label.replace(" (optional)", ""), value)
+            print(file=self.terminal)
             return value
 
     def confirm(self, prompt: str, *, default: bool) -> bool:
@@ -569,10 +669,17 @@ class Interaction:
             if value == ":cancel":
                 raise CancelRequested
             if not value:
-                return default
+                answer = default
+                self.answer(prompt, "Yes" if answer else "No")
+                print(file=self.terminal)
+                return answer
             if value in {"y", "yes"}:
+                self.answer(prompt, "Yes")
+                print(file=self.terminal)
                 return True
             if value in {"n", "no"}:
+                self.answer(prompt, "No")
+                print(file=self.terminal)
                 return False
             self.error("Enter yes or no.")
 
@@ -653,13 +760,19 @@ class Interaction:
             while True:
                 event = self.keys.read()
                 if event == "cancel":
+                    self.terminal.write("\r\033[2K")
+                    self.terminal.flush()
                     raise InterruptRequested
                 if event == "eof":
+                    self.terminal.write("\r\033[2K")
+                    self.terminal.flush()
                     raise InputClosed
                 if event == "escape":
+                    self.terminal.write("\r\033[2K")
+                    self.terminal.flush()
                     raise BackRequested
                 if event == "enter":
-                    self.terminal.write("\n")
+                    self.terminal.write("\r\033[2K")
                     self.terminal.flush()
                     return "".join(buffer)
                 if event == "backspace" and buffer:
@@ -669,9 +782,13 @@ class Interaction:
                 elif event.startswith("paste:"):
                     pasted = event[6:]
                     if "\n" in pasted or "\r" in pasted:
-                        self.terminal.write("\n")
-                        self.error("This field accepts one line. Paste a single value.")
-                        self.terminal.write(prompt)
+                        message = self.renderer.style(
+                            "error",
+                            "This field accepts one line. Paste a single value.",
+                        )
+                        self.terminal.write(
+                            "\r\033[2K" + message + "\r\n" + prompt + "".join(buffer)
+                        )
                     else:
                         buffer.extend(pasted)
                 elif event.startswith("char:"):

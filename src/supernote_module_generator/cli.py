@@ -37,9 +37,16 @@ from .workflows import DecisionCollector, ReturnToMenu
 
 # Stable labels retained as importable constants for integrations and tests.
 BACKEND_CHOICES = [
-    ("native", "Native Module      Kotlin/Java through the React Native bridge"),
-    ("jni", "Native JNI Module  C/C++ through JNI"),
-    ("jsi", "JSI Module         Synchronous C/C++ through JSI"),
+    (
+        "native",
+        "Native Module — For coding in Kotlin/Java and/or using Android APIs.",
+    ),
+    (
+        "jni",
+        "Native JNI Module — For combining Android APIs with existing or "
+        "performance-intensive C/C++ code.",
+    ),
+    ("jsi", "JSI Module — For low-latency synchronous calls from JavaScript."),
 ]
 BACKEND_UI_CHOICES = BACKEND_CHOICES
 MAIN_ACTION_CHOICES = [
@@ -86,7 +93,14 @@ def _renderer(
         plain=plain or mode == "json",
         no_color=no_color or mode == "json",
     )
-    return Renderer(mode, capabilities, stdout=stdout, stderr=stderr, debug=debug)
+    return Renderer(
+        mode,
+        capabilities,
+        stdout=stdout,
+        stderr=stderr,
+        debug=debug,
+        plain=plain,
+    )
 
 
 def _guess_command(arguments: List[str]) -> str:

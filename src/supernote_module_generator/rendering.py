@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import IO, Callable, Iterator, Optional
 
 from .models import CommandResult, ErrorInfo, WarningInfo
+from .terminal_text import AsciiTextStream
 
 
 @dataclass(frozen=True)
@@ -83,11 +84,14 @@ class Renderer:
         stdout: IO[str] = sys.stdout,
         stderr: IO[str] = sys.stderr,
         debug: bool = False,
+        plain: bool = False,
     ) -> None:
         self.mode = mode
         self.capabilities = capabilities
-        self.stdout = stdout
-        self.stderr = stderr
+        self.plain = plain
+        ascii_output = plain or not capabilities.unicode
+        self.stdout = AsciiTextStream(stdout) if ascii_output else stdout
+        self.stderr = AsciiTextStream(stderr) if ascii_output else stderr
         self.debug = debug
         self.pending_warnings: list[WarningInfo] = []
         self.progress_emitted = False
@@ -108,8 +112,12 @@ class Renderer:
         return f"\033[{code}m{text}\033[0m" if code else text
 
     @property
+    def unicode_presentation(self) -> bool:
+        return self.capabilities.unicode and not self.plain
+
+    @property
     def symbols(self) -> dict[str, str]:
-        if self.capabilities.unicode:
+        if self.unicode_presentation:
             return {"success": "✓", "failure": "×", "warning": "!", "active": "›"}
         return {"success": "[OK]", "failure": "[X]", "warning": "[!]", "active": ">"}
 
@@ -211,7 +219,10 @@ class Renderer:
     def _render_failure(self, result: CommandResult) -> None:
         error = result.error
         if error is None:
-            print("× Internal error", file=self.stderr)
+            print(
+                self.style("error", f"{self.symbols['failure']} Internal error"),
+                file=self.stderr,
+            )
             return
         if result.exit_code == 2:
             print(f"error: {error.message}", file=self.stderr)
@@ -382,7 +393,11 @@ class Renderer:
             "jni": "Native JNI Module",
             "jsi": "JSI Module",
         }.get(result.doctor.scope, result.doctor.scope)
-        print(f"Supernote Module Generator\n\nDoctor — {scope}\n", file=self.stdout)
+        separator = "—" if self.unicode_presentation else "-"
+        print(
+            f"Supernote Module Generator\n\nDoctor {separator} {scope}\n",
+            file=self.stdout,
+        )
         groups = (
             (
                 "Project",
@@ -455,7 +470,7 @@ class Renderer:
                 symbol = self.symbols["warning"]
                 role = "warning"
             else:
-                symbol = "—" if self.capabilities.unicode else "[-]"
+                symbol = "—" if self.unicode_presentation else "[-]"
                 role = "dim"
             print(self.style(role, f"{symbol} {label:<12}{message}"), file=self.stdout)
             for check in failed_checks:
@@ -486,7 +501,13 @@ class ProgressReporter:
         if mode in {"quiet", "json"}:
             yield handle
             return
-        capable = self.renderer.capabilities.cursor
+        # Animated cursor redraws cannot safely share stderr with unchanged
+        # verbose subprocess output. Verbose mode uses static phase lines.
+        capable = (
+            self.renderer.capabilities.cursor
+            and mode != "verbose"
+            and not self.renderer.plain
+        )
         plain = not capable
         started = time.monotonic()
         stopped = threading.Event()
@@ -519,7 +540,7 @@ class ProgressReporter:
             index = 0
             frames = (
                 self.SPINNER
-                if self.renderer.capabilities.unicode
+                if self.renderer.unicode_presentation
                 else ("|", "/", "-", "\\")
             )
             while not stopped.is_set():
@@ -543,10 +564,14 @@ class ProgressReporter:
         finally:
             stopped.set()
             thread.join(timeout=0.5)
-        elapsed = time.monotonic() - started
-        if shown.is_set():
-            print("\r\033[2K", end="", file=self.renderer.stderr)
-        else:
+            if shown.is_set():
+                print(
+                    "\r\033[2K",
+                    end="",
+                    file=self.renderer.stderr,
+                    flush=True,
+                )
+        if not shown.is_set():
             self.renderer.progress_emitted = True
         print(
             self.renderer.style(

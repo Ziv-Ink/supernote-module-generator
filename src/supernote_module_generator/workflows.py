@@ -47,6 +47,9 @@ TYPE_ITEMS = [
         "Kotlin/Java",
         ("Kotlin/Java through the React Native bridge",),
         completed_label="Native Module — Kotlin/Java",
+        plain_description="Kotlin/Java",
+        plain_completed_label="Native Module - Kotlin/Java",
+        explanation="For coding in Kotlin/Java and/or using Android APIs.",
     ),
     MenuItem(
         "jni",
@@ -54,6 +57,12 @@ TYPE_ITEMS = [
         "C/C++ via JNI",
         ("C/C++ through JNI",),
         completed_label="Native JNI Module — C/C++ via JNI",
+        plain_description="C/C++ via JNI",
+        plain_completed_label="Native JNI Module - C/C++ via JNI",
+        explanation=(
+            "For combining Android APIs with existing or performance-intensive "
+            "C/C++ code."
+        ),
     ),
     MenuItem(
         "jsi",
@@ -61,6 +70,9 @@ TYPE_ITEMS = [
         "C/C++ (synchronous)",
         ("Synchronous C/C++ through JSI",),
         completed_label="JSI Module — C/C++ (synchronous)",
+        plain_description="C/C++",
+        plain_completed_label="JSI Module - C/C++",
+        explanation="For low-latency synchronous calls from JavaScript.",
     ),
 ]
 DOCTOR_ITEMS = [
@@ -79,7 +91,6 @@ class AddState(Enum):
     TYPE = auto()
     PACKAGE = auto()
     DESCRIPTION = auto()
-    CUSTOMIZE = auto()
     JAVASCRIPT = auto()
     NAMESPACE = auto()
     VERSION = auto()
@@ -260,7 +271,6 @@ class DecisionCollector:
             "javascript": javascript_arg,
             "namespace": namespace_arg,
             "version": version_arg,
-            "customize": None,
             "install": False if self.args.has("skip_install") else None,
             "manager": self.args.value("package_manager"),
         }
@@ -268,8 +278,8 @@ class DecisionCollector:
             values["type"] = values["type"] or "native"
             values["description"] = values["description"] if "description" in explicit else ""
             values["version"] = values["version"] or "0.1.0"
-            values["customize"] = False
             values["install"] = not self.args.has("skip_install")
+        supporting_answers = False
         for label, key in (
             ("Module type", "type"),
             ("Package name", "package"),
@@ -287,6 +297,9 @@ class DecisionCollector:
                 else:
                     shown = str(values[key]) if values[key] != "" else "(omitted)"
                 self.ui.supporting_answer(label, shown)
+                supporting_answers = True
+        if supporting_answers:
+            print(file=self.ui.terminal)
 
         state = AddState.TYPE
         history: List[AddState] = []
@@ -335,25 +348,6 @@ class DecisionCollector:
                             optional=True,
                         )
                         values["description"] = value
-                    state = AddState.CUSTOMIZE
-                elif state is AddState.CUSTOMIZE:
-                    advanced_explicit = {"javascript_name", "android_namespace", "package_version"}.issubset(explicit)
-                    if (values["customize"] is None or revisiting) and not advanced_explicit:
-                        prompted = True
-                        previous_customize = values["customize"]
-                        values["customize"] = self.ui.confirm(
-                            "Customize names and version?",
-                            default=bool(values["customize"]) if revisiting else False,
-                        )
-                        if values["customize"] != previous_customize:
-                            for argument_name, value_name in (
-                                ("javascript_name", "javascript"),
-                                ("android_namespace", "namespace"),
-                                ("package_version", "version"),
-                            ):
-                                if argument_name not in explicit:
-                                    values[value_name] = None
-                        self.ui.answer("Customize names and version?", "Yes" if values["customize"] else "No")
                     state = AddState.JAVASCRIPT
                 elif state is AddState.JAVASCRIPT:
                     package = str(values["package"])
@@ -362,13 +356,15 @@ class DecisionCollector:
                     except ValidationError:
                         derived = None
                     if values["javascript"] is None or revisiting:
-                        if values["customize"] or derived is None:
+                        if not self.args.has("yes") or derived is None or revisiting:
                             prompted = True
+                            suggested = str(values["javascript"] or derived or "") or None
                             values["javascript"] = self.ui.text(
                                 "JavaScript name",
-                                default=str(values["javascript"] or derived or "") or None,
+                                default=suggested,
                                 validate=validate_javascript_name,
                                 normalize=self._normalize_identifier,
+                                bracket_default=suggested is not None,
                             )
                         else:
                             values["javascript"] = derived
@@ -381,11 +377,12 @@ class DecisionCollector:
                     except ValidationError:
                         derived_namespace = None
                     if values["namespace"] is None or revisiting:
-                        if values["customize"] or derived_namespace is None:
+                        if not self.args.has("yes") or derived_namespace is None or revisiting:
                             prompted = True
+                            suggested = str(values["namespace"] or derived_namespace or "") or None
                             values["namespace"] = self.ui.text(
                                 "Android namespace",
-                                default=str(values["namespace"] or derived_namespace or "") or None,
+                                default=suggested,
                                 guidance=(
                                     "Enter a Java-style namespace, for example com.example.local_math."
                                     if derived_namespace is None
@@ -393,6 +390,7 @@ class DecisionCollector:
                                 ),
                                 validate=validate_android_namespace,
                                 normalize=self._normalize_identifier,
+                                bracket_default=suggested is not None,
                             )
                         else:
                             values["namespace"] = derived_namespace
@@ -400,18 +398,14 @@ class DecisionCollector:
                     state = AddState.VERSION
                 elif state is AddState.VERSION:
                     if values["version"] is None or revisiting:
-                        if values["customize"]:
-                            prompted = True
-                            values["version"] = self.ui.text(
-                                "Package version",
-                                default=str(values["version"] or "0.1.0"),
-                                validate=validate_package_version,
-                                normalize=self._normalize_identifier,
-                                bracket_default=True,
-                            )
-                        else:
-                            values["version"] = "0.1.0"
-                            self.ui.answer("Package version", "0.1.0  (default)")
+                        prompted = True
+                        values["version"] = self.ui.text(
+                            "Package version",
+                            default=str(values["version"] or "0.1.0"),
+                            validate=validate_package_version,
+                            normalize=self._normalize_identifier,
+                            bracket_default=True,
+                        )
                     state = AddState.INSTALL
                 elif state is AddState.INSTALL:
                     if values["install"] is None or revisiting:
@@ -420,7 +414,6 @@ class DecisionCollector:
                             "Install the local dependency now?",
                             default=bool(values["install"]) if revisiting else True,
                         )
-                        self.ui.answer("Install the local dependency now?", "Yes" if values["install"] else "No")
                     state = AddState.MANAGER
                 elif state is AddState.MANAGER:
                     if values["install"]:

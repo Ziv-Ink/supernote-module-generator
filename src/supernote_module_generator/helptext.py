@@ -21,9 +21,13 @@ Commands:
   help       Show help for a command.
 
 Module types:
-  Native Module      Kotlin/Java through the React Native bridge
-  Native JNI Module  C/C++ through JNI
-  JSI Module         Synchronous C/C++ through JSI
+  Native Module
+    For coding in Kotlin/Java and/or using Android APIs.
+  Native JNI Module
+    For combining Android APIs with existing or performance-intensive C/C++
+    code.
+  JSI Module
+    For low-latency synchronous calls from JavaScript.
 
 Global options:
   -h, --help      Show help.
@@ -76,8 +80,9 @@ Output options:
       --debug                     Include internal diagnostics and tracebacks.
 
 Interactive behavior:
-  Missing values are requested in a linear wizard. Add executes after the final
-  valid answer without a confirmation. Dependency installation defaults to Yes.
+  Missing values are requested in a linear wizard. Derived names and version
+  appear as editable input placeholders; Enter accepts them. Add executes after
+  the final valid answer without a confirmation. Installation defaults to Yes.
 
 Non-interactive behavior:
   Input is never requested. PACKAGE is always required. Without --yes, --type

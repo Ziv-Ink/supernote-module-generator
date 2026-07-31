@@ -30,7 +30,7 @@ def plugin(tmp_path: Path) -> Path:
 
 def test_plain_guided_add_uses_linear_questions_and_executes_without_review(tmp_path: Path):
     root = plugin(tmp_path)
-    stdin = TtyStringIO("1\nlocal-guided\n\n\n")
+    stdin = TtyStringIO("1\nlocal-guided\n\n\n\n\n")
     stdout = TtyStringIO()
     stderr = TtyStringIO()
     code = main(
@@ -48,11 +48,27 @@ def test_plain_guided_add_uses_linear_questions_and_executes_without_review(tmp_
     assert "Choose a number or package name:" not in transcript
     assert "Package name:" in transcript
     assert "Description (optional):" in transcript
-    assert "Customize names and version? [y/N]:" in transcript
+    assert "Customize names and version?" not in transcript
+    assert "JavaScript name: [Guided] " in transcript
+    assert "Android namespace: [com.example.guided] " in transcript
+    assert "Package version: [0.1.0] " in transcript
+    assert "For coding in Kotlin/Java and/or using Android APIs." in transcript
+    assert (
+        "For combining Android APIs with existing or performance-intensive"
+        in transcript
+    )
+    assert "For low-latency synchronous calls from JavaScript." in transcript
+    assert "Add module\n\nModule type:" in transcript
+    assert "Module type:  Native Module - Kotlin/Java\n\n  Used as" in transcript
+    assert "  Used as the local folder" in transcript
+    assert "npm or Yarn dependency name.\nPackage name: " in transcript
+    assert "\n\n\n" not in transcript
     assert "Add this module?" not in transcript
     assert "0.0s" not in transcript
     assert "0.1s" not in transcript
-    assert "Module type:  Native Module — Kotlin/Java" in transcript
+    assert "Module type:  Native Module - Kotlin/Java" in transcript
+    assert transcript.isascii()
+    assert stdout.getvalue().isascii()
 
 
 def test_plain_main_menu_exit_has_no_final_output(tmp_path: Path):
@@ -64,6 +80,35 @@ def test_plain_main_menu_exit_has_no_final_output(tmp_path: Path):
     assert code == 0
     assert stdout.getvalue() == ""
     assert "Supernote Module Generator" in stderr.getvalue()
+
+
+def test_guided_add_suggestions_are_editable_without_a_customize_gate(tmp_path: Path):
+    root = plugin(tmp_path)
+    stdin = TtyStringIO(
+        "1\nlocal-custom\n\nCustomBridge\ncom.acme.custom\n2.3.4\n"
+    )
+    stdout = TtyStringIO()
+    stderr = TtyStringIO()
+
+    code = main(
+        ["--plain", "add", "--skip-install"],
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        cwd=root,
+    )
+
+    metadata = json.loads(
+        (root / "local_modules/local-custom/.supernote-module.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert code == 0
+    assert metadata["module_name"] == "CustomBridge"
+    assert metadata["android_namespace"] == "com.acme.custom"
+    assert metadata["package_version"] == "2.3.4"
+    assert "Customize names and version?" not in stderr.getvalue()
+    assert "JavaScript name:  CustomBridge" in stderr.getvalue()
 
 
 def test_invalid_explicit_value_is_rejected_before_wizard_header(tmp_path: Path):
@@ -119,9 +164,23 @@ def test_help_broken_pipe_exits_without_an_exception(tmp_path: Path):
     assert main(["--help"], stdout=BrokenOutput(), stderr=io.StringIO(), cwd=tmp_path) == 0
 
 
+def test_root_help_uses_the_approved_module_explanations(tmp_path: Path):
+    stdout = io.StringIO()
+
+    assert main(["--help"], stdout=stdout, stderr=io.StringIO(), cwd=tmp_path) == 0
+
+    output = stdout.getvalue()
+    assert "For coding in Kotlin/Java and/or using Android APIs." in output
+    assert (
+        "For combining Android APIs with existing or performance-intensive C/C++"
+        in output
+    )
+    assert "For low-latency synchronous calls from JavaScript." in output
+
+
 def test_back_reopens_previous_add_answer_for_editing(tmp_path: Path):
     root = plugin(tmp_path)
-    stdin = TtyStringIO("1\nlocal-first\n:back\nlocal-second\n\n\n")
+    stdin = TtyStringIO("1\nlocal-first\n:back\nlocal-second\n\n\n\n\n")
     stdout = TtyStringIO()
     stderr = TtyStringIO()
 

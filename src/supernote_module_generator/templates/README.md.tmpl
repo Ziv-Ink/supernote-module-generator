@@ -1,9 +1,11 @@
 # $NPM_NAME_RAW
 
-This package is a **Native module (Kotlin/Java)** inside its parent Supernote
-plugin. It is not a separate plugin.
+This package is a **Native Module** inside its parent Supernote plugin. It is not
+a separate plugin.
 
-## Write an exported method
+For coding in Kotlin/Java and/or using Android APIs.
+
+## First edit: export a method
 
 Edit Kotlin/Java files beneath:
 
@@ -47,7 +49,7 @@ Supported boundary types are `Boolean`/`boolean`, `Double`/`double`, `String`,
 and `Unit`/`void` returns. Exports may be spread across multiple Kotlin/Java
 files.
 
-## Call it
+## Call it from JavaScript or TypeScript
 
 Value-returning methods are asynchronous promises:
 

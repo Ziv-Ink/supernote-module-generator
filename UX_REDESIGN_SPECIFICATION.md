@@ -2,13 +2,15 @@
 
 Status: Approved design  
 Audience: CLI/TUI implementation, QA, documentation, and product review  
-Design baseline: `UX_AUDIT_2026-07-31.md`  
+Design baseline: historical `docs/history/UX_AUDIT_2026-07-31.md`
 Interface generation: First public interface; no legacy compatibility contract
 
 This document is normative. Words such as **must**, **must not**, **should**, and
 **may** describe implementation requirements. Examples are exact unless marked
 as illustrative. An engineer should be able to implement the interface from
 this specification without making additional product-design decisions.
+End-user setup and programming guidance belongs in `README.md` and `docs/`;
+users do not need this specification to operate the generator.
 
 ## 1. UX philosophy
 
@@ -166,9 +168,12 @@ jsi
 The user-facing labels are:
 
 ```text
-Native Module      Kotlin/Java through the React Native bridge
-Native JNI Module  C/C++ through JNI
-JSI Module         Synchronous C/C++ through JSI
+Native Module
+  For coding in Kotlin/Java and/or using Android APIs.
+Native JNI Module
+  For combining Android APIs with existing or performance-intensive C/C++ code.
+JSI Module
+  For low-latency synchronous calls from JavaScript.
 ```
 
 There are no aliases for `kotlin`, `cpp`, `--add`, or other legacy forms.
@@ -210,7 +215,8 @@ Wizard output is append-only:
 
 - completed questions remain visible;
 - prior screens are never cleared;
-- only the currently active arrow-key menu or spinner redraws in place;
+- only the currently active arrow-key menu, text field, or spinner redraws in
+  place;
 - after a menu selection, that menu collapses in place to one completed-answer
   line before the next prompt is appended.
 
@@ -349,7 +355,8 @@ module types.
 ### 6.5 Spacing and rhythm
 
 - One blank line follows the application/command context.
-- No blank line appears between a label and its immediate hint.
+- No blank line appears between an immediate hint and its prompt line.
+- One blank line separates each completed prompt from the next active prompt.
 - One blank line separates a completed wizard form from execution progress.
 - One blank line separates progress from final result.
 - Tables use two spaces between aligned columns.
@@ -362,6 +369,9 @@ module types.
 
 - At 72 columns or wider, menu descriptions appear in an aligned second column.
 - Below 72 columns, menu descriptions are hidden; labels remain one line.
+- Module-type use explanations remain visible beneath their choices at every
+  width and wrap at word boundaries. They are guidance, not the optional aligned
+  description column.
 - At any width, long prose wraps at words, never inside words.
 - Active lists use terminal height to calculate a viewport. At least three
   items, the filter row, and the keyboard hint must remain visible.
@@ -463,10 +473,9 @@ patronizing.
 | Module type | Native Module (`native`) |
 | Package name | None; required |
 | Description | Omitted |
-| Customize names/version | No |
-| JavaScript name | Deterministically derived |
-| Android namespace | Deterministically derived |
-| Package version | `0.1.0` |
+| JavaScript name | Deterministically derived and shown as an editable suggestion |
+| Android namespace | Deterministically derived and shown as an editable suggestion |
+| Package version | `0.1.0`, shown as an editable suggestion |
 | Install dependency now | Yes |
 | Build | No; only `--build` requests it |
 | Final confirmation | None |
@@ -1309,31 +1318,37 @@ Question order:
 1. Module type, unless supplied.
 2. Package name, unless supplied positionally.
 3. Description (optional), unless supplied.
-4. `Customize names and version? [y/N]:`, unless every advanced value is
+4. JavaScript name with its derived value as an editable suggestion, unless
    supplied or `--yes` is active.
-5. JavaScript name, Android namespace, and package version when customization
-   is selected or a default cannot be derived.
-6. `Install the local dependency now? [Y/n]:`, unless decided by
+5. Android namespace with its derived value as an editable suggestion, unless
+   supplied or `--yes` is active.
+6. Package version with `0.1.0` as an editable suggestion, unless supplied or
+   `--yes` is active.
+7. `Install the local dependency now? [Y/n]:`, unless decided by
    `--skip-install` or non-interactive `--yes`.
-7. Package manager only when installation is selected and project evidence does
+8. Package manager only when installation is selected and project evidence does
    not unambiguously select one.
-8. Execute immediately.
+9. Execute immediately.
 
 Values supplied on the command line are shown in the persistent answer history
 as dim supporting information and are not prompted again. They receive the same
 validation as typed values.
 
 Blank Description omits the `description` field. `--description ""` does the
-same. Customize defaults to No and applies documented derivations. Install
-defaults to Yes.
+same. Suggested values appear dim in the active input position after the prompt
+colon in a capable cursor terminal. The field label, colon, input, and
+placeholder occupy one line. The suggestion disappears when the user enters
+text and reappears if the field is cleared. Enter on an untouched or cleared
+field accepts the suggestion. Plain mode renders
+`<label>: [<suggestion>]` because it cannot communicate the placeholder through
+color. Install defaults to Yes.
 
 If a default cannot be derived interactively, the flow does not fail. It
 replaces the relevant default with a required prompt:
 
 ```text
-Android namespace:
   Enter a Java-style namespace, for example com.example.local_math.
-›
+Android namespace:
 ```
 
 The user may go back with `Esc` at any point. A valid final answer begins
@@ -1559,8 +1574,12 @@ Add module
 
 Module type:
 › Native Module      Kotlin/Java
+    For coding in Kotlin/Java and/or using Android APIs.
   Native JNI Module  C/C++ via JNI
+    For combining Android APIs with existing or performance-intensive C/C++
+    code.
   JSI Module         C/C++ (synchronous)
+    For low-latency synchronous calls from JavaScript.
 
 ↑/↓ move  Enter select  / filter  Esc back
 ```
@@ -1574,9 +1593,8 @@ Add module
 
 Module type:  Native Module — Kotlin/Java
 
-Package name:
   Used as the local folder and npm or Yarn dependency name.
-›
+Package name:
 ```
 
 Then:
@@ -1585,7 +1603,6 @@ Then:
 Package name:  local-math
 
 Description (optional):
-›
 ```
 
 Then:
@@ -1593,42 +1610,27 @@ Then:
 ```text
 Description:  Fast local math operations
 
-Customize names and version? [y/N]:
+JavaScript name: Math
 ```
 
-Default path:
-
-```text
-Customize names and version?  No
-
-JavaScript name:   Math              (derived)
-Android namespace: com.example.math  (derived)
-Package version:   0.1.0             (default)
-
-Install the local dependency now? [Y/n]:
-```
-
-Customized path:
-
-```text
-Customize names and version?  Yes
-
-JavaScript name:
-› Math
-```
+After accepting or editing the suggestion:
 
 ```text
 JavaScript name:  Math
 
-Android namespace:
-› com.example.math
+Android namespace: com.example.math
 ```
 
 ```text
 Android namespace:  com.example.math
 
-Package version: [0.1.0]
-›
+Package version: 0.1.0
+```
+
+```text
+Package version:  0.1.0
+
+Install the local dependency now? [Y/n]:
 ```
 
 When a package manager question is required:
@@ -1769,9 +1771,13 @@ as a direct command, the message prints and exits `0`.
 
 ```text
 Module type:
-  1. Native Module — Kotlin/Java
-  2. Native JNI Module — C/C++ via JNI
-  3. JSI Module — C/C++ (synchronous)
+  1. Native Module - Kotlin/Java
+     For coding in Kotlin/Java and/or using Android APIs.
+  2. Native JNI Module - C/C++ via JNI
+     For combining Android APIs with existing or performance-intensive C/C++
+     code.
+  3. JSI Module - C/C++
+     For low-latency synchronous calls from JavaScript.
 Choose [1-3]:
 ```
 
@@ -1780,9 +1786,9 @@ exact package name:
 
 ```text
 Module:
-  1. local-math — Native Module
-  2. native-search — Native JNI Module
-  3. stylus-jsi — JSI Module
+  1. local-math - Native Module
+  2. native-search - Native JNI Module
+  3. stylus-jsi - JSI Module
 Choose a number or package name:
 ```
 
@@ -1807,10 +1813,9 @@ The complete prompt vocabulary is:
 | Type | `Module type:` |
 | Package name | `Package name:` |
 | Description | `Description (optional):` |
-| Customize | `Customize names and version? [y/N]:` |
-| JavaScript name | `JavaScript name:` |
-| Namespace | `Android namespace:` |
-| Version | `Package version: [0.1.0]` |
+| JavaScript name | `JavaScript name:` with a derived placeholder |
+| Namespace | `Android namespace:` with a derived placeholder |
+| Version | `Package version:` with a `0.1.0` placeholder |
 | Install | `Install the local dependency now? [Y/n]:` |
 | Manager | `Package manager:` |
 | Select one | `Module:` |
@@ -2320,7 +2325,8 @@ prints a traceback by default.
 ## 21. Complete help screens
 
 Help is rendered without color or cursor control so it is safe to redirect.
-Options appear in the order shown.
+Options appear in the order shown. These fenced screens must match the runtime
+help strings byte for byte; automated conformance tests enforce that contract.
 
 ### 21.1 Root
 
@@ -2342,9 +2348,13 @@ Commands:
   help       Show help for a command.
 
 Module types:
-  Native Module      Kotlin/Java through the React Native bridge
-  Native JNI Module  C/C++ through JNI
-  JSI Module         Synchronous C/C++ through JSI
+  Native Module
+    For coding in Kotlin/Java and/or using Android APIs.
+  Native JNI Module
+    For combining Android APIs with existing or performance-intensive C/C++
+    code.
+  JSI Module
+    For low-latency synchronous calls from JavaScript.
 
 Global options:
   -h, --help      Show help.
@@ -2400,8 +2410,9 @@ Output options:
       --debug                     Include internal diagnostics and tracebacks.
 
 Interactive behavior:
-  Missing values are requested in a linear wizard. Add executes after the final
-  valid answer without a confirmation. Dependency installation defaults to Yes.
+  Missing values are requested in a linear wizard. Derived names and version
+  appear as editable input placeholders; Enter accepts them. Add executes after
+  the final valid answer without a confirmation. Installation defaults to Yes.
 
 Non-interactive behavior:
   Input is never requested. PACKAGE is always required. Without --yes, --type
@@ -2787,8 +2798,8 @@ For a first-time user:
 
 - visible type labels answer both “what am I building?” and “what code will I
   write?”;
-- field order follows the user's mental model from module identity to optional
-  customization to installation;
+- field order follows the user's mental model from module identity through
+  editable suggestions to installation;
 - safe defaults are visible before acceptance;
 - inline validation prevents late surprises;
 - one sentence of guidance appears only where the label cannot carry the full

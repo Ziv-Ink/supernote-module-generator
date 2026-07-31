@@ -1,11 +1,15 @@
 # $NPM_NAME_RAW
 
-This package is a **Native JNI module (Kotlin/Java with C/C++ called via JNI)**
-inside its parent Supernote plugin. You write ordinary C/C++; the generator
-owns Kotlin bridge methods, JNI conversion and registration, native loading,
-CMake, autolinking, and TypeScript declarations.
+This package is a **Native JNI Module** inside its parent Supernote plugin. It is
+not a separate plugin.
 
-## Write an exported function
+For combining Android APIs with existing or performance-intensive C/C++ code.
+
+You write ordinary C/C++; the generator owns Kotlin bridge methods, JNI
+conversion and registration, native loading, CMake, autolinking, and TypeScript
+declarations.
+
+## First edit: export a function
 
 Put exports in any `.cc`, `.cpp`, or `.cxx` file beneath
 `android/src/main/cpp`:
@@ -40,7 +44,7 @@ guards in headers when C++ calls a C helper.
 Do not define JNI functions, HostFunctions, `JNI_OnLoad`, native registration,
 loaders, or competing generated bootstrap symbols. Do not edit CMake.
 
-## Call it
+## Call it from JavaScript or TypeScript
 
 Value-returning exports are asynchronous promises:
 
@@ -56,6 +60,14 @@ than JNI modified UTF-8.
 
 For file I/O, parsing, compression, networking, or other potentially blocking
 native work, this backend is preferable to synchronous JSI.
+
+## Names
+
+| Name | Value |
+| --- | --- |
+| Package/import | `$NPM_NAME_RAW` |
+| JavaScript module | `$MODULE_NAME_RAW` |
+| Android namespace | `$NAMESPACE` |
 
 ## Ownership
 
