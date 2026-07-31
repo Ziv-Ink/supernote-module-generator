@@ -14,6 +14,7 @@ def test_setup_cfg_is_the_single_metadata_source():
     setup = (ROOT / "setup.cfg").read_text(encoding="utf-8")
 
     assert not (ROOT / "setup.py").exists()
+    assert not (ROOT / "__init__.py").exists()
     assert "setuptools.build_meta" in pyproject
     assert "[project]" not in pyproject
     assert "version = attr: supernote_module_generator.__version__" in setup
