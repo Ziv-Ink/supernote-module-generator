@@ -17,10 +17,16 @@ Not sure which one fits? Read [Choosing a module](docs/choosing-a-module.md).
 
 ## Quick start
 
-Run the generator from your **Supernote plugin root**:
+Install the generator:
 
 ```bash
-python3 supernote_module_generator/supernote_module.py
+python3 -m pip install supernote-module-generator
+```
+
+Then run it from your **Supernote plugin root**:
+
+```bash
+supernote-module
 ```
 
 Then:
@@ -56,22 +62,15 @@ For a complete first export and call example, read
 Use **Doctor** to inspect the environment without changing the project:
 
 ```bash
-python3 supernote_module_generator/supernote_module.py doctor
+supernote-module doctor
 ```
 
 Doctor checks all module types by default. Use `--type native`, `--type jni`, or
 `--type jsi` to check one module type.
 
-## Install
+## Install from source
 
-After the package is published on PyPI:
-
-```bash
-python3 -m pip install supernote-module-generator
-supernote-module
-```
-
-To install this source checkout into a virtual environment before publication:
+To install a source checkout into a virtual environment:
 
 ```bash
 python3 -m pip install ./supernote_module_generator
