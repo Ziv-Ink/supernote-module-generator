@@ -49,6 +49,22 @@ def test_cursor_menu_stops_at_boundaries_and_has_no_q_binding():
     ) == "c"
 
 
+def test_cursor_menu_has_no_filter_mode_or_filter_hint():
+    render, _, stderr = renderer(cursor=True)
+    ui = Interaction(
+        render,
+        key_source=source(["char:/", "char:b", "enter"]),
+    )
+
+    assert ui.menu(
+        "Module",
+        [MenuItem("alpha", "alpha"), MenuItem("beta", "beta")],
+        default="alpha",
+    ) == "alpha"
+    assert "/ filter" not in stderr.getvalue()
+    assert "Filter:" not in stderr.getvalue()
+
+
 def test_cursor_menu_restores_terminal_before_collapsing_selected_answer():
     render, _, stderr = renderer(cursor=True)
     ui = Interaction(render, key_source=source(["down", "enter"]))
@@ -79,7 +95,6 @@ def test_cursor_menu_restores_terminal_before_collapsing_selected_answer():
             MenuItem("jsi", "JSI Module", completed_label="JSI Module — C/C++ (synchronous)"),
         ],
         default="native",
-        searchable=True,
         collapse_label="Module type",
     ) == "jsi"
 
@@ -88,7 +103,7 @@ def test_cursor_menu_restores_terminal_before_collapsing_selected_answer():
     assert output.endswith("Module type:  JSI Module — C/C++ (synchronous)\n\n")
 
 
-def test_cursor_text_collapses_label_guidance_and_input_before_answer():
+def test_cursor_text_keeps_the_normal_inline_prompt_and_typed_value():
     render, _, stderr = renderer(cursor=True)
     ui = Interaction(
         render,
@@ -98,8 +113,32 @@ def test_cursor_text_collapses_label_guidance_and_input_before_answer():
     assert ui.text("Package name", guidance="Used as the local folder.") == "local"
 
     output = stderr.getvalue()
-    assert "\033[2A" in output
-    assert output.endswith("Package name:  local\n\n")
+    assert "\033[2A" not in output
+    assert output.endswith("Package name: local\r\n")
+
+
+def test_plain_text_keeps_input_on_the_prompt_line_without_duplicate_answer():
+    render, _, stderr = renderer(cursor=False)
+    ui = Interaction(
+        render,
+        stdin=io.StringIO(),
+        line_source=lambda: "local-math",
+    )
+
+    assert ui.text("Package name") == "local-math"
+    assert stderr.getvalue() == "Package name: local-math\n"
+
+
+def test_plain_default_stays_dimless_and_inline_when_enter_accepts_it():
+    render, _, stderr = renderer(cursor=False)
+    ui = Interaction(
+        render,
+        stdin=io.StringIO(),
+        line_source=lambda: "\n",
+    )
+
+    assert ui.text("JavaScript name", default="Math", ghost_default=True) == "Math"
+    assert stderr.getvalue() == "JavaScript name [Math]: \n"
 
 
 def test_utf8_keyboard_input_is_read_as_one_unicode_scalar():
@@ -142,13 +181,12 @@ def test_back_clears_active_cursor_menu_and_text_blocks():
     assert text_stderr.getvalue().endswith("\033[2A\r")
 
 
-def test_cursor_confirmation_collapses_to_one_answer_without_extra_colon():
+def test_cursor_confirmation_keeps_the_normal_inline_default_prompt():
     render, _, stderr = renderer(cursor=True)
     ui = Interaction(render, key_source=source(["enter"]))
 
     assert not ui.confirm("Run an Android build too?", default=False)
-    assert stderr.getvalue().endswith("Run an Android build too?  No\n\n")
-    assert "?:" not in stderr.getvalue()
+    assert stderr.getvalue() == "Run an Android build too? [y/N]: \r\n"
 
 
 def test_cursor_default_suggestion_is_dim_in_input_and_enter_accepts_it():
@@ -161,7 +199,7 @@ def test_cursor_default_suggestion_is_dim_in_input_and_enter_accepts_it():
     assert ui.text(
         "JavaScript name",
         default="Math",
-        bracket_default=True,
+        ghost_default=True,
     ) == "Math"
 
     assert "JavaScript name: \033[2mMath\033[0m" in stderr.getvalue()
@@ -180,7 +218,7 @@ def test_cursor_default_suggestion_disappears_when_typing_and_returns_when_clear
     assert ui.text(
         "JavaScript name",
         default="Math",
-        bracket_default=True,
+        ghost_default=True,
     ) == "C"
 
     output = stderr.getvalue()
@@ -189,31 +227,12 @@ def test_cursor_default_suggestion_disappears_when_typing_and_returns_when_clear
     assert output.count("JavaScript name: \033[2mMath\033[0m") >= 2
 
 
-def test_filter_starts_only_after_slash_and_esc_clears_before_back():
-    render, _, stderr = renderer(cursor=True)
-    ui = Interaction(
-        render,
-        key_source=source(
-            ["char:m", "char:/", "char:z", "escape", "char:/", "char:b", "enter"]
-        ),
-    )
-    result = ui.menu(
-        "Module",
-        [MenuItem("alpha", "alpha"), MenuItem("beta", "beta")],
-        default="alpha",
-        searchable=True,
-    )
-    assert result == "beta"
-    assert "No matching modules." in stderr.getvalue()
-
-
-def test_menu_explanation_is_dim_and_searchable():
+def test_menu_explanation_is_dim():
     stdout = io.StringIO()
     stderr = io.StringIO()
     capabilities = TerminalCapabilities(True, True, True, True, 80, 24)
     render = Renderer("human", capabilities, stdout=stdout, stderr=stderr)
-    events = ["char:/", *(f"char:{character}" for character in "latency"), "enter"]
-    ui = Interaction(render, key_source=source(events))
+    ui = Interaction(render, key_source=source(["down", "enter"]))
 
     assert ui.menu(
         "Module type",
@@ -230,42 +249,11 @@ def test_menu_explanation_is_dim_and_searchable():
             ),
         ],
         default="native",
-        searchable=True,
     ) == "jsi"
 
     assert "\033[2m    For low-latency synchronous calls from JavaScript.\033[0m" in (
         stderr.getvalue()
     )
-
-
-@pytest.mark.parametrize("query", ["stylusapi", "local_modules/stylus-jsi"])
-def test_module_filter_matches_javascript_name_and_relative_path(query: str):
-    render, _, _ = renderer(cursor=True)
-    events = ["char:/", *(f"char:{character}" for character in query), "enter"]
-    ui = Interaction(render, key_source=source(events))
-
-    result = ui.menu(
-        "Module",
-        [
-            MenuItem(
-                "local-math",
-                "local-math",
-                "Native Module",
-                ("Math", "local_modules/local-math"),
-            ),
-            MenuItem(
-                "stylus-jsi",
-                "stylus-jsi",
-                "JSI Module",
-                ("StylusApi", "local_modules/stylus-jsi"),
-            ),
-        ],
-        default="local-math",
-        searchable=True,
-    )
-
-    assert result == "stylus-jsi"
-
 
 def test_no_initial_selection_enter_does_nothing_and_warns():
     render, _, stderr = renderer(cursor=True)

@@ -196,7 +196,7 @@ Supernote Module Generator
   Help             Show commands and usage.
   Exit              Close the generator.
 
-↑/↓ move  Enter select  / filter  Esc exit
+↑/↓ move  Enter select  Esc exit
 ```
 
 Rules:
@@ -217,6 +217,8 @@ Wizard output is append-only:
 - prior screens are never cleared;
 - only the currently active arrow-key menu, text field, or spinner redraws in
   place;
+- completed text and confirmation prompts remain exactly as entered on their
+  original line; they are not reformatted as separate answer rows;
 - after a menu selection, that menu collapses in place to one completed-answer
   line before the next prompt is appended.
 
@@ -256,15 +258,11 @@ Normal capable-terminal mode supports only:
 | --- | --- |
 | `↑` / `↓` | Move selection; stop at list boundaries |
 | `Enter` | Confirm the current selection |
-| `Esc` | Clear an active filter; otherwise go back |
-| `/` | Start filtering a searchable list |
-| `Backspace` | Remove the last filter character |
-| Printable characters | Enter filter text only after `/` |
+| `Esc` | Go back |
 | `Ctrl+C` | Cancel the entire operation |
 
 There are no Vim `j`/`k` bindings, number shortcuts, Tab navigation, or bare
-`q`/`b` commands. `q`, `quit`, `b`, and `back` remain valid field data and
-search characters.
+`q`/`b` commands. `q`, `quit`, `b`, and `back` remain valid field data.
 
 When a list has no selection—for example, conflicting lockfiles—Enter does
 nothing and displays:
@@ -275,16 +273,12 @@ nothing and displays:
 
 No terminal bell is used.
 
-### 5.5 Search
+### 5.5 Menu text input
 
-- `/` opens an inline `Filter:` row.
-- Filtering is case-insensitive. The main menu matches action labels and
-  descriptions. Module selectors match package name, module-type label,
-  JavaScript name, and relative module path.
-- The list updates on every character.
-- Esc clears the filter first; a second Esc goes back.
-- No match displays `No matching modules.` without changing selection.
-- Page position and match count are visible: `1–6 of 18`.
+Cursor menus do not implement text filtering. Printable characters, including
+`/`, have no effect. Users select with Up, Down, and Enter. Plain-mode module
+lists additionally accept an exact package name so scripts and screen-reader
+users do not have to count list positions.
 
 ## 6. Visual language guide
 
@@ -356,8 +350,10 @@ module types.
 
 - One blank line follows the application/command context.
 - No blank line appears between an immediate hint and its prompt line.
-- One blank line separates each completed prompt from the next active prompt.
-- One blank line separates a completed wizard form from execution progress.
+- Consecutive text and confirmation prompts use adjacent lines, matching a
+  normal terminal form.
+- A blank line is optional between the completed wizard form and execution
+  progress.
 - One blank line separates progress from final result.
 - Tables use two spaces between aligned columns.
 - Supporting details are indented two spaces; nested subprocess excerpts are
@@ -374,7 +370,7 @@ module types.
   description column.
 - At any width, long prose wraps at words, never inside words.
 - Active lists use terminal height to calculate a viewport. At least three
-  items, the filter row, and the keyboard hint must remain visible.
+  items and the keyboard hint must remain visible.
 - Module selectors do not show paths; this avoids truncating them in menus.
 - Paths in errors, final results, and recovery commands are printed in full on
   their own line so they remain copyable.
@@ -1335,13 +1331,12 @@ as dim supporting information and are not prompted again. They receive the same
 validation as typed values.
 
 Blank Description omits the `description` field. `--description ""` does the
-same. Suggested values appear dim in the active input position after the prompt
-colon in a capable cursor terminal. The field label, colon, input, and
-placeholder occupy one line. The suggestion disappears when the user enters
-text and reappears if the field is cleared. Enter on an untouched or cleared
-field accepts the suggestion. Plain mode renders
-`<label>: [<suggestion>]` because it cannot communicate the placeholder through
-color. Install defaults to Yes.
+same. In a capable cursor terminal, suggested values appear dim in the input
+position after the colon: `<label>: <suggestion>`. Only the suggestion is dim.
+It disappears when the user enters text and reappears if the field is cleared.
+Enter on an untouched or cleared field accepts the suggestion. Because plain
+mode cannot communicate a suggestion with color, it uses the explicit fallback
+`<label> [<suggestion>]:`. Install defaults to Yes.
 
 If a default cannot be derived interactively, the flow does not fail. It
 replaces the relevant default with a required prompt:
@@ -1546,7 +1541,7 @@ Supernote Module Generator
   Help              Show commands and usage.
   Exit              Close the generator.
 
-↑/↓ move  Enter select  / filter  Esc exit
+↑/↓ move  Enter select  Esc exit
 ```
 
 Narrow terminal:
@@ -1562,7 +1557,7 @@ Supernote Module Generator
   Help
   Exit
 
-↑/↓ move  Enter select  / filter  Esc exit
+↑/↓ move  Enter select  Esc exit
 ```
 
 ### 17.2 Add
@@ -1581,7 +1576,7 @@ Module type:
   JSI Module         C/C++ (synchronous)
     For low-latency synchronous calls from JavaScript.
 
-↑/↓ move  Enter select  / filter  Esc back
+↑/↓ move  Enter select  Esc back
 ```
 
 After selection, the answer remains:
@@ -1600,44 +1595,42 @@ Package name:
 Then:
 
 ```text
-Package name:  local-math
-
+Package name: local-math
 Description (optional):
 ```
 
 Then:
 
 ```text
-Description:  Fast local math operations
-
+Description (optional): Fast local math operations
 JavaScript name: Math
 ```
 
-After accepting or editing the suggestion:
+After accepting the suggestion with Enter, the original prompt remains and the
+next prompt follows it. `Math` and the other suggested values below are dim:
 
 ```text
-JavaScript name:  Math
-
+JavaScript name: Math
 Android namespace: com.example.math
 ```
 
 ```text
-Android namespace:  com.example.math
-
+Android namespace: com.example.math
 Package version: 0.1.0
 ```
 
 ```text
-Package version:  0.1.0
-
+Package version: 0.1.0
 Install the local dependency now? [Y/n]:
 ```
+
+Typing a replacement removes the suggestion and keeps the typed value on the
+same line, for example `JavaScript name: CustomMath`.
 
 When a package manager question is required:
 
 ```text
-Install the local dependency now?  Yes
-
+Install the local dependency now? [Y/n]:
 Package manager:
 › npm
   Yarn
@@ -1648,8 +1641,7 @@ Package manager:
 With conflicting lockfiles:
 
 ```text
-Install the local dependency now?  Yes
-
+Install the local dependency now? [Y/n]:
 ! Both package-lock.json and yarn.lock were found.
 
 Package manager:
@@ -1676,7 +1668,7 @@ Module:
   native-search    Native JNI Module
   stylus-jsi       JSI Module
 
-↑/↓ move  Enter select  / filter  Esc back
+↑/↓ move  Enter select  Esc back
 ```
 
 Validate includes a synthetic All choice first:
@@ -1781,8 +1773,7 @@ Module type:
 Choose [1-3]:
 ```
 
-There is no `/` filtering in plain mode. Searchable lists accept a number or an
-exact package name:
+Plain-mode module lists accept a number or an exact package name:
 
 ```text
 Module:
@@ -1813,9 +1804,9 @@ The complete prompt vocabulary is:
 | Type | `Module type:` |
 | Package name | `Package name:` |
 | Description | `Description (optional):` |
-| JavaScript name | `JavaScript name:` with a derived placeholder |
-| Namespace | `Android namespace:` with a derived placeholder |
-| Version | `Package version:` with a `0.1.0` placeholder |
+| JavaScript name | `JavaScript name: <derived>` (dim suggestion) |
+| Namespace | `Android namespace: <derived>` (dim suggestion) |
+| Version | `Package version: 0.1.0` (dim suggestion) |
 | Install | `Install the local dependency now? [Y/n]:` |
 | Manager | `Package manager:` |
 | Select one | `Module:` |
@@ -2411,7 +2402,7 @@ Output options:
 
 Interactive behavior:
   Missing values are requested in a linear wizard. Derived names and version
-  appear as editable input placeholders; Enter accepts them. Add executes after
+  appear as dim inline suggestions; Enter accepts them. Add executes after
   the final valid answer without a confirmation. Installation defaults to Yes.
 
 Non-interactive behavior:
@@ -2662,38 +2653,18 @@ the process invocation path, to `supernote-module help <command>`.
 | Up | Move to the previous visible enabled item; stop at the first. |
 | Down | Move to the next visible enabled item; stop at the last. |
 | Enter | Select the active item. Does nothing when no item is active. |
-| `/` | Enter filter mode on searchable lists. |
-| Esc | Clear a non-empty filter; otherwise go to the previous question. |
+| Esc | Go to the previous question. |
 | Ctrl+C | Cancel the whole operation. |
 
 Menus do not wrap. Disabled items, if ever introduced, cannot receive focus.
 There are no number shortcuts, Vim bindings, Page Up/Down behavior, or
 single-letter action keys in the cursor UI.
 
-### 22.2 Filter controls
+### 22.2 Printable menu input
 
-While filtering:
-
-| Key | Behavior |
-|---|---|
-| Printable text | Append to the filter. |
-| Backspace | Remove one Unicode scalar value. |
-| Ctrl+W | Remove the previous whitespace-delimited word. |
-| Enter | Select the active result. |
-| Esc | Clear the filter and retain the original selection when visible. |
-| Ctrl+C | Cancel the operation. |
-
-Matching follows the complete search contract in section 5.5. It is
-case-insensitive. The main menu matches action labels and descriptions. Module
-selectors match package name, visible module-type label, JavaScript name, and
-relative module path. This section defines filter keyboard behavior; it does
-not narrow the searchable fields. The matched substring may be emphasized but
-color is not required. Zero results shows the canonical message:
-
-```text
-No matching modules.
-Esc clear filter
-```
+Cursor menus ignore printable characters, including `/`. They never open a
+filter or alter the active selection. Text entry begins only after the user has
+entered a text field.
 
 ### 22.3 Text controls
 
@@ -2726,7 +2697,7 @@ Esc from the main menu exits `0`.
 
 ### 22.5 Terminal resize
 
-Resize is handled without losing the selected item, filter, text buffer, or
+Resize is handled without losing the selected item, text buffer, or
 wizard history. The next render applies the responsive rules. A resize never
 submits or cancels input.
 

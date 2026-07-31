@@ -45,7 +45,6 @@ TYPE_ITEMS = [
         "native",
         "Native Module",
         "Kotlin/Java",
-        ("Kotlin/Java through the React Native bridge",),
         completed_label="Native Module — Kotlin/Java",
         plain_description="Kotlin/Java",
         plain_completed_label="Native Module - Kotlin/Java",
@@ -55,7 +54,6 @@ TYPE_ITEMS = [
         "jni",
         "Native JNI Module",
         "C/C++ via JNI",
-        ("C/C++ through JNI",),
         completed_label="Native JNI Module — C/C++ via JNI",
         plain_description="C/C++ via JNI",
         plain_completed_label="Native JNI Module - C/C++ via JNI",
@@ -68,7 +66,6 @@ TYPE_ITEMS = [
         "jsi",
         "JSI Module",
         "C/C++ (synchronous)",
-        ("Synchronous C/C++ through JSI",),
         completed_label="JSI Module — C/C++ (synchronous)",
         plain_description="C/C++",
         plain_completed_label="JSI Module - C/C++",
@@ -316,7 +313,6 @@ class DecisionCollector:
                             "Module type",
                             TYPE_ITEMS,
                             default=str(values["type"] or "native"),
-                            searchable=True,
                             collapse_label="Module type",
                         )
                     state = AddState.PACKAGE
@@ -364,7 +360,7 @@ class DecisionCollector:
                                 default=suggested,
                                 validate=validate_javascript_name,
                                 normalize=self._normalize_identifier,
-                                bracket_default=suggested is not None,
+                                ghost_default=suggested is not None,
                             )
                         else:
                             values["javascript"] = derived
@@ -390,7 +386,7 @@ class DecisionCollector:
                                 ),
                                 validate=validate_android_namespace,
                                 normalize=self._normalize_identifier,
-                                bracket_default=suggested is not None,
+                                ghost_default=suggested is not None,
                             )
                         else:
                             values["namespace"] = derived_namespace
@@ -404,7 +400,7 @@ class DecisionCollector:
                             default=str(values["version"] or "0.1.0"),
                             validate=validate_package_version,
                             normalize=self._normalize_identifier,
-                            bracket_default=True,
+                            ghost_default=True,
                         )
                     state = AddState.INSTALL
                 elif state is AddState.INSTALL:
@@ -538,11 +534,6 @@ class DecisionCollector:
                 module.config.npm_name,
                 module.config.npm_name,
                 module.info().type_label,
-                (
-                    module.config.module_name,
-                    str(module.path.relative_to(self.root)),
-                    module.info().type_label,
-                ),
             )
             for module in modules
         ]
@@ -561,7 +552,6 @@ class DecisionCollector:
             "Module",
             items,
             default=items[0].value,
-            searchable=True,
             collapse_label="Module",
         )
         return (modules, True) if selected == "__all__" else ([find_module(self.root, selected)], False)

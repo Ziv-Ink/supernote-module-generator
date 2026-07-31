@@ -49,9 +49,9 @@ def test_plain_guided_add_uses_linear_questions_and_executes_without_review(tmp_
     assert "Package name:" in transcript
     assert "Description (optional):" in transcript
     assert "Customize names and version?" not in transcript
-    assert "JavaScript name: [Guided] " in transcript
-    assert "Android namespace: [com.example.guided] " in transcript
-    assert "Package version: [0.1.0] " in transcript
+    assert "JavaScript name [Guided]: " in transcript
+    assert "Android namespace [com.example.guided]: " in transcript
+    assert "Package version [0.1.0]: " in transcript
     assert "For coding in Kotlin/Java and/or using Android APIs." in transcript
     assert (
         "For combining Android APIs with existing or performance-intensive"
@@ -108,7 +108,7 @@ def test_guided_add_suggestions_are_editable_without_a_customize_gate(tmp_path: 
     assert metadata["android_namespace"] == "com.acme.custom"
     assert metadata["package_version"] == "2.3.4"
     assert "Customize names and version?" not in stderr.getvalue()
-    assert "JavaScript name:  CustomBridge" in stderr.getvalue()
+    assert "JavaScript name [Custom]: " in stderr.getvalue()
 
 
 def test_invalid_explicit_value_is_rejected_before_wizard_header(tmp_path: Path):
@@ -195,7 +195,9 @@ def test_back_reopens_previous_add_answer_for_editing(tmp_path: Path):
     assert code == 0
     assert (root / "local_modules/local-second").is_dir()
     assert not (root / "local_modules/local-first").exists()
-    assert stderr.getvalue().count("Package name:") >= 2
+    transcript = stderr.getvalue()
+    assert "Package name:" in transcript
+    assert "Package name [local-first]:" in transcript
 
 
 def test_remove_yes_never_bypasses_confirmation_without_an_explicit_target(tmp_path: Path):

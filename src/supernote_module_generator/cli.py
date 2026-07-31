@@ -484,7 +484,6 @@ def _interactive_loop(
                 "",
                 INVALID_ROOT_ITEMS,
                 default="doctor",
-                searchable=False,
                 footer="Esc exit",
             )
         except InterruptRequested:
@@ -534,7 +533,6 @@ def _interactive_loop(
                 "",
                 MAIN_MENU_ITEMS,
                 default="add",
-                searchable=True,
                 footer="Esc exit",
             )
         except InterruptRequested:

@@ -62,34 +62,40 @@ python3 supernote_module_generator/supernote_module.py doctor
 Doctor checks all module types by default. Use `--type native`, `--type jni`, or
 `--type jsi` to check one module type.
 
-## Install the command locally
+## Install
 
-Direct execution requires no installation. To add the `supernote-module`
-command to a virtual environment instead:
+After the package is published on PyPI:
+
+```bash
+python3 -m pip install supernote-module-generator
+supernote-module
+```
+
+To install this source checkout into a virtual environment before publication:
 
 ```bash
 python3 -m pip install ./supernote_module_generator
 supernote-module
 ```
 
-This project supports local/path installation. Publishing to PyPI is outside
-its current scope.
+Direct execution from the source checkout still requires no installation.
 
 ## Interactive controls
 
 The main menu provides **Add module**, **Update module**, **Validate module**,
 **Remove module**, **Doctor**, **Help**, and **Exit**.
 
-- Up and Down move through a cursor menu, Enter selects, Esc goes back, and `/`
-  filters a module list.
-- Suggested names and versions appear grey in the input position. Typing
-  replaces the suggestion; pressing Enter accepts it.
+- Up and Down move through a cursor menu, Enter selects, and Esc goes back.
+- Suggested names and versions appear grey in the input position after the
+  prompt colon, matching `Name: suggestion`. Typing hides the suggestion;
+  pressing Enter accepts it.
 - Ordinary `q`, `quit`, `b`, and `back` text is treated as data, not navigation.
 - Every single-line prompt rejects a multi-line paste as one invalid input. No
   pasted line can answer a later prompt.
 
 `--plain` uses numbered, line-oriented ASCII prompts. Its textual controls are
-`:back` and `:cancel`, and suggestions appear in brackets on the prompt line.
+`:back` and `:cancel`. Because plain output has no color, suggestions use an
+explicit bracketed default such as `Name [suggestion]:`.
 
 ## Safety and ownership
 
@@ -132,6 +138,7 @@ option, exit code, and non-interactive rule.
 - [Writing modules](docs/writing-modules.md)
 - [Automation and command reference](docs/automation.md)
 - [Troubleshooting and recovery](docs/troubleshooting-and-recovery.md)
+- [Publishing to PyPI](docs/publishing.md)
 - [UX specification](UX_REDESIGN_SPECIFICATION.md) — contributor-facing
   behavioral contract
 

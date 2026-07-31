@@ -9,6 +9,7 @@ yet. Use the guides below when you need more detail.
 | Write and call my first export | [Writing modules](writing-modules.md) |
 | Use the generator from scripts or CI | [Automation and command reference](automation.md) |
 | Fix a build, linking, validation, or interrupted-operation problem | [Troubleshooting and recovery](troubleshooting-and-recovery.md) |
+| Build and publish a Python release | [Publishing to PyPI](publishing.md) |
 | Understand the exact terminal behavior | [UX specification](../UX_REDESIGN_SPECIFICATION.md) |
 
 Every generated module also contains a README tailored to that module type,

@@ -81,7 +81,7 @@ Output options:
 
 Interactive behavior:
   Missing values are requested in a linear wizard. Derived names and version
-  appear as editable input placeholders; Enter accepts them. Add executes after
+  appear as dim inline suggestions; Enter accepts them. Add executes after
   the final valid answer without a confirmation. Installation defaults to Yes.
 
 Non-interactive behavior:

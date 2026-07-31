@@ -171,7 +171,6 @@ def test_plain_module_type_labels_use_the_required_ascii_forms(
         "Module type",
         TYPE_ITEMS,
         default="native",
-        searchable=True,
         collapse_label="Module type",
     )
 
