@@ -149,24 +149,16 @@ def test_wiki_links_use_known_task_pages():
 
 def test_root_readme_is_a_short_product_entry_point():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    required = (
-        "adds Native, JNI, and JSI modules to an **existing",
-        "You need a working Supernote plugin",
-        "official Supernote documentation",
-        "## Install",
-        "pip install supernote-module-generator",
-        "## Add native functionality",
-        "fun add(left: Double, right: Double): Double",
-        "await Math.add(20, 22)",
-        "## Choose a backend",
-        "## Generator documentation",
-        WIKI_ROOT,
-        "not a plugin framework, SDK, plugin tutorial",
-        "## Contributing",
-        "## License",
-    )
-    for value in required:
-        assert value in readme
+    opening = "\n".join(readme.splitlines()[:12])
+    opening_words = " ".join(opening.split())
+    assert "Native, JNI, and JSI" in opening
+    assert "existing Supernote plugin" in opening_words
+    assert "pip install supernote-module-generator" in readme
+    assert "supernote-module doctor --type native" in readme
+    assert "fun add(left: Double, right: Double): Double" in readme
+    assert "await Math.add(20, 22)" in readme
+    assert WIKI_ROOT in readme
+    assert "https://docs.supernote.com/" in readme
     assert len(readme.splitlines()) < 130
 
 
@@ -177,21 +169,21 @@ def test_root_readme_is_a_short_product_entry_point():
             "kotlin",
             "android/src/main/java/com/example/docs_kotlin/",
             "await DocsKotlin.add(20, 22)",
-            "JavaScript Promise (`await`)",
+            "Promises (`await`)",
             "Kotlin-and-Java-Modules",
         ),
         (
             "jni",
             "android/src/main/cpp/",
             "await DocsJni.add(20, 22)",
-            "JavaScript Promise (`await`)",
+            "Promises (`await`)",
             "JNI-Modules",
         ),
         (
             "jsi",
             "android/src/main/cpp/",
             "const total = DocsJsi.add(20, 22)",
-            "Synchronous; do not use `await`",
+            "synchronous; do not use `await`",
             "JSI-Modules",
         ),
     ),
@@ -212,10 +204,14 @@ def test_generated_readmes_are_package_specific_wiki_supplements(
     assert source in readme
     assert call in readme
     assert call_model in readme
-    assert "update` replaces this README" in readme
-    assert "Remove deletes the entire module" in readme
+    assert "Update replaces this README" in readme
+    assert "Remove deletes the complete module" in readme
     assert f"{WIKI_ROOT}/{backend_page}" in readme
-    assert f"{WIKI_ROOT}/Add-a-Module" in readme
+    assert f"{WIKI_ROOT}/Managing-Modules" in readme
+    assert readme.count(f"{WIKI_ROOT}/") == 2
+    assert "Canonical guidance" not in readme
+    assert "--build --verbose" not in readme
+    assert len(readme.splitlines()) <= 45
     assert "/blob/" not in readme
     assert "/docs/" not in readme
     assert metadata["generator_version"] == __version__
@@ -290,6 +286,8 @@ def test_jsi_is_supported_without_overstating_runtime_availability():
         ROOT / "src/supernote_module_generator/templates/jsi.README.md.tmpl",
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in current_material)
-    assert "experimental" not in combined.lower()
+    lower = combined.lower()
+    assert "experimental" not in lower
     assert "requires target PluginHost support" in combined
-    assert "generation and compilation do not" in combined.lower()
+    for runtime_constraint in ("compile", "pluginhost", "selinux"):
+        assert runtime_constraint in lower

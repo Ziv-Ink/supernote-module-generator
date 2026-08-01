@@ -6,22 +6,16 @@ should also check their installed version with `supernote-module --version`.
 
 ## 1.1.0.dev0 - Unreleased
 
-- Defined the product boundary as native-module generation for an existing,
-  working Supernote plugin; removed general plugin packaging, installation, and
-  debugging guidance from repository and Wiki documentation.
+- Documentation now assumes an existing working Supernote plugin and focuses
+  on adding and managing generated native modules. User guides live in the
+  GitHub Wiki; contributor and release documentation remains in the repository.
 - Removed Doctor's unrelated ADB and connected-device probes while retaining
   the JSI-specific runtime-policy advisory.
-- Made the GitHub Wiki the canonical plugin-developer documentation and reduced
-  the repository README to a product entry point.
 - Updated generated module READMEs to link directly to task-oriented Wiki
   pages.
 - Described JSI as a supported generator backend while retaining its explicit
   host, firmware, linker, and SELinux runtime requirements.
-- Reorganized documentation around native-module generation in an existing
-  Supernote plugin.
 - Clarified Native/JNI call models and the host-dependent JSI runtime boundary.
-- Separated contributor and PyPI release documentation from plugin-developer
-  guides.
 - Added generator-version markers to generated module metadata and READMEs.
 - Fixed the initial Native TypeScript interface name so template text does not
   leak into `index.d.ts`.

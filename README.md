@@ -62,8 +62,8 @@ import Math from 'local-math';
 const answer = await Math.add(20, 22);
 ```
 
-That is the product boundary: generate a module, implement native code, and
-call it from the plugin.
+For building, installing, and debugging the plugin itself, continue with the
+[official Supernote documentation](https://docs.supernote.com/).
 
 ## Choose a backend
 
@@ -71,12 +71,12 @@ call it from the plugin.
 | --- | --- | --- | --- |
 | `native` | Kotlin or Java | Promise for returned values | Android APIs and Kotlin/Java libraries |
 | `jni` | C or C++ behind JNI | Promise for returned values | C/C++ work that can be asynchronous |
-| `jsi` | C or C++ through JSI | Synchronous | Short JavaScript-thread work on a qualified host |
+| `jsi` | C or C++ through JSI | Synchronous | Short JavaScript-thread work on a tested PluginHost |
 
 JSI is a supported generator backend. Runtime execution still depends on the
 target PluginHost, firmware, linker namespace, and SELinux policy.
 
-## Generator documentation
+## Documentation
 
 The [Wiki](https://github.com/Ziv-Ink/supernote-module-generator/wiki) documents
 only the native-module generator:
@@ -92,9 +92,6 @@ For exact options in the installed version:
 ```bash
 supernote-module help add
 ```
-
-This repository is not a plugin framework, SDK, plugin tutorial, or replacement
-for the official Supernote documentation.
 
 ## Contributing
 

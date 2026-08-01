@@ -30,7 +30,7 @@ contract.
 | --- | --- | --- |
 | CLI grammar | `arguments.py` and tests | `helptext.py`, Wiki CLI and Automation page |
 | Exact installed help | `helptext.py` | CLI route tests |
-| Generated paths/ownership | generator and `.supernote-module.json` | generated README and Wiki architecture/export pages |
+| Generated paths/ownership | generator and `.supernote-module.json` | generated README and Wiki files/exports pages |
 | Export signatures/types | KSP processor and `binding_codegen.py` | Wiki Export Functions page |
 | Tool/device support | Wiki Compatibility page with dated evidence | README summary |
 | First generated module | Wiki Add a Module page | concise README example and generated package links |
@@ -73,7 +73,7 @@ build integration, or device compatibility:
 - [ ] Generate Native, JNI, and JSI samples and scan every generated text file
       for unresolved template values.
 - [ ] Confirm the documented source path, default import, `await` behavior, and
-      ownership boundary for all affected types.
+      files preserved by Update for all affected types.
 - [ ] Run every documented shell/PowerShell command that can be exercised in
       the available environment; label anything not run.
 - [ ] Check repository and Wiki links, page slugs, and stale moved-file
@@ -84,9 +84,11 @@ build integration, or device compatibility:
 - [ ] Review migration needs for older `.supernote-module.json` schemas,
       generated ownership, declarations, or loaders.
 
-General plugin-development concepts belong in the canonical Wiki. Generated
-READMEs should contain actual package names, paths, calls, and ownership; Update
-replaces them, so they must not be the only place a workflow is explained.
+Generator-specific user guidance belongs in the Wiki. General Supernote plugin
+development belongs in the official Supernote documentation. Generated READMEs
+should contain actual package names, paths, calls, and Update/Remove warnings;
+Update replaces them, so they must not be the only place a workflow is
+explained.
 
 ## Validation before a pull request
 
@@ -103,8 +105,8 @@ validation tier completed.
 
 ## Repository boundaries
 
-- `README.md` is a short product entry point; the separate GitHub Wiki is the
-  canonical plugin-developer documentation.
+- `README.md` is a short product entry point; the separate GitHub Wiki contains
+  generator-specific user guidance.
 - `CONTRIBUTING.md` is contributor documentation.
 - `architecture/decisions/` contains short, current rationale that affects safe
   maintenance.
