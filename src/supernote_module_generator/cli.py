@@ -1,4 +1,4 @@
-"""Public CLI coordinator for the specification-version 1.0 interface."""
+"""Public CLI coordinator."""
 from __future__ import annotations
 
 import subprocess
@@ -39,14 +39,19 @@ from .workflows import DecisionCollector, ReturnToMenu
 BACKEND_CHOICES = [
     (
         "native",
-        "Native Module — For coding in Kotlin/Java and/or using Android APIs.",
+        "Native Module — For Kotlin/Java code and Android APIs through the "
+        "React Native bridge.",
     ),
     (
         "jni",
-        "Native JNI Module — For combining Android APIs with existing or "
-        "performance-intensive C/C++ code.",
+        "Native JNI Module — For C/C++ behind an asynchronous Kotlin/Java "
+        "React Native bridge.",
     ),
-    ("jsi", "JSI Module — For low-latency synchronous calls from JavaScript."),
+    (
+        "jsi",
+        "JSI Module — Experimental synchronous C++; requires target PluginHost "
+        "support.",
+    ),
 ]
 BACKEND_UI_CHOICES = BACKEND_CHOICES
 MAIN_ACTION_CHOICES = [

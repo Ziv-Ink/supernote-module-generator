@@ -52,12 +52,9 @@ def test_plain_guided_add_uses_linear_questions_and_executes_without_review(tmp_
     assert "JavaScript name [Guided]: " in transcript
     assert "Android namespace [com.example.guided]: " in transcript
     assert "Package version [0.1.0]: " in transcript
-    assert "For coding in Kotlin/Java and/or using Android APIs." in transcript
-    assert (
-        "For combining Android APIs with existing or performance-intensive"
-        in transcript
-    )
-    assert "For low-latency synchronous calls from JavaScript." in transcript
+    assert "For Kotlin/Java code and Android APIs through the React Native" in transcript
+    assert "For C/C++ behind an asynchronous Kotlin/Java React Native bridge." in transcript
+    assert "Experimental synchronous C++; requires target PluginHost support." in transcript
     assert "Add module\n\nModule type:" in transcript
     assert "Module type:  Native Module - Kotlin/Java\n\n  Used as" in transcript
     assert "  Used as the local folder" in transcript
@@ -164,18 +161,15 @@ def test_help_broken_pipe_exits_without_an_exception(tmp_path: Path):
     assert main(["--help"], stdout=BrokenOutput(), stderr=io.StringIO(), cwd=tmp_path) == 0
 
 
-def test_root_help_uses_the_approved_module_explanations(tmp_path: Path):
+def test_root_help_explains_module_execution_models(tmp_path: Path):
     stdout = io.StringIO()
 
     assert main(["--help"], stdout=stdout, stderr=io.StringIO(), cwd=tmp_path) == 0
 
     output = stdout.getvalue()
-    assert "For coding in Kotlin/Java and/or using Android APIs." in output
-    assert (
-        "For combining Android APIs with existing or performance-intensive C/C++"
-        in output
-    )
-    assert "For low-latency synchronous calls from JavaScript." in output
+    assert "For Kotlin/Java code and Android APIs through the React Native bridge." in output
+    assert "For C/C++ behind an asynchronous Kotlin/Java React Native bridge." in output
+    assert "Experimental synchronous C++; requires target PluginHost support." in output
 
 
 def test_back_reopens_previous_add_answer_for_editing(tmp_path: Path):

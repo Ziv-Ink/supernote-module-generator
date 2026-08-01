@@ -240,18 +240,23 @@ def test_menu_explanation_is_dim():
             MenuItem(
                 "native",
                 "Native Module",
-                explanation="For coding in Kotlin/Java and/or using Android APIs.",
+                explanation=(
+                    "For Kotlin/Java code and Android APIs through the React Native "
+                    "bridge."
+                ),
             ),
             MenuItem(
                 "jsi",
                 "JSI Module",
-                explanation="For low-latency synchronous calls from JavaScript.",
+                explanation=(
+                    "Experimental synchronous C++; requires target PluginHost support."
+                ),
             ),
         ],
         default="native",
     ) == "jsi"
 
-    assert "\033[2m    For low-latency synchronous calls from JavaScript.\033[0m" in (
+    assert "\033[2m    Experimental synchronous C++; requires target PluginHost support.\033[0m" in (
         stderr.getvalue()
     )
 

@@ -10,6 +10,7 @@ from supernote_module_generator.arguments import parse_arguments
 from supernote_module_generator.cli import main
 from supernote_module_generator.errors import ConfigurationError
 from supernote_module_generator.helptext import COMMAND_HELP, ROOT_HELP
+from supernote_module_generator import __version__
 
 
 def invoke(arguments: list[str], cwd: Path):
@@ -92,7 +93,11 @@ def test_add_help_preserves_multiline_example(tmp_path: Path):
 
 
 def test_version_is_exact_and_works_outside_plugin(tmp_path: Path):
-    assert invoke(["--version"], tmp_path) == (0, "supernote-module 1.0.0\n", "")
+    assert invoke(["--version"], tmp_path) == (
+        0,
+        f"supernote-module {__version__}\n",
+        "",
+    )
 
 
 def test_no_command_in_non_tty_is_usage_error(tmp_path: Path):

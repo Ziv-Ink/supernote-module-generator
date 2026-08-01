@@ -48,7 +48,10 @@ TYPE_ITEMS = [
         completed_label="Native Module — Kotlin/Java",
         plain_description="Kotlin/Java",
         plain_completed_label="Native Module - Kotlin/Java",
-        explanation="For coding in Kotlin/Java and/or using Android APIs.",
+        explanation=(
+            "For Kotlin/Java code and Android APIs through the React Native "
+            "bridge."
+        ),
     ),
     MenuItem(
         "jni",
@@ -58,8 +61,7 @@ TYPE_ITEMS = [
         plain_description="C/C++ via JNI",
         plain_completed_label="Native JNI Module - C/C++ via JNI",
         explanation=(
-            "For combining Android APIs with existing or performance-intensive "
-            "C/C++ code."
+            "For C/C++ behind an asynchronous Kotlin/Java React Native bridge."
         ),
     ),
     MenuItem(
@@ -69,7 +71,9 @@ TYPE_ITEMS = [
         completed_label="JSI Module — C/C++ (synchronous)",
         plain_description="C/C++",
         plain_completed_label="JSI Module - C/C++",
-        explanation="For low-latency synchronous calls from JavaScript.",
+        explanation=(
+            "Experimental synchronous C++; requires target PluginHost support."
+        ),
     ),
 ]
 DOCTOR_ITEMS = [

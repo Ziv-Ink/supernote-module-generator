@@ -1,4 +1,4 @@
-"""Exact, redirect-safe help screens from UX specification section 21."""
+"""Canonical redirect-safe help screens for the public CLI."""
 from __future__ import annotations
 
 from typing import Dict
@@ -22,12 +22,11 @@ Commands:
 
 Module types:
   Native Module
-    For coding in Kotlin/Java and/or using Android APIs.
+    For Kotlin/Java code and Android APIs through the React Native bridge.
   Native JNI Module
-    For combining Android APIs with existing or performance-intensive C/C++
-    code.
+    For C/C++ behind an asynchronous Kotlin/Java React Native bridge.
   JSI Module
-    For low-latency synchronous calls from JavaScript.
+    Experimental synchronous C++; requires target PluginHost support.
 
 Global options:
   -h, --help      Show help.
@@ -45,7 +44,7 @@ Examples:
   supernote-module validate --all
   supernote-module doctor --type jsi
 
-Run `supernote-module help <command>` for command-specific help.
+For command-specific help, run a command such as `supernote-module help add`.
 """
 
 ADD_HELP = """Supernote Module Generator

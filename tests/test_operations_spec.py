@@ -252,10 +252,17 @@ def test_quiet_success_is_exactly_one_line(tmp_path: Path):
     assert stdout == 'Added module "local-quiet"\n'
 
 
-def test_build_mode_uses_parent_gradle_wrapper_and_changes_success_copy(tmp_path: Path):
+def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
+    tmp_path: Path,
+):
     root = plugin(tmp_path)
     gradle = root / "android/gradlew"
-    gradle.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # This is command-routing coverage, not proof that generated Android code
+    # compiles. A real template build belongs in the integration tier.
+    gradle.write_text(
+        '#!/bin/sh\ncase "$1" in\n  --version|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
+        encoding="utf-8",
+    )
     gradle.chmod(0o755)
     code, stdout, stderr = invoke(
         root,

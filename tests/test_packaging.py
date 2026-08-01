@@ -34,19 +34,28 @@ def test_release_license_and_manifest_are_present():
 
     assert license_text.startswith("MIT License\n")
     assert "include LICENSE" in manifest
-    assert "include PYPI_README.md" in manifest
+    assert "include README.md" in manifest
+    assert "include CHANGELOG.md" in manifest
+    assert "include CONTRIBUTING.md" in manifest
     assert "recursive-include docs *.md" in manifest
+    assert "recursive-include maintainers *.md" in manifest
+    assert "recursive-include architecture *.md" in manifest
     assert "recursive-include tests" in manifest
 
 
-def test_pypi_readme_is_self_contained():
-    readme = (ROOT / "PYPI_README.md").read_text(encoding="utf-8")
+def test_root_readme_is_the_self_contained_pypi_description():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    setup = (ROOT / "setup.cfg").read_text(encoding="utf-8")
 
     assert "pip install supernote-module-generator" in readme
     assert "supernote-module doctor" in readme
-    assert "MIT License" in readme
+    assert "## License" in readme
     assert "github.com/Ziv-Ink/supernote-module-generator" in readme
-    assert not re.search(r"(?<!!)\[[^\]]+\]\((?!https?://|mailto:)[^)]+\)", readme)
+    assert "long_description = file: README.md" in setup
+    assert not (ROOT / "PYPI_README.md").exists()
+    assert not re.search(
+        r"(?<!!)\[[^\]]+\]\((?!https?://|mailto:)[^)]+\)", readme
+    )
 
 
 def test_pypi_release_uses_scoped_trusted_publishing():

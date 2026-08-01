@@ -1,16 +1,25 @@
-# Supernote Module Generator documentation
+# Supernote plugin module documentation
 
-Start with the root [README](../README.md) if you have not generated a module
-yet. Use the guides below when you need more detail.
+These pages are for developers adding Kotlin/Java, JNI C/C++, or experimental
+JSI functionality to a Supernote React Native plugin.
 
-| I want to... | Read... |
+Start with the root [README](../README.md) for the shortest Kotlin success, or
+use the task index below.
+
+| I need to... | Read... |
 | --- | --- |
-| Decide between Native, JNI, and JSI | [Choosing a module](choosing-a-module.md) |
-| Write and call my first export | [Writing modules](writing-modules.md) |
-| Use the generator from scripts or CI | [Automation and command reference](automation.md) |
-| Fix a build, linking, validation, or interrupted-operation problem | [Troubleshooting and recovery](troubleshooting-and-recovery.md) |
-| Build and publish a Python release | [Publishing to PyPI](publishing.md) |
-| Understand the exact terminal behavior | [UX specification](../UX_REDESIGN_SPECIFICATION.md) |
+| Generate, implement, package, install, and test a first module | [Build your first module](getting-started/first-module.md) |
+| Decide between Kotlin/Java, JNI, and JSI | [Choose a module](guides/choosing-a-module.md) |
+| Update, validate, recover, or remove a module | [Manage modules safely](guides/managing-modules.md) |
+| Check supported signatures, editable paths, and generated files | [Exports and ownership](reference/exports.md) |
+| Understand names, commands, output modes, and automation | [CLI reference](reference/cli.md) |
+| Check tools, versions, operating systems, devices, and JSI status | [Compatibility matrix](reference/compatibility.md) |
+| Diagnose a concrete failure | [Troubleshooting by symptom](troubleshooting/README.md) |
 
-Every generated module also contains a README tailored to that module type,
-package name, JavaScript name, namespace, and source paths.
+Generated module READMEs contain the exact names and paths for one package. They
+supplement these guides and are replaced by `update`; they are not the canonical
+source for general workflow or compatibility information.
+
+Documentation for changing or publishing the Python generator is not part of
+this user path. Contributors should use [CONTRIBUTING.md](../CONTRIBUTING.md),
+and release maintainers should use [maintainers/releasing.md](../maintainers/releasing.md).
