@@ -50,8 +50,8 @@ run.
 
 Before release, review:
 
-- the root quick example and Wiki Getting Started workflow against the official
-  Supernote template;
+- the root quick example and Wiki Add a Module workflow against a working
+  external plugin fixture;
 - the Wiki compatibility matrix and dated device/JSI evidence;
 - Update/Remove ownership and migration behavior;
 - documented CLI options against parser/help metadata;

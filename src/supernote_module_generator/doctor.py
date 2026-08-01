@@ -1,4 +1,4 @@
-"""Executable Doctor probes with strict build and advisory deployment checks."""
+"""Executable Doctor probes for module-generation and generated-build inputs."""
 from __future__ import annotations
 
 import os
@@ -84,8 +84,9 @@ class DoctorService:
         if scope in {"all", "jni", "jsi"}:
             with self.progress.phase("Checking native tools", "Checked native tools"):
                 checks.extend(self._native_checks())
-        with self.progress.phase("Checking deployment tools", "Checked deployment tools"):
-            checks.extend(self._deployment_checks())
+        if scope in {"all", "jsi"}:
+            with self.progress.phase("Checking JSI runtime", "Checked JSI runtime"):
+                checks.extend(self._jsi_runtime_checks())
 
         required_failed = [
             check
@@ -373,56 +374,15 @@ class DoctorService:
         )
         return [cmake, ndk_check]
 
-    def _deployment_checks(self) -> List[DoctorCheckResult]:
-        adb = shutil.which("adb")
-        if adb is None:
-            tool = DoctorCheckResult(
-                "adb",
-                "adb",
+    def _jsi_runtime_checks(self) -> List[DoctorCheckResult]:
+        return [
+            DoctorCheckResult(
+                "selinux_policy",
+                "JSI execution policy",
                 "advisory",
                 "warning",
                 None,
                 None,
-                "adb was not found; deployment checks are unavailable.",
+                "Target PluginHost and SELinux execution policy were not inspected; generated JSI files do not prove runtime execution.",
             )
-            device = DoctorCheckResult(
-                "adb_device",
-                "Connected device",
-                "advisory",
-                "warning",
-                None,
-                None,
-                "No authorized device could be checked.",
-            )
-        else:
-            ok, version, _ = self._probe([adb, "version"])
-            tool = DoctorCheckResult(
-                "adb",
-                "adb",
-                "advisory",
-                "passed" if ok else "warning",
-                version,
-                adb,
-                "adb is available." if ok else "adb returned a nonzero status.",
-            )
-            devices_ok, _, output = self._probe([adb, "devices"])
-            connected = any(line.strip().endswith("\tdevice") for line in output.splitlines()[1:])
-            device = DoctorCheckResult(
-                "adb_device",
-                "Connected device",
-                "advisory",
-                "passed" if devices_ok and connected else "warning",
-                None,
-                None,
-                "An authorized device is connected." if devices_ok and connected else "No authorized device is connected.",
-            )
-        selinux = DoctorCheckResult(
-            "selinux_policy",
-            "SELinux execution policy",
-            "advisory",
-            "warning",
-            None,
-            None,
-            "SELinux execution policy was not inspected; local library visibility does not prove device runtime compatibility.",
-        )
-        return [tool, device, selinux]
+        ]

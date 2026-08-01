@@ -1514,7 +1514,7 @@ void throw_ascii_fallback(JNIEnv *env) noexcept {{
   jclass error_class = env->FindClass("java/lang/RuntimeException");
   if (error_class != nullptr) {{
     env->ThrowNew(
-        error_class, "Native module failed; inspect the PluginHost logcat");
+        error_class, "Generated native module failed; inspect the existing plugin logs");
   }}
 }}
 

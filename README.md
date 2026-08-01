@@ -1,17 +1,20 @@
 # Supernote Module Generator
 
-Add Kotlin/Java, C/C++ through JNI, or synchronous JSI
-functionality to an existing Supernote React Native plugin. The generator
-creates the local package, bridge, Android build wiring, declarations, and
-autolinking; you write the native behavior your plugin needs.
+A code generator that adds Native, JNI, and JSI modules to an **existing
+Supernote plugin**.
 
-## Why use it
+It generates the local package, native bridge, Android build wiring,
+declarations, and React Native autolinking needed to call Kotlin, Java, C, or
+C++ from the plugin you already have.
 
-- Keep native code inside the plugin as a local npm or Yarn dependency.
-- Generate repeatable React Native and Android integration for three backends.
-- Add exports without hand-writing registration, conversion, or autolinking.
-- Safely validate and update generated infrastructure while preserving defined
-  implementation roots.
+## Before using this tool
+
+You need a working Supernote plugin that already builds successfully. Creating,
+packaging, installing, and debugging that plugin are outside this project's
+scope; use the [official Supernote documentation](https://docs.supernote.com/)
+for that workflow.
+
+Run this generator when the existing plugin needs native functionality.
 
 ## Install
 
@@ -21,20 +24,20 @@ Python 3.9 or newer is required:
 python3 -m pip install supernote-module-generator
 ```
 
-Run it from an existing Supernote plugin root containing `PluginConfig.json`,
-`package.json`, `android/`, and `android/settings.gradle` (or `.kts`):
+Run it from the root of the existing plugin:
 
 ```bash
 supernote-module doctor --type native
 supernote-module
 ```
 
-## Quick example
+## Add native functionality
 
-Choose **Add module**, **Native Module**, package name `local-math`, and accept
-the derived JavaScript name `Math` and namespace `com.example.math`.
+For example, choose **Add module**, **Native Module**, and package name
+`local-math`. Accept the derived JavaScript name `Math` and Android namespace
+`com.example.math`.
 
-Edit:
+Then edit the generated implementation file:
 
 ```text
 local_modules/local-math/android/src/main/java/com/example/math/Example.kt
@@ -51,7 +54,7 @@ class Example {
 }
 ```
 
-Call the default export from the plugin:
+Call it from the existing plugin:
 
 ```typescript
 import Math from 'local-math';
@@ -59,64 +62,44 @@ import Math from 'local-math';
 const answer = await Math.add(20, 22);
 ```
 
-Package with `./buildPlugin.sh` on macOS/Linux or `.\buildPlugin.ps1` in
-Windows PowerShell. The official template normally writes
-`build/outputs/plugin.snplg`.
+That is the product boundary: generate a module, implement native code, and
+call it from the plugin.
 
-The [Getting Started Wiki guide](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Getting-Started)
-covers generation, implementation, packaging, device installation, logging,
-editable paths, and complete JNI/JSI alternatives.
+## Choose a backend
 
-## Module types
-
-| CLI type | Implementation | JavaScript call | Best fit |
+| Type | Write | Call model | Use it for |
 | --- | --- | --- | --- |
 | `native` | Kotlin or Java | Promise for returned values | Android APIs and Kotlin/Java libraries |
-| `jni` | C or C++ behind JNI | Promise for returned values | Existing C/C++ or work that can be asynchronous |
+| `jni` | C or C++ behind JNI | Promise for returned values | C/C++ work that can be asynchronous |
 | `jsi` | C or C++ through JSI | Synchronous | Short JavaScript-thread work on a qualified host |
 
-JSI is a supported generator backend, but generation and compilation do not
-prove that the target PluginHost can execute the extracted library. Runtime
-availability still depends on the host, firmware, linker, and SELinux policy.
-Use the Wiki's
-[module decision guide](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Choosing-a-Module)
-before selecting a backend.
+JSI is a supported generator backend. Runtime execution still depends on the
+target PluginHost, firmware, linker namespace, and SELinux policy.
 
-## Compatibility summary
+## Generator documentation
 
-- Python 3.9+; repository CI covers Python 3.9–3.13.
-- Current official Supernote template: React Native 0.79.2, Android SDK 35,
-  and an arm64 target.
-- JNI/JSI additionally require CMake 3.22.1+ and NDK Clang accepting C23 and
-  C++23 for Android API 27.
-- Native/JNI follow the officially described Java/TurboModule and
-  Java-to-C/C++ paths. JSI runtime support is host-, firmware-, linker-, and
-  SELinux-dependent.
+The [Wiki](https://github.com/Ziv-Ink/supernote-module-generator/wiki) documents
+only the native-module generator:
 
-The canonical status and evidence are in the Wiki
-[compatibility matrix](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Compatibility).
+- [Add a Module](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Add-a-Module)
+- [Choose a Module](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Choosing-a-Module)
+- [Export Functions](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Export-Functions)
+- [Manage Generated Modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Managing-Modules)
+- [Troubleshoot Generated Modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)
 
-## Documentation
-
-The [GitHub Wiki](https://github.com/Ziv-Ink/supernote-module-generator/wiki)
-is the primary documentation for plugin developers:
-
-- [Getting Started](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Getting-Started)
-- [Choosing a Module](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Choosing-a-Module)
-- [Exports and JavaScript API](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Exports-and-JavaScript-API)
-- [Managing Modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Managing-Modules)
-- [Troubleshooting](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)
-
-For exact options in the installed version, run:
+For exact options in the installed version:
 
 ```bash
 supernote-module help add
 ```
 
+This repository is not a plugin framework, SDK, plugin tutorial, or replacement
+for the official Supernote documentation.
+
 ## Contributing
 
-Changing or releasing the Python generator is a separate workflow. See
-[CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md)
+when changing the generator itself.
 
 ## License
 

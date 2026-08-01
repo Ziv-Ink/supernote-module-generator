@@ -63,10 +63,7 @@ def successful_run(command, **kwargs):
         "cmake": "cmake version 3.22.1\n",
         "clang": "clang version 18.0.0\n",
         "clang++": "clang version 18.0.0\n",
-        "adb": "Android Debug Bridge version 1.0.41\n",
     }.get(executable, "")
-    if executable == "adb" and command[-1] == "devices":
-        output = "List of devices attached\nSN123\tdevice\n"
     return subprocess.CompletedProcess(command, 0, output, "")
 
 
@@ -86,7 +83,27 @@ def test_doctor_executes_required_probes_and_keeps_selinux_advisory(
     assert result.doctor is not None
     assert result.doctor.required_passed
     assert any(check.id == "selinux_policy" for check in result.doctor.checks)
+    assert not any(check.id in {"adb", "adb_device"} for check in result.doctor.checks)
     assert result.doctor.advisory_count >= 1
+
+
+def test_native_doctor_does_not_probe_deployment_or_jsi_runtime(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    install_fake_sdk(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "supernote_module_generator.doctor.shutil.which",
+        lambda name: f"/tools/{name}",
+    )
+
+    result = DoctorService(root, renderer(), run=successful_run).execute("native")
+
+    assert result.doctor is not None
+    assert not any(
+        check.id in {"adb", "adb_device", "selinux_policy"}
+        for check in result.doctor.checks
+    )
 
 
 def test_both_lockfiles_pass_when_one_manager_is_healthy(tmp_path: Path, monkeypatch):

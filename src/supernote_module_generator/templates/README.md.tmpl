@@ -61,17 +61,21 @@ Update preserves Kotlin/Java implementation below `android/src/main/java/`
 Do not hand-edit replaceable files. Update has no dry-run or file-level diff.
 **Remove deletes the entire module, including this user source. Commit first.**
 
-## Build and continue
+## Regenerate and validate
 
-From the parent plugin root, run `./buildPlugin.sh` on macOS/Linux or
-`.\buildPlugin.ps1` in Windows PowerShell. The parent build regenerates
-declarations and writes `build/outputs/plugin.snplg` for the official default;
-if the parent's `PluginConfig.json` name differs, use the actual output name.
+From the existing plugin root, regenerate declarations and compile-check this
+module's generated integration:
+
+```bash
+supernote-module validate $NPM_NAME_RAW --build --verbose
+```
+
+After validation, continue with the plugin workflow you already use.
 
 Canonical guidance:
 
-- [Complete first-module workflow](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Getting-Started)
+- [Add a module](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Add-a-Module)
 - [Kotlin and Java modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Kotlin-and-Java-Modules)
-- [Exports and supported types](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Exports-and-JavaScript-API)
+- [Export functions and supported types](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Export-Functions)
 - [Update and Remove safety](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Managing-Modules)
-- [Troubleshooting](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)
+- [Troubleshoot generated modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)

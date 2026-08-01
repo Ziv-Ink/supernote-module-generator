@@ -25,13 +25,13 @@ from supernote_module_generator.verification import TEMPLATE_TOKEN
 ROOT = Path(__file__).resolve().parents[1]
 WIKI_ROOT = "https://github.com/Ziv-Ink/supernote-module-generator/wiki"
 WIKI_PAGES = {
+    "Add-a-Module",
     "CLI-and-Automation",
     "Choosing-a-Module",
     "Compatibility",
-    "Exports-and-JavaScript-API",
-    "Getting-Started",
+    "Export-Functions",
+    "Generated-Files-and-Integration",
     "Home",
-    "How-Modules-Work",
     "JNI-Modules",
     "JSI-Modules",
     "Kotlin-and-Java-Modules",
@@ -150,22 +150,24 @@ def test_wiki_links_use_known_task_pages():
 def test_root_readme_is_a_short_product_entry_point():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required = (
-        "## Why use it",
+        "adds Native, JNI, and JSI modules to an **existing",
+        "You need a working Supernote plugin",
+        "official Supernote documentation",
         "## Install",
         "pip install supernote-module-generator",
-        "## Quick example",
+        "## Add native functionality",
         "fun add(left: Double, right: Double): Double",
         "await Math.add(20, 22)",
-        "## Module types",
-        "## Compatibility summary",
-        "## Documentation",
+        "## Choose a backend",
+        "## Generator documentation",
         WIKI_ROOT,
+        "not a plugin framework, SDK, plugin tutorial",
         "## Contributing",
         "## License",
     )
     for value in required:
         assert value in readme
-    assert len(readme.splitlines()) < 150
+    assert len(readme.splitlines()) < 130
 
 
 @pytest.mark.parametrize(
@@ -213,7 +215,7 @@ def test_generated_readmes_are_package_specific_wiki_supplements(
     assert "update` replaces this README" in readme
     assert "Remove deletes the entire module" in readme
     assert f"{WIKI_ROOT}/{backend_page}" in readme
-    assert f"{WIKI_ROOT}/Getting-Started" in readme
+    assert f"{WIKI_ROOT}/Add-a-Module" in readme
     assert "/blob/" not in readme
     assert "/docs/" not in readme
     assert metadata["generator_version"] == __version__
@@ -256,6 +258,27 @@ def test_public_material_does_not_reference_private_deploy_script():
     ]
     for document in public_documents:
         assert "deploy_plugin" not in document.read_text(encoding="utf-8"), document
+
+
+def test_public_repository_material_does_not_teach_the_plugin_lifecycle():
+    public_documents = [
+        ROOT / "README.md",
+        *sorted((ROOT / "src/supernote_module_generator/templates").glob("*.md.tmpl")),
+    ]
+    forbidden = (
+        "buildPlugin.sh",
+        "buildPlugin.ps1",
+        "plugin.snplg",
+        "adb push",
+        "Settings > Apps > Plugins",
+    )
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in public_documents)
+    for phrase in forbidden:
+        assert phrase not in combined
+
+
+def test_cli_identifies_an_existing_plugin_as_the_product_boundary():
+    assert "existing Supernote plugin" in ROOT_HELP
 
 
 def test_jsi_is_supported_without_overstating_runtime_availability():

@@ -1,6 +1,6 @@
 const GLOBAL_NAME = '$JSI_GLOBAL_NAME';
 const INSTALL_ERROR =
-  '$MODULE_NAME_RAW from package $NPM_NAME_RAW is not available. Backend: JSI module (C/C++ that is called directly from JavaScript/TypeScript (not asynchronous)). Installation may still be in progress or native loading may have failed. Rebuild and redeploy the Supernote plugin, then check $LOG_TAG and ReactNativeJS in logcat.';
+  '$MODULE_NAME_RAW from generated package $NPM_NAME_RAW is not available. Backend: synchronous JSI. The generated installer may not have completed or native loading may have failed. Validate and rebuild the module integration, then inspect $LOG_TAG and ReactNativeJS with the existing plugin debugging workflow.';
 
 function requireModule() {
   const value = globalThis[GLOBAL_NAME];

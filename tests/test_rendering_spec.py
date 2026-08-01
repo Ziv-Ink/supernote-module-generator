@@ -86,13 +86,13 @@ def test_quiet_doctor_keeps_advisories_but_suppresses_report_detail():
     stderr = io.StringIO()
     renderer = Renderer("quiet", capabilities(), stdout=stdout, stderr=stderr)
     advisory = DoctorCheckResult(
-        "adb_device",
-        "Connected device",
+        "selinux_policy",
+        "JSI execution policy",
         "advisory",
         "warning",
         None,
         None,
-        "No authorized device is connected.",
+        "Target execution policy was not inspected.",
     )
 
     renderer.render(
@@ -103,7 +103,7 @@ def test_quiet_doctor_keeps_advisories_but_suppresses_report_detail():
     )
 
     assert stdout.getvalue() == "Doctor found no required issues\n"
-    assert "Connected device: No authorized device is connected." in stderr.getvalue()
+    assert "JSI execution policy: Target execution policy was not inspected." in stderr.getvalue()
     assert "Doctor - All" not in stdout.getvalue()
 
 

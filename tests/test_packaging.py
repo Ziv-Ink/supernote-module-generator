@@ -22,6 +22,7 @@ def test_setup_cfg_is_the_single_metadata_source():
         ROOT / "src/supernote_module_generator/__init__.py"
     ).read_text(encoding="utf-8")
     assert "name = supernote-module-generator" in setup
+    assert "Generate Native, JNI, and JSI modules for existing Supernote plugins" in setup
     assert "url = https://github.com/Ziv-Ink/supernote-module-generator" in setup
     assert "PyPI = https://pypi.org/project/supernote-module-generator/" in setup
     assert "Source = https://github.com/Ziv-Ink/supernote-module-generator" in setup

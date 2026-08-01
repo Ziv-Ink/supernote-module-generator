@@ -420,9 +420,9 @@ class Renderer:
                 "CMake and Android NDK",
             ),
             (
-                "Deployment",
-                ("adb", "adb_device", "selinux_policy"),
-                "adb, connected device, and SELinux policy",
+                "JSI runtime",
+                ("selinux_policy",),
+                "Target PluginHost and SELinux execution policy",
             ),
         )
         by_id = {check.id: check for check in result.doctor.checks}
@@ -441,21 +441,7 @@ class Renderer:
                 message = failed_checks[0].message
             elif warning_checks:
                 status = "warning"
-                if label == "Deployment":
-                    adb = by_id.get("adb")
-                    device = by_id.get("adb_device")
-                    parts = [
-                        "adb found" if adb is not None and adb.status == "passed" else "adb not found",
-                        (
-                            "device connected"
-                            if device is not None and device.status == "passed"
-                            else "no device connected"
-                        ),
-                        "SELinux policy not inspected",
-                    ]
-                    message = "; ".join(parts)
-                else:
-                    message = warning_checks[0].message
+                message = warning_checks[0].message
                 status = "warning"
             else:
                 status = "passed"

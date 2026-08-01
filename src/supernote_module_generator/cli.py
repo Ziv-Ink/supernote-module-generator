@@ -465,7 +465,7 @@ MAIN_MENU_ITEMS = [
 ]
 
 INVALID_ROOT_ITEMS = [
-    MenuItem("doctor", "Doctor", "Check installed tools."),
+    MenuItem("doctor", "Doctor", "Check module-generation tools."),
     MenuItem("help", "Help", "Show commands and usage."),
     MenuItem("exit", "Exit"),
 ]

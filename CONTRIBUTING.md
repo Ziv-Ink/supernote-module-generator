@@ -31,9 +31,9 @@ contract.
 | CLI grammar | `arguments.py` and tests | `helptext.py`, Wiki CLI and Automation page |
 | Exact installed help | `helptext.py` | CLI route tests |
 | Generated paths/ownership | generator and `.supernote-module.json` | generated README and Wiki architecture/export pages |
-| Export signatures/types | KSP processor and `binding_codegen.py` | Wiki Exports and JavaScript API page |
+| Export signatures/types | KSP processor and `binding_codegen.py` | Wiki Export Functions page |
 | Tool/device support | Wiki Compatibility page with dated evidence | README summary |
-| First-success workflow | Wiki Getting Started page | concise README example and generated package links |
+| First generated module | Wiki Add a Module page | concise README example and generated package links |
 | Release procedure | `maintainers/releasing.md` | publish workflow |
 
 Tests should assert observable behavior or a necessary safety invariant. They
@@ -48,12 +48,12 @@ copyability, stream separation, machine output, keyboard safety, or recovery.
 - Integration tests cover CLI lifecycle behavior against temporary plugin
   roots, parent wiring, source preservation, rollback, and documentation
   artifacts.
-- The repository currently lacks an official-template test that performs real
-  npm/Yarn linking, compiles all three backends, runs `buildPlugin.sh`, and
-  verifies a `.snplg`. Do not describe unit/simulated Gradle tests as that proof.
-- Device tests are separate from CI. Record device model, firmware, PluginHost,
-  ABI, SELinux mode, commands, and logs; distinguish generated, compiled,
-  loaded, and executed outcomes.
+- The repository currently lacks an external working-plugin fixture that
+  performs real npm/Yarn linking and compiles all three generated backends. Do
+  not describe unit or simulated Gradle tests as that proof.
+- Device tests are relevant only when qualifying generated runtime integration,
+  especially JSI. Record firmware, PluginHost, ABI, SELinux mode, commands, and
+  logs; distinguish generated, compiled, loaded, and executed outcomes.
 
 When a realistic fixture is added, keep it under `tests/fixtures/` and make at
 least one test or documented maintainer command execute it. Do not retain an
@@ -66,7 +66,7 @@ build integration, or device compatibility:
 
 - [ ] Update the authoritative code/constant first.
 - [ ] Add or update a behavior test that would fail without the change.
-- [ ] Update the root first-success summary only if beginners need the fact.
+- [ ] Update the root generator example only if new users need the fact.
 - [ ] Update the canonical GitHub Wiki page in its separate Wiki repository;
       avoid copying the fact into unrelated pages.
 - [ ] Update generated README templates only for package-specific guidance.

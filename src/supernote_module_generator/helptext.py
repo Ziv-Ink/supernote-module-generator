@@ -6,7 +6,7 @@ from typing import Dict
 
 ROOT_HELP = """Supernote Module Generator
 
-Create and manage local modules in a Supernote plugin.
+Generate and manage Native, JNI, and JSI modules in an existing Supernote plugin.
 
 Usage:
   supernote-module
@@ -274,8 +274,8 @@ Output options:
 
 Behavior:
   All strictly checks build requirements for every module type. Native, JNI,
-  and JSI check only their applicable requirements. Deployment checks such as
-  adb device presence are advisory.
+  and JSI check only their applicable generation/build requirements. JSI also
+  reports an advisory runtime-policy boundary that cannot be proven locally.
 
 Examples:
   supernote-module doctor
