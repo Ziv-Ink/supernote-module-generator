@@ -3,9 +3,9 @@
 A code generator that adds Native, JNI, and JSI modules to an **existing
 Supernote plugin**.
 
-It generates the local package, native bridge, Android build wiring,
-declarations, and React Native autolinking needed to call Kotlin, Java, C, or
-C++ from the plugin you already have.
+It creates a local module package and connects it to your plugin. You write the
+Kotlin, Java, C, or C++ function; the generator creates the bridge, build
+configuration, TypeScript declarations, and React Native linking.
 
 ## Before using this tool
 
@@ -27,9 +27,11 @@ python3 -m pip install supernote-module-generator
 Run it from the root of the existing plugin:
 
 ```bash
-supernote-module doctor --type native
 supernote-module
 ```
+
+To check requirements first, run `supernote-module doctor --type native`,
+`supernote-module doctor --type jni`, or `supernote-module doctor --type jsi`.
 
 ## Add native functionality
 

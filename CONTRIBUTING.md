@@ -32,7 +32,7 @@ contract.
 | Exact installed help | `helptext.py` | CLI route tests |
 | Generated paths/ownership | generator and `.supernote-module.json` | generated README and Wiki files/exports pages |
 | Export signatures/types | KSP processor and `binding_codegen.py` | Wiki Export Functions page |
-| Tool/device support | Wiki Compatibility page with dated evidence | README summary |
+| Tool/device support | Wiki Requirements and Compatibility page with dated evidence | README summary |
 | First generated module | Wiki Add a Module page | concise README example and generated package links |
 | Release procedure | `maintainers/releasing.md` | publish workflow |
 
@@ -67,7 +67,7 @@ build integration, or device compatibility:
 - [ ] Update the authoritative code/constant first.
 - [ ] Add or update a behavior test that would fail without the change.
 - [ ] Update the root generator example only if new users need the fact.
-- [ ] Update the canonical GitHub Wiki page in its separate Wiki repository;
+- [ ] Update the relevant GitHub Wiki page in its separate Wiki repository;
       avoid copying the fact into unrelated pages.
 - [ ] Update generated README templates only for package-specific guidance.
 - [ ] Generate Native, JNI, and JSI samples and scan every generated text file
@@ -78,7 +78,7 @@ build integration, or device compatibility:
       the available environment; label anything not run.
 - [ ] Check repository and Wiki links, page slugs, and stale moved-file
       references.
-- [ ] Update the Wiki Compatibility page with evidence and date when a tool,
+- [ ] Update the Wiki Requirements and Compatibility page with evidence and date when a tool,
       host, device, or policy claim changes.
 - [ ] Add a user-visible note to `CHANGELOG.md` when released behavior changes.
 - [ ] Review migration needs for older `.supernote-module.json` schemas,

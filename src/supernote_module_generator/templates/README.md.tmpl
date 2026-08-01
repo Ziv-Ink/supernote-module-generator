@@ -3,9 +3,7 @@
 Generator `$GENERATOR_VERSION` · Kotlin/Java module · CLI type:
 `Native Module` · Returned values use Promises (`await`)
 
-**Update replaces this README. Remove deletes the complete module. Commit first.**
-
-## Edit Kotlin or Java
+## Edit code here
 
 ```text
 android/src/main/java/$PACKAGE_PATH/
@@ -22,7 +20,7 @@ class Example {
 }
 ```
 
-## Call it
+## Call it from your plugin
 
 ```typescript
 import $MODULE_NAME_RAW from '$NPM_NAME_RAW';
@@ -34,6 +32,11 @@ const total = await $MODULE_NAME_RAW.add(20, 22);
 supernote-module validate $NPM_NAME_RAW --build
 ```
 
-Add `--verbose` when diagnosing a failed build.
+Add `--verbose` if validation fails.
+
+## Before Update or Remove
+
+Update replaces this README and generated files, but preserves the implementation
+folder above. Remove deletes the complete module. Commit first.
 
 More help: [Kotlin and Java modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Kotlin-and-Java-Modules) · [Update and Remove](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Managing-Modules)

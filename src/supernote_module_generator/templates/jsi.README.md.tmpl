@@ -1,11 +1,9 @@
 # $NPM_NAME_RAW
 
-Generator `$GENERATOR_VERSION` · synchronous JSI C/C++ module · CLI type:
+Generator `$GENERATOR_VERSION` · Synchronous JSI module · CLI type:
 `JSI Module` · Calls are synchronous; do not use `await`
 
-**Update replaces this README. Remove deletes the complete module. Commit first.**
-
-## Edit C or C++
+## Edit code here
 
 ```text
 android/src/main/cpp/
@@ -18,7 +16,7 @@ double add(double left, double right) {
 }
 ```
 
-## Call it
+## Call it from your plugin
 
 ```typescript
 import $MODULE_NAME_RAW from '$NPM_NAME_RAW';
@@ -34,6 +32,11 @@ on it. Do not use JSI for blocking or long-running work.
 supernote-module validate $NPM_NAME_RAW --build
 ```
 
-Add `--verbose` when diagnosing a failed build.
+Add `--verbose` if validation fails.
 
-More help: [JSI modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/JSI-Modules) · [Update and Remove](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Managing-Modules)
+## Before Update or Remove
+
+Update replaces this README and generated files, but preserves the implementation
+folder above. Remove deletes the complete module. Commit first.
+
+More help: [JSI modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/JSI-Modules) · [Requirements and Compatibility](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Compatibility)

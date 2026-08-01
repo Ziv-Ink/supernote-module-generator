@@ -163,7 +163,7 @@ def test_root_readme_is_a_short_product_entry_point():
 
 
 @pytest.mark.parametrize(
-    ("backend", "source", "call", "call_model", "backend_page"),
+    ("backend", "source", "call", "call_model", "backend_page", "help_page"),
     (
         (
             "kotlin",
@@ -171,6 +171,7 @@ def test_root_readme_is_a_short_product_entry_point():
             "await DocsKotlin.add(20, 22)",
             "Promises (`await`)",
             "Kotlin-and-Java-Modules",
+            "Managing-Modules",
         ),
         (
             "jni",
@@ -178,6 +179,7 @@ def test_root_readme_is_a_short_product_entry_point():
             "await DocsJni.add(20, 22)",
             "Promises (`await`)",
             "JNI-Modules",
+            "Managing-Modules",
         ),
         (
             "jsi",
@@ -185,6 +187,7 @@ def test_root_readme_is_a_short_product_entry_point():
             "const total = DocsJsi.add(20, 22)",
             "synchronous; do not use `await`",
             "JSI-Modules",
+            "Compatibility",
         ),
     ),
 )
@@ -195,6 +198,7 @@ def test_generated_readmes_are_package_specific_wiki_supplements(
     call: str,
     call_model: str,
     backend_page: str,
+    help_page: str,
 ):
     module = generate(_module_config(tmp_path, backend))
     readme = (module / "README.md").read_text(encoding="utf-8")
@@ -207,7 +211,7 @@ def test_generated_readmes_are_package_specific_wiki_supplements(
     assert "Update replaces this README" in readme
     assert "Remove deletes the complete module" in readme
     assert f"{WIKI_ROOT}/{backend_page}" in readme
-    assert f"{WIKI_ROOT}/Managing-Modules" in readme
+    assert f"{WIKI_ROOT}/{help_page}" in readme
     assert readme.count(f"{WIKI_ROOT}/") == 2
     assert "Canonical guidance" not in readme
     assert "--build --verbose" not in readme
