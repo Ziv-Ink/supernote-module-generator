@@ -6,9 +6,14 @@ should also check their installed version with `supernote-module --version`.
 
 ## 1.1.0.dev0 - Unreleased
 
+- Made the GitHub Wiki the canonical plugin-developer documentation and reduced
+  the repository README to a product entry point.
+- Updated generated module READMEs to link directly to task-oriented Wiki
+  pages.
+- Described JSI as a supported generator backend while retaining its explicit
+  host, firmware, linker, and SELinux runtime requirements.
 - Reorganized documentation around the complete Supernote plugin workflow.
-- Clarified Native/JNI call models and the experimental, host-dependent JSI
-  boundary.
+- Clarified Native/JNI call models and the host-dependent JSI runtime boundary.
 - Separated contributor and PyPI release documentation from plugin-developer
   guides.
 - Added generator-version markers to generated module metadata and READMEs.

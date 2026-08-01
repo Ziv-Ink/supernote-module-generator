@@ -101,7 +101,6 @@ def _uses_legacy_kotlin_export(source: Path, namespace_path: str) -> bool:
 
 def _values(config: ProjectConfig) -> dict[str, str]:
     kotlin_name = native_class_prefix(config.npm_name)
-    documentation_ref = "main" if ".dev" in __version__ else f"v{__version__}"
     return {
         "NPM_NAME": json.dumps(config.npm_name),
         "NPM_NAME_RAW": config.npm_name,
@@ -115,7 +114,6 @@ def _values(config: ProjectConfig) -> dict[str, str]:
         "MODULE_NAME_RAW": config.module_name,
         "BACKEND": config.backend,
         "GENERATOR_VERSION": __version__,
-        "DOCUMENTATION_REF": documentation_ref,
         "CLASS_PREFIX": kotlin_name,
         "GRADLE_MODULE_NAME": gradle_project_name(config.npm_name),
         "MIN_SDK": str(config.min_sdk),

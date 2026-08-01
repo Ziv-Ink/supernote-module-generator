@@ -37,7 +37,7 @@ def test_release_license_and_manifest_are_present():
     assert "include README.md" in manifest
     assert "include CHANGELOG.md" in manifest
     assert "include CONTRIBUTING.md" in manifest
-    assert "recursive-include docs *.md" in manifest
+    assert "recursive-include docs" not in manifest
     assert "recursive-include maintainers *.md" in manifest
     assert "recursive-include architecture *.md" in manifest
     assert "recursive-include tests" in manifest

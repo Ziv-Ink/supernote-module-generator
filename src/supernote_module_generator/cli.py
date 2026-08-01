@@ -49,7 +49,7 @@ BACKEND_CHOICES = [
     ),
     (
         "jsi",
-        "JSI Module — Experimental synchronous C++; requires target PluginHost "
+        "JSI Module — Synchronous C++; requires target PluginHost "
         "support.",
     ),
 ]

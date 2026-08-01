@@ -72,7 +72,7 @@ TYPE_ITEMS = [
         plain_description="C/C++",
         plain_completed_label="JSI Module - C/C++",
         explanation=(
-            "Experimental synchronous C++; requires target PluginHost support."
+            "Synchronous C++; requires target PluginHost support."
         ),
     ),
 ]

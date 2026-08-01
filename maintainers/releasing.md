@@ -4,7 +4,7 @@ This procedure is for maintainers publishing `supernote-module-generator`. It
 is not part of the workflow for developers building Supernote plugins.
 
 Publish only from a clean checkout after the package version, changelog,
-compatibility matrix, templates, and user documentation are final.
+templates, and linked Wiki documentation are final.
 
 ## Prepare
 
@@ -17,7 +17,7 @@ python3 -m pip install -e '.[dev]'
 
 Update the version in `src/supernote_module_generator/__init__.py`. Confirm that
 `CHANGELOG.md` has a dated section for that version and that generated README
-links/markers identify it correctly.
+links and version markers are correct.
 
 ## Validate
 
@@ -31,8 +31,9 @@ git diff --check
 Inspect both artifacts. The wheel must contain the MIT license, Python package,
 templates, console entry point, and root README as its package metadata/PyPI
 long description. The source distribution must additionally contain the
-changelog, current user docs, contributor/maintainer/architecture docs, and
-intended test sources. Neither artifact may contain superseded audits or agent
+changelog, contributor/maintainer/architecture docs, and intended test sources.
+Wiki pages live in the separate Wiki repository and must not be duplicated in
+the package. Neither artifact may contain superseded audits or agent
 implementation prompts.
 
 Install the wheel in a fresh virtual environment and verify:
@@ -49,12 +50,18 @@ run.
 
 Before release, review:
 
-- the root first-success workflow against the official Supernote template;
-- the canonical compatibility matrix and dated device/JSI evidence;
+- the root quick example and Wiki Getting Started workflow against the official
+  Supernote template;
+- the Wiki compatibility matrix and dated device/JSI evidence;
 - Update/Remove ownership and migration behavior;
 - documented CLI options against parser/help metadata;
-- external and relative links;
+- repository links, Wiki pages/slugs, and generated README links;
 - release notes for user-visible template, command, or support changes.
+
+Clone or inspect `supernote-module-generator.wiki.git` during release review.
+Confirm that the Wiki describes the release being published or clearly labels
+newer default-branch behavior. Publish Wiki corrections before cutting a
+release whose generated READMEs link to them.
 
 ## Trusted publishing setup
 

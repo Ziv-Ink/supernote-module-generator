@@ -26,7 +26,7 @@ Module types:
   Native JNI Module
     For C/C++ behind an asynchronous Kotlin/Java React Native bridge.
   JSI Module
-    Experimental synchronous C++; requires target PluginHost support.
+    Synchronous C++; requires target PluginHost support.
 
 Global options:
   -h, --help      Show help.

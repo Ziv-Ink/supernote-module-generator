@@ -54,7 +54,7 @@ def test_plain_guided_add_uses_linear_questions_and_executes_without_review(tmp_
     assert "Package version [0.1.0]: " in transcript
     assert "For Kotlin/Java code and Android APIs through the React Native" in transcript
     assert "For C/C++ behind an asynchronous Kotlin/Java React Native bridge." in transcript
-    assert "Experimental synchronous C++; requires target PluginHost support." in transcript
+    assert "Synchronous C++; requires target PluginHost support." in transcript
     assert "Add module\n\nModule type:" in transcript
     assert "Module type:  Native Module - Kotlin/Java\n\n  Used as" in transcript
     assert "  Used as the local folder" in transcript
@@ -169,7 +169,7 @@ def test_root_help_explains_module_execution_models(tmp_path: Path):
     output = stdout.getvalue()
     assert "For Kotlin/Java code and Android APIs through the React Native bridge." in output
     assert "For C/C++ behind an asynchronous Kotlin/Java React Native bridge." in output
-    assert "Experimental synchronous C++; requires target PluginHost support." in output
+    assert "Synchronous C++; requires target PluginHost support." in output
 
 
 def test_back_reopens_previous_add_answer_for_editing(tmp_path: Path):

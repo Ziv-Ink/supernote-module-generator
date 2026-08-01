@@ -17,13 +17,27 @@ from supernote_module_generator.config import (
     jsi_global_name,
     native_library_name,
 )
-from supernote_module_generator import generator as generator_module
 from supernote_module_generator.generator import generate
 from supernote_module_generator.helptext import COMMAND_HELP, ROOT_HELP
 from supernote_module_generator.verification import TEMPLATE_TOKEN
 
 
 ROOT = Path(__file__).resolve().parents[1]
+WIKI_ROOT = "https://github.com/Ziv-Ink/supernote-module-generator/wiki"
+WIKI_PAGES = {
+    "CLI-and-Automation",
+    "Choosing-a-Module",
+    "Compatibility",
+    "Exports-and-JavaScript-API",
+    "Getting-Started",
+    "Home",
+    "How-Modules-Work",
+    "JNI-Modules",
+    "JSI-Modules",
+    "Kotlin-and-Java-Modules",
+    "Managing-Modules",
+    "Troubleshooting",
+}
 
 
 def _module_config(tmp_path: Path, backend: str) -> ProjectConfig:
@@ -43,8 +57,8 @@ def _module_config(tmp_path: Path, backend: str) -> ProjectConfig:
     )
 
 
-def _documents() -> list[Path]:
-    roots = [ROOT / "docs", ROOT / "maintainers", ROOT / "architecture"]
+def _repository_documents() -> list[Path]:
+    roots = [ROOT / "maintainers", ROOT / "architecture"]
     return [
         ROOT / "README.md",
         ROOT / "CHANGELOG.md",
@@ -65,26 +79,22 @@ def _heading_anchors(document: Path) -> set[str]:
     return anchors
 
 
-def test_parser_options_are_covered_by_runtime_help_and_cli_reference():
-    reference = (ROOT / "docs/reference/cli.md").read_text(encoding="utf-8")
+def test_parser_options_are_covered_by_installed_help():
     for option in GLOBAL_BOOLEANS:
         assert option in ROOT_HELP
-        assert option in reference
 
     for command, options in COMMAND_VALUE_OPTIONS.items():
         for option in options:
             assert option in COMMAND_HELP[command]
-            assert option in reference
 
     for command, options in COMMAND_BOOLEAN_OPTIONS.items():
         for option in options:
             assert option in COMMAND_HELP[command]
-            assert option in reference
 
 
-def test_relative_markdown_links_resolve():
+def test_relative_repository_markdown_links_resolve():
     pattern = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
-    for document in _documents():
+    for document in _repository_documents():
         for raw_target in pattern.findall(document.read_text(encoding="utf-8")):
             target = raw_target.split("#", 1)[0].strip().strip("<>")
             if not target or "://" in target or target.startswith("mailto:"):
@@ -98,14 +108,19 @@ def test_relative_markdown_links_resolve():
                 )
 
 
-def test_absolute_repository_documentation_links_target_current_files():
-    documents = [*_documents(), *sorted((ROOT / "src/supernote_module_generator/templates").glob("*.md.tmpl"))]
+def test_absolute_repository_links_target_current_files():
+    documents = [
+        *_repository_documents(),
+        *sorted((ROOT / "src/supernote_module_generator/templates").glob("*.md.tmpl")),
+    ]
     pattern = re.compile(
-        r"https://github\.com/Ziv-Ink/supernote-module-generator/blob/"
-        r"(?:main|v[^/]+|\$DOCUMENTATION_REF)/([^\s)#]+)(?:#([^\s)]+))?"
+        r"https://github\.com/Ziv-Ink/supernote-module-generator/blob/main/"
+        r"([^\s)#]+)(?:#([^\s)]+))?"
     )
     for document in documents:
-        for path_text, anchor in pattern.findall(document.read_text(encoding="utf-8")):
+        for path_text, anchor in pattern.findall(
+            document.read_text(encoding="utf-8")
+        ):
             target = ROOT / path_text
             assert target.is_file(), f"{document}: broken repository link to {path_text}"
             if anchor:
@@ -114,56 +129,78 @@ def test_absolute_repository_documentation_links_target_current_files():
                 )
 
 
-def test_root_readme_contains_the_complete_first_success_contract():
+def test_wiki_links_use_known_task_pages():
+    documents = [
+        *_repository_documents(),
+        *sorted((ROOT / "src/supernote_module_generator/templates").glob("*.md.tmpl")),
+    ]
+    pattern = re.compile(
+        re.escape(WIKI_ROOT) + r"(?:/([^\s)#]+))?(?:#[^\s)]+)?"
+    )
+    links = []
+    for document in documents:
+        links.extend(pattern.findall(document.read_text(encoding="utf-8")))
+
+    assert links
+    for page in links:
+        if page:
+            assert page in WIKI_PAGES
+
+
+def test_root_readme_is_a_short_product_entry_point():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required = (
-        "PluginConfig.json",
-        "android/settings.gradle",
-        "supernote-module",
-        "local_modules/local-math/android/src/main/java/com/example/math/Example.kt",
+        "## Why use it",
+        "## Install",
+        "pip install supernote-module-generator",
+        "## Quick example",
         "fun add(left: Double, right: Double): Double",
-        "import Math from 'local-math';",
         "await Math.add(20, 22)",
-        "./buildPlugin.sh",
-        ".\\buildPlugin.ps1",
-        "build/outputs/plugin.snplg",
-        "adb push",
-        "Settings > Apps > Plugins > Add Plugin",
-        "adb logcat",
+        "## Module types",
+        "## Compatibility summary",
+        "## Documentation",
+        WIKI_ROOT,
+        "## Contributing",
+        "## License",
     )
     for value in required:
         assert value in readme
+    assert len(readme.splitlines()) < 150
 
 
 @pytest.mark.parametrize(
-    ("backend", "source", "call", "call_model"),
+    ("backend", "source", "call", "call_model", "backend_page"),
     (
         (
             "kotlin",
             "android/src/main/java/com/example/docs_kotlin/",
             "await DocsKotlin.add(20, 22)",
             "JavaScript Promise (`await`)",
+            "Kotlin-and-Java-Modules",
         ),
         (
             "jni",
             "android/src/main/cpp/",
             "await DocsJni.add(20, 22)",
             "JavaScript Promise (`await`)",
+            "JNI-Modules",
         ),
         (
             "jsi",
             "android/src/main/cpp/",
             "const total = DocsJsi.add(20, 22)",
             "Synchronous; do not use `await`",
+            "JSI-Modules",
         ),
     ),
 )
-def test_generated_readmes_are_package_specific_supplements(
+def test_generated_readmes_are_package_specific_wiki_supplements(
     tmp_path: Path,
     backend: str,
     source: str,
     call: str,
     call_model: str,
+    backend_page: str,
 ):
     module = generate(_module_config(tmp_path, backend))
     readme = (module / "README.md").read_text(encoding="utf-8")
@@ -175,20 +212,11 @@ def test_generated_readmes_are_package_specific_supplements(
     assert call_model in readme
     assert "update` replaces this README" in readme
     assert "Remove deletes the entire module" in readme
-    assert "docs/getting-started/first-module.md" in readme
+    assert f"{WIKI_ROOT}/{backend_page}" in readme
+    assert f"{WIKI_ROOT}/Getting-Started" in readme
+    assert "/blob/" not in readme
+    assert "/docs/" not in readme
     assert metadata["generator_version"] == __version__
-    assert "/blob/main/docs/" in readme
-
-
-def test_released_generated_readme_links_to_its_version_tag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(generator_module, "__version__", "1.1.0")
-    module = generate(_module_config(tmp_path, "jni"))
-    readme = (module / "README.md").read_text(encoding="utf-8")
-
-    assert "Generator `1.1.0`" in readme
-    assert "/blob/v1.1.0/docs/" in readme
 
 
 @pytest.mark.parametrize("backend", ["kotlin", "jni", "jsi"])
@@ -212,32 +240,33 @@ def test_native_initial_declaration_uses_the_configured_interface_name(tmp_path:
     assert "$MODULE" not in declarations
 
 
-def test_user_documentation_has_no_agent_spec_or_release_workflow_in_its_index():
-    user_index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+def test_repository_does_not_duplicate_wiki_user_guides():
+    assert not (ROOT / "docs").exists()
     assert not (ROOT / "UX_REDESIGN_SPECIFICATION.md").exists()
-    assert not list((ROOT / "docs/history").glob("*.md"))
-    assert "UX specification" not in user_index
-    assert "Publishing to PyPI" not in user_index
     assert not (ROOT / "PYPI_README.md").exists()
-
-
-def test_current_user_documentation_does_not_reference_private_deploy_script():
-    user_documents = [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
-    for document in user_documents:
-        content = document.read_text(encoding="utf-8")
-        assert "deploy_plugin" not in content, document
-
-
-def test_jsi_docs_separate_generation_compilation_and_runtime_support():
-    compatibility = (ROOT / "docs/reference/compatibility.md").read_text(
+    assert "recursive-include docs" not in (ROOT / "MANIFEST.in").read_text(
         encoding="utf-8"
     )
-    choosing = (ROOT / "docs/guides/choosing-a-module.md").read_text(
-        encoding="utf-8"
-    )
-    for value in ("Generation", "Compilation", "Execution", "enforcing retail"):
-        assert value in compatibility
-    normalized = " ".join(choosing.split())
-    assert "experimental" in normalized.lower()
-    assert "direct C/C++ calls" in normalized
-    assert "not supported" in normalized
+
+
+def test_public_material_does_not_reference_private_deploy_script():
+    public_documents = [
+        ROOT / "README.md",
+        *sorted((ROOT / "src/supernote_module_generator/templates").glob("*.md.tmpl")),
+    ]
+    for document in public_documents:
+        assert "deploy_plugin" not in document.read_text(encoding="utf-8"), document
+
+
+def test_jsi_is_supported_without_overstating_runtime_availability():
+    current_material = [
+        ROOT / "README.md",
+        ROOT / "src/supernote_module_generator/cli.py",
+        ROOT / "src/supernote_module_generator/helptext.py",
+        ROOT / "src/supernote_module_generator/workflows.py",
+        ROOT / "src/supernote_module_generator/templates/jsi.README.md.tmpl",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in current_material)
+    assert "experimental" not in combined.lower()
+    assert "requires target PluginHost support" in combined
+    assert "generation and compilation do not" in combined.lower()
