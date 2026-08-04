@@ -1,15 +1,13 @@
 # Supernote Module Generator
 
-A code generator that adds Native, JNI, and JSI modules to an **existing
-Supernote plugin**.
-
-It creates a local module package and connects it to your plugin. You write the
-Kotlin, Java, C, or C++ function; the generator creates the bridge, build
+A code generator that adds Native, JNI, and JSI modules for use in Supernote plugins.
+It creates a local module package and automatically wires it to your plugin so you can focus on what is truly important, your code.
+You write the Kotlin, Java or C/C++ functions or methods and the generator takes care of the bridge, build
 configuration, TypeScript declarations, and React Native linking.
 
 ## Before using this tool
 
-You need a working Supernote plugin that already builds successfully. Creating,
+Youll need a working Supernote plugin that already builds successfully. Creating,
 packaging, installing, and debugging that plugin are outside this project's
 scope; use the [official Supernote documentation](https://docs.supernote.com/)
 for that workflow.
