@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import re
@@ -838,6 +840,24 @@ private:
             binding_codegen.generate(module)
             manifest = json.loads((module / "android/build/generated/supernote/exports.json").read_text())
             self.assertEqual([], manifest["objects"])
+
+    def test_cli_summary_counts_native_objects_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi", source="")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject
+class Counter { public: Counter(); };
+""",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = binding_codegen.main(["--module-root", str(module)])
+            self.assertEqual(0, result)
+            self.assertIn(
+                "Generated 0 free-function exports and 1 native-object exports",
+                output.getvalue(),
+            )
 
 
 if __name__ == "__main__":

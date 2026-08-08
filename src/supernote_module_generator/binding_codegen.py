@@ -2938,10 +2938,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         exports = generate(args.module_root, check=args.check)
+        manifest_path = (
+            args.module_root.expanduser().resolve()
+            / "android/build/generated/supernote/exports.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        object_count = len(manifest["objects"])
     except (CodegenError, OSError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Generated {len(exports)} Supernote {args.module_root.name} exports")
+    print(
+        f"Generated {len(exports)} free-function exports and "
+        f"{object_count} native-object exports for Supernote "
+        f"{args.module_root.name}"
+    )
     return 0
 
 
