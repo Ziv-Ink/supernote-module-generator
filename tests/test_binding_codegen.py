@@ -577,6 +577,88 @@ class Second { public: Second(); };
             with self.assertRaisesRegex(binding_codegen.CodegenError, "duplicate JavaScript object export"):
                 binding_codegen.scan_bindings(module)
 
+    def test_object_typescript_factory_name_collision_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject
+class Counter { public: Counter(); };
+// @SupernoteExportObject
+class CounterFactory { public: CounterFactory(); };
+""",
+            )
+            with self.assertRaises(binding_codegen.CodegenError) as raised:
+                binding_codegen.scan_bindings(module)
+            message = str(raised.exception)
+            self.assertIn("generated TypeScript name 'CounterFactory'", message)
+            self.assertIn("object export 'Counter'", message)
+            self.assertIn("export 'CounterFactory'", message)
+            self.assertIn("model/Counter.hpp:1", message)
+            self.assertIn("model/Counter.hpp:3", message)
+
+    def test_renamed_object_typescript_factory_collision_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject(name = "Counter")
+class NativeCounter { public: NativeCounter(); };
+// @SupernoteExportObject(name = "CounterFactory")
+class NativeFactory { public: NativeFactory(); };
+""",
+            )
+            with self.assertRaises(binding_codegen.CodegenError) as raised:
+                binding_codegen.scan_bindings(module)
+            message = str(raised.exception)
+            self.assertIn("generated TypeScript name 'CounterFactory'", message)
+            self.assertIn("object export 'Counter'", message)
+            self.assertIn("export 'CounterFactory'", message)
+            self.assertIn('@SupernoteExportObject(name = "...")', message)
+
+    def test_object_typescript_module_interface_collision_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject(name = "LocalTestModule")
+class NativeModule { public: NativeModule(); };
+""",
+            )
+            with self.assertRaises(binding_codegen.CodegenError) as raised:
+                binding_codegen.scan_bindings(module)
+            message = str(raised.exception)
+            self.assertIn("generated TypeScript name 'LocalTestModule'", message)
+            self.assertIn("generated module interface 'LocalTestModule'", message)
+            self.assertIn("export 'LocalTestModule'", message)
+
+    def test_generated_object_header_includes_are_unique(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject
+class First { public: First(); };
+// @SupernoteExportObject
+class Second { public: Second(); };
+""",
+                relative="model/Objects.hpp",
+            )
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject
+class Third { public: Third(); };
+""",
+                relative="other/Third.hh",
+            )
+            binding_codegen.generate(module)
+            generated = (
+                module
+                / "android/build/generated/supernote/jni/generated_bindings.cpp"
+            ).read_text(encoding="utf-8")
+            self.assertEqual(1, generated.count('#include "model/Objects.hpp"'))
+            self.assertEqual(1, generated.count('#include "other/Third.hh"'))
+
     def test_object_annotation_location_backend_and_malformed_diagnostics(self):
         cases = (
             (
@@ -659,6 +741,7 @@ class Example {
 public:
   Example();
   Example(const Example &other);
+  Example(Example &&);
   ~Example();
   double (*callback)();
   double value() const { return 1.0; }
@@ -670,6 +753,23 @@ public:
             item = binding_codegen.scan_bindings(module).objects[0]
             self.assertEqual((), item.constructor.parameters)
             self.assertEqual(["value"], [method.js_name for method in item.methods])
+
+    def test_constructor_containing_class_name_is_not_mistaken_for_copy(self):
+        source = """// @SupernoteExportObject
+class Example {
+public:
+  Example();
+  Example(std::vector<Example> &values);
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            with self.assertRaisesRegex(
+                binding_codegen.CodegenError,
+                "unsupported parameter",
+            ):
+                binding_codegen.scan_bindings(module)
 
     def test_free_function_annotation_in_header_remains_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

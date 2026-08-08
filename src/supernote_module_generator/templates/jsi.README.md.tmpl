@@ -16,6 +16,41 @@ double add(double left, double right) {
 }
 ```
 
+## Persistent C++ objects
+
+JSI modules can also expose persistent C++ objects. Put
+`@SupernoteExportObject` on a class or struct in a C++ header below
+`android/src/main/cpp/`:
+
+```cpp
+// Counter.hpp
+#pragma once
+
+// @SupernoteExportObject
+class Counter {
+public:
+  Counter(double initial);
+  double value() const;
+  void increment(double amount);
+
+private:
+  double value_;
+};
+```
+
+Implement the class in an ordinary `.cpp` file. The generated factory exposes
+it as `$MODULE_NAME_RAW.Counter.create(...)`:
+
+```typescript
+const counter = $MODULE_NAME_RAW.Counter.create(10);
+counter.increment(5);
+console.log(counter.value());
+```
+
+Each returned JavaScript object represents a persistent native C++ instance.
+Supported public instance methods are exposed automatically. Native objects are
+JSI-only, and their constructors and methods remain synchronous.
+
 ## Call it from your plugin
 
 ```typescript
@@ -39,4 +74,4 @@ Add `--verbose` if validation fails.
 Update replaces this README and generated files, but preserves the implementation
 folder above. Remove deletes the complete module. Commit first.
 
-More help: [JSI modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/JSI-Modules) · [Requirements and Compatibility](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Compatibility)
+More help: [JSI modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/JSI-Modules) · [Troubleshooting](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)

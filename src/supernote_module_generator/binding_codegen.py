@@ -1244,6 +1244,22 @@ def _parse_member_qualifiers(
     return is_const, is_noexcept
 
 
+def _is_copy_or_move_constructor(
+    groups: list[list[_Token]],
+    cpp_name: str,
+) -> bool:
+    if len(groups) != 1:
+        return False
+    values = [token.value for token in groups[0]]
+    if values and groups[0][-1].kind == "identifier":
+        values = values[:-1]
+    return values in (
+        [cpp_name, "&"],
+        ["const", cpp_name, "&"],
+        [cpp_name, "&", "&"],
+    )
+
+
 def _parse_object_members(
     *,
     module_root: Path,
@@ -1315,8 +1331,7 @@ def _parse_object_members(
             continue
         constructor_prefix = values[:opening]
         if constructor_prefix in ([cpp_name], ["explicit", cpp_name]):
-            group_values = [[token.value for token in group] for group in groups]
-            if len(groups) == 1 and cpp_name in group_values[0] and "&" in group_values[0]:
+            if _is_copy_or_move_constructor(groups, cpp_name):
                 continue
             parameters = _parse_parameters(
                 groups,
@@ -1869,6 +1884,40 @@ def scan_objects(
     return objects
 
 
+def _validate_typescript_names(
+    objects: list[ObjectExport],
+    module_name: str,
+) -> None:
+    module_interface = f"{module_name}Module"
+    generated_names: dict[str, tuple[ObjectExport, str]] = {}
+    for item in objects:
+        candidates = (
+            (item.js_name, "object interface"),
+            (f"{item.js_name}Factory", "factory interface"),
+        )
+        for generated_name, role in candidates:
+            if generated_name == module_interface:
+                raise CodegenError(
+                    f"{item.source}:{item.line}: module {module_name!r}, "
+                    f"export {item.js_name!r}: generated TypeScript name "
+                    f"{generated_name!r} for the {role} collides with the "
+                    f"generated module interface {module_interface!r}; choose "
+                    "a different @SupernoteExportObject(name = \"...\")"
+                )
+            previous = generated_names.get(generated_name)
+            if previous is not None:
+                first, first_role = previous
+                raise CodegenError(
+                    f"{item.source}:{item.line}: module {module_name!r}, "
+                    f"export {item.js_name!r}: generated TypeScript name "
+                    f"{generated_name!r} for the {role} conflicts with the "
+                    f"{first_role} generated for object export "
+                    f"{first.js_name!r} at {first.source}:{first.line}; choose "
+                    "a different @SupernoteExportObject(name = \"...\")"
+                )
+            generated_names[generated_name] = (item, role)
+
+
 def scan_bindings(
     module_root: Path,
     *,
@@ -1898,6 +1947,7 @@ def scan_bindings(
                 f"export at {first.source}:{first.line}; give the function or "
                 "object a different annotation name"
             )
+    _validate_typescript_names(objects, resolved_name)
     return ScannedBindings(tuple(exports), tuple(objects))
 
 
@@ -2585,7 +2635,8 @@ def _jsi_binding(
     global_name = str(config["jsi_global_name"])
     declarations = _cpp_declarations(exports)
     object_includes = "\n".join(
-        f'#include "{item.include}"' for item in objects
+        f'#include "{include}"'
+        for include in dict.fromkeys(item.include for item in objects)
     )
     object_include_block = f"{object_includes}\n\n" if object_includes else ""
     object_memory_include = "#include <memory>\n" if objects else ""

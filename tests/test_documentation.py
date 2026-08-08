@@ -151,15 +151,16 @@ def test_root_readme_is_a_short_product_entry_point():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     opening = "\n".join(readme.splitlines()[:12])
     opening_words = " ".join(opening.split())
-    assert "Native, JNI, and JSI" in opening
+    assert "native functionality" in opening
     assert "existing Supernote plugin" in opening_words
+    assert "Android APIs" in opening
+    assert "## Install" in readme
     assert "pip install supernote-module-generator" in readme
     assert "supernote-module doctor --type native" in readme
-    assert "fun add(left: Double, right: Double): Double" in readme
-    assert "await Math.add(20, 22)" in readme
+    assert "write and export native APIs" in readme
     assert WIKI_ROOT in readme
     assert "https://docs.supernote.com/" in readme
-    assert len(readme.splitlines()) < 130
+    assert len(readme.splitlines()) < 60
 
 
 @pytest.mark.parametrize(
@@ -187,7 +188,7 @@ def test_root_readme_is_a_short_product_entry_point():
             "const total = DocsJsi.add(20, 22)",
             "synchronous; do not use `await`",
             "JSI-Modules",
-            "Compatibility",
+            "Troubleshooting",
         ),
     ),
 )
@@ -215,10 +216,27 @@ def test_generated_readmes_are_package_specific_wiki_supplements(
     assert readme.count(f"{WIKI_ROOT}/") == 2
     assert "Canonical guidance" not in readme
     assert "--build --verbose" not in readme
-    assert len(readme.splitlines()) <= 45
+    maximum_lines = 80 if backend == "jsi" else 45
+    assert len(readme.splitlines()) <= maximum_lines
     assert "/blob/" not in readme
     assert "/docs/" not in readme
     assert metadata["generator_version"] == __version__
+
+
+def test_generated_jsi_readme_documents_native_objects(tmp_path: Path):
+    module = generate(_module_config(tmp_path, "jsi"))
+    readme = (module / "README.md").read_text(encoding="utf-8")
+
+    assert "## Persistent C++ objects" in readme
+    assert "// @SupernoteExportObject" in readme
+    assert "android/src/main/cpp/" in readme
+    assert "class Counter" in readme
+    assert "DocsJsi.Counter.create(10)" in readme
+    assert "persistent native C++ instance" in readme
+    assert "Supported public instance methods" in readme
+    assert "JSI-only" in readme
+    assert "remain synchronous" in readme
+    assert f"{WIKI_ROOT}/JSI-Modules" in readme
 
 
 @pytest.mark.parametrize("backend", ["kotlin", "jni", "jsi"])

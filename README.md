@@ -12,16 +12,27 @@ The generator handles that dull and messy connection between JavaScript and nati
 
 It does **not** create the Supernote plugin, decide whether native code is actually faster for your workload, make an API or library compatible with the target device, or guarantee that a compiled native library can run inside PluginHost.
 
+## Install
+
+Python 3.9 or newer is required. Install the generator with:
+
+```bash
+python3 -m pip install supernote-module-generator
+```
+
+Run `supernote-module` from an existing plugin root. To check a backend's local
+requirements first, use `supernote-module doctor --type native`, `jni`, or `jsi`.
+
 ## Documentation
 
-The [Wiki](https://github.com/Ziv-Ink/supernote-module-generator/wiki) explains how to install and use the generator, choose a module type, write and export native functions, manage generated modules, and troubleshoot problems.
+The [Wiki](https://github.com/Ziv-Ink/supernote-module-generator/wiki) explains how to use the generator, choose a module type, write and export native APIs, manage generated modules, and troubleshoot problems.
 
 Creating, building, installing, and debugging the Supernote plugin itself is covered by the [official Supernote plugin documentation](https://docs.supernote.com/).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) when changing the generator itself.
+See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md) when changing the generator itself.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/LICENSE).
