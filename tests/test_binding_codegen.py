@@ -39,6 +39,18 @@ class BindingCodegenScannerTests(unittest.TestCase):
         )
         return module
 
+    def write_object_header(
+        self,
+        module: Path,
+        source: str,
+        *,
+        relative: str = "model/Counter.hpp",
+    ) -> Path:
+        path = module / "android/src/main/cpp" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        return path
+
     def test_spaced_rename_and_noexcept_are_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(
@@ -410,6 +422,322 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 "env->ThrowNew(error_class, message.c_str())",
                 generated,
             )
+
+    def test_jsi_object_scans_constructor_methods_and_access_control(self):
+        source = """// @SupernoteExportObject
+class Counter {
+public:
+  Counter(bool enabled, double initial, std::string label);
+  bool enabled() const;
+  double value() const noexcept;
+  std::string label() noexcept;
+  void increment(double amount, bool notify, std::string reason);
+  double public_field;
+private:
+  int privateUnsupported();
+protected:
+  int protectedUnsupported();
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            bindings = binding_codegen.scan_bindings(module)
+            self.assertEqual(["add"], [item.js_name for item in bindings.exports])
+            self.assertEqual(["Counter"], [item.js_name for item in bindings.objects])
+            item = bindings.objects[0]
+            self.assertEqual(
+                ["bool", "double", "std::string"],
+                [parameter.cpp_type for parameter in item.constructor.parameters],
+            )
+            self.assertEqual(
+                ["enabled", "value", "label", "increment"],
+                [method.js_name for method in item.methods],
+            )
+            self.assertTrue(item.methods[0].const)
+            self.assertTrue(item.methods[1].const)
+            self.assertTrue(item.methods[1].noexcept)
+            self.assertTrue(item.methods[2].noexcept)
+
+    def test_jsi_object_rename_struct_and_zero_argument_constructor(self):
+        source = """// @SupernoteExportObject(name = "Document")
+struct NativeDocument {
+  NativeDocument();
+  double pageCount() const;
+private:
+  int hidden();
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source, relative="NativeDocument.hxx")
+            item = binding_codegen.scan_bindings(module).objects[0]
+            self.assertEqual("NativeDocument", item.cpp_name)
+            self.assertEqual("Document", item.js_name)
+            self.assertEqual((), item.constructor.parameters)
+            self.assertEqual(["pageCount"], [method.js_name for method in item.methods])
+
+    def test_class_default_private_and_struct_default_public(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject
+class PrivateByDefault {
+  PrivateByDefault();
+public:
+  PrivateByDefault(double value);
+  double value();
+};
+// @SupernoteExportObject
+struct PublicByDefault {
+  PublicByDefault();
+  void reset();
+};
+""",
+                relative="access.hh",
+            )
+            objects = binding_codegen.scan_bindings(module).objects
+            self.assertEqual(["PrivateByDefault", "PublicByDefault"], [item.js_name for item in objects])
+            self.assertEqual(1, len(objects[0].constructor.parameters))
+            self.assertEqual(0, len(objects[1].constructor.parameters))
+
+    def test_object_rejects_unsupported_public_method_and_static_method(self):
+        cases = {
+            "unsupported-return": (
+                "int unsupported();",
+                "unsupported public method declaration",
+            ),
+            "unsupported-parameter": (
+                "double evaluate(int value);",
+                "argument 1 must be a named bool, double, or std::string",
+            ),
+            "static": (
+                "static double evaluate();",
+                "static methods are not supported",
+            ),
+        }
+        for name, (method, diagnostic) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
+                self.write_object_header(
+                    module,
+                    "// @SupernoteExportObject\nclass Example {\npublic:\n"
+                    "  Example();\n"
+                    f"  {method}\n"
+                    "};\n",
+                )
+                with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
+                    binding_codegen.scan_bindings(module)
+
+    def test_object_rejects_method_and_constructor_overloads(self):
+        cases = {
+            "method": (
+                "Example();\n  double value();\n  double value(double fallback);",
+                "overloaded or duplicate method 'value'",
+            ),
+            "constructor": (
+                "Example();\n  Example(double value);\n  double value();",
+                "overloaded public constructors",
+            ),
+        }
+        for name, (members, diagnostic) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
+                self.write_object_header(
+                    module,
+                    "// @SupernoteExportObject\nclass Example {\npublic:\n  "
+                    + members
+                    + "\n};\n",
+                )
+                with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
+                    binding_codegen.scan_bindings(module)
+
+    def test_object_export_name_collisions_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject(name = "add")
+class Counter { public: Counter(); };
+""",
+            )
+            with self.assertRaisesRegex(binding_codegen.CodegenError, "collides with free-function"):
+                binding_codegen.scan_bindings(module)
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """// @SupernoteExportObject(name = "Thing")
+class First { public: First(); };
+// @SupernoteExportObject(name = "Thing")
+class Second { public: Second(); };
+""",
+            )
+            with self.assertRaisesRegex(binding_codegen.CodegenError, "duplicate JavaScript object export"):
+                binding_codegen.scan_bindings(module)
+
+    def test_object_annotation_location_backend_and_malformed_diagnostics(self):
+        cases = (
+            (
+                "jsi",
+                "Counter.cpp",
+                "// @SupernoteExportObject\nclass Counter { public: Counter(); };\n",
+                "allowed only in .h",
+            ),
+            (
+                "jni",
+                "Counter.hpp",
+                "// @SupernoteExportObject\nclass Counter { public: Counter(); };\n",
+                "supported only by the JSI backend",
+            ),
+            (
+                "jsi",
+                "Counter.hpp",
+                "// @SupernoteExportObject(bad)\nclass Counter { public: Counter(); };\n",
+                "malformed object export tag",
+            ),
+        )
+        for backend, relative, source, diagnostic in cases:
+            with self.subTest(backend=backend, relative=relative), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend=backend)
+                self.write_object_header(module, source, relative=relative)
+                with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
+                    binding_codegen.scan_bindings(module)
+
+    def test_object_marker_lexer_defenses_and_conditional_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                'const char *text = "// @SupernoteExportObject";\n'
+                "/* // @SupernoteExportObject */\n"
+                "// Documentation mentions @SupernoteExportObject here.\n",
+            )
+            self.assertEqual((), binding_codegen.scan_bindings(module).objects)
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                "#if 0\n// @SupernoteExportObject\n"
+                "class Hidden { public: Hidden(); };\n#endif\n",
+            )
+            with self.assertRaisesRegex(
+                binding_codegen.CodegenError,
+                "preprocessor conditionals",
+            ):
+                binding_codegen.scan_bindings(module)
+
+    def test_object_rejects_templates_inheritance_and_nested_exports(self):
+        cases = {
+            "template": (
+                "template <typename T>\n// @SupernoteExportObject\n"
+                "class Example { public: Example(); };\n",
+                "declaration prefix before the object marker",
+            ),
+            "inheritance": (
+                "// @SupernoteExportObject\n"
+                "class Example : public Base { public: Example(); };\n",
+                "inheritance is not supported",
+            ),
+            "nested": (
+                "class Outer {\n// @SupernoteExportObject\n"
+                "class Example { public: Example(); };\n};\n",
+                "nested exported classes are not supported",
+            ),
+        }
+        for name, (source, diagnostic) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
+                self.write_object_header(module, source)
+                with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
+                    binding_codegen.scan_bindings(module)
+
+    def test_object_ignores_destructor_copy_constructor_and_public_fields(self):
+        source = """// @SupernoteExportObject
+class Example {
+public:
+  Example();
+  Example(const Example &other);
+  ~Example();
+  double (*callback)();
+  double value() const { return 1.0; }
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            item = binding_codegen.scan_bindings(module).objects[0]
+            self.assertEqual((), item.constructor.parameters)
+            self.assertEqual(["value"], [method.js_name for method in item.methods])
+
+    def test_free_function_annotation_in_header_remains_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                "// @SupernoteExport\ndouble illegal(double value);\n",
+            )
+            with self.assertRaisesRegex(binding_codegen.CodegenError, "allowed only in .cc"):
+                binding_codegen.scan_bindings(module)
+
+    def test_object_manifest_typescript_hostobject_and_lifetime_generation(self):
+        source = """#pragma once
+#include <string>
+// @SupernoteExportObject
+class Counter {
+public:
+  Counter(double initial);
+  double value() const noexcept;
+  void increment(double amount);
+private:
+  double value_;
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            binding_codegen.generate(module)
+            manifest = json.loads((module / "android/build/generated/supernote/exports.json").read_text())
+            declarations = (module / "index.d.ts").read_text()
+            generated = (module / "android/build/generated/supernote/jni/generated_bindings.cpp").read_text()
+            self.assertEqual("Counter", manifest["objects"][0]["cpp_name"])
+            self.assertEqual("double", manifest["objects"][0]["constructor"]["parameters"][0]["type"])
+            self.assertTrue(manifest["objects"][0]["methods"][0]["const"])
+            self.assertIn("export interface Counter {", declarations)
+            self.assertIn("value(): number;", declarations)
+            self.assertIn("create(initial: number): Counter;", declarations)
+            self.assertIn("Counter: CounterFactory;", declarations)
+            self.assertIn('#include "model/Counter.hpp"', generated)
+            self.assertIn("public facebook::jsi::HostObject", generated)
+            self.assertIn("std::shared_ptr<Counter> instance_", generated)
+            self.assertIn("std::make_shared<Counter>", generated)
+            self.assertIn("Object::createFromHostObject", generated)
+            self.assertIn("getPropertyNames", generated)
+            self.assertIn("properties.push_back", generated)
+            self.assertNotIn("return {\n", generated)
+            self.assertIn('property_name == "increment"', generated)
+            self.assertIn("[native_instance = std::move(native_instance)]", generated)
+            self.assertNotIn("[this]", generated)
+            self.assertNotIn("this->", generated)
+            self.assertIn("LocalTest.Counter.increment: expected 1 argument", generated)
+            self.assertEqual(
+                ["add"],
+                [
+                    item.js_name
+                    for item in binding_codegen.generate(module, check=True)
+                ],
+            )
+            self.write_object_header(module, source.replace("increment", "increase"))
+            with self.assertRaisesRegex(binding_codegen.CodegenError, "generated bindings are stale"):
+                binding_codegen.generate(module, check=True)
+
+    def test_modules_without_objects_emit_empty_manifest_array(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            binding_codegen.generate(module)
+            manifest = json.loads((module / "android/build/generated/supernote/exports.json").read_text())
+            self.assertEqual([], manifest["objects"])
 
 
 if __name__ == "__main__":

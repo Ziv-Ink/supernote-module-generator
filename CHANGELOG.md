@@ -6,6 +6,9 @@ should also check their installed version with `supernote-module --version`.
 
 ## 1.1.0.dev0 - Unreleased
 
+- Added first-class JSI native C++ object exports with generated HostObject
+  lifetime management, `ObjectName.create(...)` factories, TypeScript types,
+  and manifest metadata.
 - Documentation now assumes an existing working Supernote plugin and focuses
   on adding and managing generated modules. User guides live in the GitHub
   Wiki; contributor and release documentation remains in the repository.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate JNI or JSI bindings from // @SupernoteExport C++ functions."""
+"""Generate JNI or JSI bindings from annotated C++ APIs."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,12 @@ ANNOTATION = re.compile(
     r"@SupernoteExport"
     r"(?:\(\s*name\s*=\s*\"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\"\s*\))?"
 )
+OBJECT_ANNOTATION = re.compile(
+    r"@SupernoteExportObject"
+    r"(?:\(\s*name\s*=\s*\"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\"\s*\))?"
+)
 CPP_SUFFIXES = {".cc", ".cpp", ".cxx"}
+CPP_HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 FORBIDDEN_TAG_SUFFIXES = {
     ".c",
     ".h",
@@ -207,6 +212,71 @@ class Export:
                 for parameter in self.parameters
             ],
         }
+
+
+@dataclass(frozen=True)
+class ObjectConstructor:
+    parameters: tuple[Parameter, ...]
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "parameters": [
+                {"type": parameter.cpp_type, "name": parameter.name}
+                for parameter in self.parameters
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class ObjectMethod:
+    line: int
+    cpp_name: str
+    js_name: str
+    return_type: str
+    parameters: tuple[Parameter, ...]
+    const: bool = False
+    noexcept: bool = False
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "line": self.line,
+            "cpp_name": self.cpp_name,
+            "js_name": self.js_name,
+            "return_type": self.return_type,
+            "parameters": [
+                {"type": parameter.cpp_type, "name": parameter.name}
+                for parameter in self.parameters
+            ],
+            "const": self.const,
+            "noexcept": self.noexcept,
+        }
+
+
+@dataclass(frozen=True)
+class ObjectExport:
+    source: str
+    include: str
+    line: int
+    cpp_name: str
+    js_name: str
+    constructor: ObjectConstructor
+    methods: tuple[ObjectMethod, ...]
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "line": self.line,
+            "cpp_name": self.cpp_name,
+            "js_name": self.js_name,
+            "constructor": self.constructor.manifest(),
+            "methods": [method.manifest() for method in self.methods],
+        }
+
+
+@dataclass(frozen=True)
+class ScannedBindings:
+    exports: tuple[Export, ...]
+    objects: tuple[ObjectExport, ...]
 
 
 def _error(path: Path, line: int, message: str) -> CodegenError:
@@ -525,6 +595,14 @@ def _marker_name(comment: _LineComment) -> tuple[bool, str | None]:
         re.match(r"@SupernoteExport(?:\b|\()", value)
     )
     return is_candidate, None
+
+
+def _object_marker_name(comment: _LineComment) -> tuple[bool, str | None]:
+    value = comment.text.strip()
+    match = OBJECT_ANNOTATION.fullmatch(value)
+    if match:
+        return True, match.group("name")
+    return bool(re.match(r"@SupernoteExportObject(?:\b|\()", value)), None
 
 
 def _tokens_text(tokens: list[_Token]) -> str:
@@ -993,6 +1071,496 @@ def _parse_export(
     )
 
 
+def _parameter_groups(
+    tokens: list[_Token],
+    opening: int,
+) -> tuple[list[list[_Token]], int]:
+    groups: list[list[_Token]] = []
+    group_start = opening + 1
+    depth = 0
+    cursor = opening + 1
+    while cursor < len(tokens):
+        value = tokens[cursor].value
+        if value == "(":
+            depth += 1
+        elif value == ")":
+            if depth == 0:
+                groups.append(tokens[group_start:cursor])
+                if len(groups) == 1 and not groups[0]:
+                    groups = []
+                return groups, cursor
+            depth -= 1
+        elif value == "," and depth == 0:
+            groups.append(tokens[group_start:cursor])
+            group_start = cursor + 1
+        cursor += 1
+    raise ValueError("missing closing parenthesis")
+
+
+def _parse_parameters(
+    groups: list[list[_Token]],
+    *,
+    module_root: Path,
+    path: Path,
+    marker_line: int,
+    module_name: str,
+    export_name: str,
+) -> tuple[Parameter, ...]:
+    parameters: list[Parameter] = []
+    names: set[str] = set()
+    for argument_index, group in enumerate(groups, start=1):
+        parameter = _parse_parameter(
+            group,
+            argument_index=argument_index,
+            module_root=module_root,
+            path=path,
+            marker_line=marker_line,
+            module_name=module_name,
+            export_name=export_name,
+        )
+        if parameter.name in names:
+            raise _source_error(
+                module_root,
+                path,
+                group[-1].line if group else marker_line,
+                module_name,
+                export_name,
+                f"duplicate parameter name {parameter.name!r} at argument "
+                f"{argument_index}; give every argument a unique name",
+            )
+        names.add(parameter.name)
+        parameters.append(parameter)
+    return tuple(parameters)
+
+
+def _member_declarations(
+    body: list[_Token],
+    *,
+    default_access: str,
+) -> list[tuple[str, list[_Token]]]:
+    """Return class-scope declarations without inspecting nested bodies."""
+    declarations: list[tuple[str, list[_Token]]] = []
+    access = default_access
+    cursor = 0
+    while cursor < len(body):
+        if (
+            cursor + 1 < len(body)
+            and body[cursor].value in {"public", "private", "protected"}
+            and body[cursor + 1].value == ":"
+        ):
+            access = body[cursor].value
+            cursor += 2
+            continue
+        start = cursor
+        paren_depth = 0
+        bracket_depth = 0
+        while cursor < len(body):
+            value = body[cursor].value
+            if value == "(":
+                paren_depth += 1
+                cursor += 1
+            elif value == ")":
+                paren_depth = max(0, paren_depth - 1)
+                cursor += 1
+            elif value in {"[", "[["}:
+                bracket_depth += 1
+                cursor += 1
+            elif value in {"]", "]]"}:
+                bracket_depth = max(0, bracket_depth - 1)
+                cursor += 1
+            elif value == ";" and paren_depth == 0 and bracket_depth == 0:
+                declarations.append((access, body[start:cursor]))
+                cursor += 1
+                break
+            elif value == "{" and paren_depth == 0 and bracket_depth == 0:
+                signature = body[start:cursor]
+                depth = 1
+                cursor += 1
+                while cursor < len(body) and depth:
+                    if body[cursor].value == "{":
+                        depth += 1
+                    elif body[cursor].value == "}":
+                        depth -= 1
+                    cursor += 1
+                if any(token.value == "(" for token in signature):
+                    declarations.append((access, signature))
+                if cursor < len(body) and body[cursor].value == ";":
+                    cursor += 1
+                break
+            else:
+                cursor += 1
+        else:
+            if body[start:]:
+                declarations.append((access, body[start:]))
+    return declarations
+
+
+def _parse_member_qualifiers(
+    tokens: list[_Token],
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    export_name: str,
+    allow_const: bool,
+    allow_default: bool,
+) -> tuple[bool, bool]:
+    is_const = False
+    is_noexcept = False
+    cursor = 0
+    while cursor < len(tokens):
+        value = tokens[cursor].value
+        if value == "const" and allow_const and not is_const:
+            is_const = True
+            cursor += 1
+            continue
+        if value == "noexcept" and not is_noexcept:
+            is_noexcept = True
+            cursor += 1
+            if cursor < len(tokens) and tokens[cursor].value == "(":
+                raise _source_error(
+                    module_root, path, tokens[cursor].line, module_name,
+                    export_name,
+                    "only bare 'noexcept' is supported on exported objects",
+                )
+            continue
+        if (
+            allow_default
+            and cursor + 1 == len(tokens) - 1
+            and value == "="
+            and tokens[cursor + 1].value == "default"
+        ):
+            cursor += 2
+            continue
+        raise _source_error(
+            module_root,
+            path,
+            tokens[cursor].line,
+            module_name,
+            export_name,
+            f"unsupported trailing object member token {value!r}; only "
+            "const and bare noexcept are supported",
+        )
+    return is_const, is_noexcept
+
+
+def _parse_object_members(
+    *,
+    module_root: Path,
+    path: Path,
+    marker_line: int,
+    module_name: str,
+    cpp_name: str,
+    js_name: str,
+    kind: str,
+    body: list[_Token],
+) -> tuple[ObjectConstructor, tuple[ObjectMethod, ...]]:
+    constructors: list[ObjectConstructor] = []
+    methods: list[ObjectMethod] = []
+    method_names: dict[str, int] = {}
+    declarations = _member_declarations(
+        body,
+        default_access="private" if kind == "class" else "public",
+    )
+    for access, declaration in declarations:
+        if not declaration or access != "public":
+            continue
+        values = [token.value for token in declaration]
+        if values[0] in {"class", "struct", "template"}:
+            raise _source_error(
+                module_root, path, declaration[0].line, module_name, js_name,
+                "nested classes and templates are not supported in an "
+                "exported object's public API",
+            )
+        if "(" not in values:
+            continue
+        opening = values.index("(")
+        if "=" in values[:opening]:
+            continue
+        if opening + 1 < len(values) and values[opening + 1] == "*":
+            continue
+        if (
+            "*" in values[:opening]
+            and declaration[opening - 1].kind != "identifier"
+        ):
+            continue
+        if "operator" in values:
+            raise _source_error(
+                module_root, path, declaration[values.index("operator")].line,
+                module_name, js_name,
+                "operators are not supported in an exported object's public API",
+            )
+        if "static" in values[:opening]:
+            raise _source_error(
+                module_root, path, declaration[values.index("static")].line,
+                module_name, js_name,
+                "static methods are not supported in an exported object's public API",
+            )
+        if "virtual" in values[:opening]:
+            raise _source_error(
+                module_root, path, declaration[values.index("virtual")].line,
+                module_name, js_name,
+                "virtual methods are not supported in an exported object's public API",
+            )
+        try:
+            groups, closing = _parameter_groups(declaration, opening)
+        except ValueError:
+            raise _source_error(
+                module_root, path, declaration[opening].line, module_name,
+                js_name, "missing ')' in exported object member declaration",
+            ) from None
+        suffix = declaration[closing + 1:]
+        prefix = declaration[:opening]
+        if prefix[:2] == [declaration[0], declaration[1]] and values[:2] == ["~", cpp_name]:
+            continue
+        constructor_prefix = values[:opening]
+        if constructor_prefix in ([cpp_name], ["explicit", cpp_name]):
+            group_values = [[token.value for token in group] for group in groups]
+            if len(groups) == 1 and cpp_name in group_values[0] and "&" in group_values[0]:
+                continue
+            parameters = _parse_parameters(
+                groups,
+                module_root=module_root,
+                path=path,
+                marker_line=marker_line,
+                module_name=module_name,
+                export_name=f"{js_name}.create",
+            )
+            _parse_member_qualifiers(
+                suffix,
+                module_root=module_root,
+                path=path,
+                module_name=module_name,
+                export_name=f"{js_name}.create",
+                allow_const=False,
+                allow_default=True,
+            )
+            constructors.append(ObjectConstructor(parameters))
+            continue
+        return_type: str | None = None
+        name_index = 0
+        if values[0] in {"bool", "double", "void"}:
+            return_type = values[0]
+            name_index = 1
+        elif values[:3] == ["std", "::", "string"]:
+            return_type = "std::string"
+            name_index = 3
+        if (
+            return_type is None
+            or name_index >= opening
+            or declaration[name_index].kind != "identifier"
+            or name_index + 1 != opening
+        ):
+            raise _source_error(
+                module_root,
+                path,
+                declaration[0].line,
+                module_name,
+                js_name,
+                f"unsupported public method declaration "
+                f"{_tokens_text(declaration)!r}; methods must use bool, "
+                "double, std::string, or void types",
+            )
+        method_name = declaration[name_index].value
+        if method_name in CPP23_KEYWORDS:
+            raise _source_error(
+                module_root, path, declaration[name_index].line, module_name,
+                js_name, f"method name {method_name!r} is a C++23 keyword",
+            )
+        if method_name in method_names:
+            raise _source_error(
+                module_root, path, declaration[name_index].line, module_name,
+                js_name, f"overloaded or duplicate method {method_name!r}; "
+                f"first declared at line {method_names[method_name]}. "
+                "Object method overloads are not supported",
+            )
+        parameters = _parse_parameters(
+            groups,
+            module_root=module_root,
+            path=path,
+            marker_line=marker_line,
+            module_name=module_name,
+            export_name=f"{js_name}.{method_name}",
+        )
+        is_const, is_noexcept = _parse_member_qualifiers(
+            suffix,
+            module_root=module_root,
+            path=path,
+            module_name=module_name,
+            export_name=f"{js_name}.{method_name}",
+            allow_const=True,
+            allow_default=False,
+        )
+        method_names[method_name] = declaration[name_index].line
+        methods.append(
+            ObjectMethod(
+                line=declaration[name_index].line,
+                cpp_name=method_name,
+                js_name=method_name,
+                return_type=return_type,
+                parameters=parameters,
+                const=is_const,
+                noexcept=is_noexcept,
+            )
+        )
+    if not constructors:
+        raise _source_error(
+            module_root, path, marker_line, module_name, js_name,
+            "exported object must declare exactly one public callable constructor",
+        )
+    if len(constructors) > 1:
+        raise _source_error(
+            module_root, path, marker_line, module_name, js_name,
+            "exported object has overloaded public constructors; exactly one "
+            "callable constructor is supported",
+        )
+    return constructors[0], tuple(methods)
+
+
+def _parse_object_export(
+    *,
+    module_root: Path,
+    source_root: Path,
+    path: Path,
+    text: str,
+    lexed: _LexedSource,
+    marker: _LineComment,
+    renamed: str | None,
+    module_name: str,
+) -> ObjectExport:
+    marker_name = renamed or "<pending>"
+    if not marker.line_only:
+        raise _source_error(
+            module_root, path, marker.line, module_name, marker_name,
+            "the object export marker must be a // comment on its own line",
+        )
+    if marker.conditional_depth:
+        raise _source_error(
+            module_root, path, marker.line, module_name, marker_name,
+            "object export markers are not allowed inside preprocessor conditionals",
+        )
+    if marker.brace_depth:
+        raise _source_error(
+            module_root, path, marker.line, module_name, marker_name,
+            "exported objects must be top-level class or struct definitions; "
+            "nested exported classes are not supported",
+        )
+    active_tokens = [
+        token for token in lexed.tokens if token.conditional_depth == 0
+    ]
+    preceding = [token for token in active_tokens if token.end <= marker.start]
+    prefix: list[_Token] = []
+    for token in reversed(preceding):
+        if token.value in {";", "{", "}"}:
+            break
+        prefix.append(token)
+    prefix.reverse()
+    if prefix:
+        raise _source_error(
+            module_root, path, prefix[0].line, module_name, marker_name,
+            "unsupported declaration prefix before the object marker "
+            f"{_tokens_text(prefix)!r}; templates and declaration modifiers "
+            "are not supported",
+        )
+    following = [
+        token for token in active_tokens if token.start >= marker.end
+    ]
+    if not following:
+        raise _source_error(
+            module_root, path, marker.line, module_name, marker_name,
+            "object export tag must be followed by a class or struct definition",
+        )
+    first = following[0]
+    if text[marker.end:first.start].strip():
+        raise _source_error(
+            module_root, path, marker.line, module_name, marker_name,
+            "only whitespace may appear between the object marker and class or struct",
+        )
+    directive = next(
+        (item for item in lexed.directives if marker.end <= item.start < first.start),
+        None,
+    )
+    if directive is not None:
+        raise _source_error(
+            module_root, path, directive.line, module_name, marker_name,
+            "a preprocessor directive cannot occur between an object marker "
+            "and its class or struct definition",
+        )
+    if first.value not in {"class", "struct"}:
+        raise _source_error(
+            module_root, path, first.line, module_name, marker_name,
+            "object export tag must be followed by a class or struct definition",
+        )
+    if len(following) < 3 or following[1].kind != "identifier":
+        raise _source_error(
+            module_root, path, first.line, module_name, marker_name,
+            "exported class or struct must have an ordinary identifier name",
+        )
+    cpp_name = following[1].value
+    js_name = renamed or cpp_name
+    opening = next(
+        (index for index in range(2, len(following)) if following[index].value in {"{", ";"}),
+        None,
+    )
+    if opening is None or following[opening].value != "{":
+        raise _source_error(
+            module_root, path, first.line, module_name, js_name,
+            "export tag requires a complete class or struct definition, not a declaration",
+        )
+    prefix = following[2:opening]
+    if any(token.value == ":" for token in prefix):
+        raise _source_error(
+            module_root, path, prefix[0].line, module_name, js_name,
+            "inheritance is not supported for exported objects",
+        )
+    if prefix:
+        raise _source_error(
+            module_root, path, prefix[0].line, module_name, js_name,
+            f"unsupported tokens before exported object body {_tokens_text(prefix)!r}",
+        )
+    depth = 1
+    closing: int | None = None
+    cursor = opening + 1
+    while cursor < len(following):
+        if following[cursor].value == "{":
+            depth += 1
+        elif following[cursor].value == "}":
+            depth -= 1
+            if depth == 0:
+                closing = cursor
+                break
+        cursor += 1
+    if closing is None:
+        raise _source_error(
+            module_root, path, first.line, module_name, js_name,
+            "exported object definition is missing its closing '}'",
+        )
+    if closing + 1 >= len(following) or following[closing + 1].value != ";":
+        raise _source_error(
+            module_root, path, following[closing].line, module_name, js_name,
+            "exported object definition must end with '};'",
+        )
+    constructor, methods = _parse_object_members(
+        module_root=module_root,
+        path=path,
+        marker_line=marker.line,
+        module_name=module_name,
+        cpp_name=cpp_name,
+        js_name=js_name,
+        kind=first.value,
+        body=following[opening + 1:closing],
+    )
+    return ObjectExport(
+        source=str(path.relative_to(module_root)),
+        include=path.relative_to(source_root).as_posix(),
+        line=marker.line,
+        cpp_name=cpp_name,
+        js_name=js_name,
+        constructor=constructor,
+        methods=methods,
+    )
+
+
 def _matching_parenthesis(tokens: list[_Token], opening: int) -> int | None:
     depth = 0
     for index in range(opening, len(tokens)):
@@ -1220,6 +1788,119 @@ def scan_sources(
     return exports
 
 
+def scan_objects(
+    module_root: Path,
+    *,
+    backend: str | None = None,
+    module_name: str | None = None,
+) -> list[ObjectExport]:
+    source_root = module_root / "android/src/main/cpp"
+    if not source_root.is_dir():
+        raise CodegenError(f"missing C/C++ source directory: {source_root}")
+    backend, module_name = _scan_context(module_root, backend, module_name)
+    objects: list[ObjectExport] = []
+    for path in sorted(item for item in source_root.rglob("*") if item.is_file()):
+        suffix = path.suffix.lower()
+        if suffix not in CPP_SUFFIXES | FORBIDDEN_TAG_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        lexed = _lex_source(text)
+        markers: list[tuple[_LineComment, str | None]] = []
+        for comment in lexed.comments:
+            is_candidate, renamed = _object_marker_name(comment)
+            if not is_candidate:
+                continue
+            if OBJECT_ANNOTATION.fullmatch(comment.text.strip()) is None:
+                raise _source_error(
+                    module_root, path, comment.line, module_name, None,
+                    "malformed object export tag; use "
+                    "// @SupernoteExportObject or "
+                    '// @SupernoteExportObject(name = "JavascriptName")',
+                )
+            if suffix not in CPP_HEADER_SUFFIXES:
+                raise _source_error(
+                    module_root, path, comment.line, module_name,
+                    renamed,
+                    "native object export tags are allowed only in .h, .hh, "
+                    ".hpp, or .hxx files under android/src/main/cpp",
+                )
+            if backend != "jsi":
+                raise _source_error(
+                    module_root, path, comment.line, module_name,
+                    renamed,
+                    "native object exports are currently supported only by "
+                    "the JSI backend",
+                )
+            markers.append((comment, renamed))
+        for marker, renamed in markers:
+            objects.append(
+                _parse_object_export(
+                    module_root=module_root,
+                    source_root=source_root,
+                    path=path,
+                    text=text,
+                    lexed=lexed,
+                    marker=marker,
+                    renamed=renamed,
+                    module_name=module_name,
+                )
+            )
+    objects.sort(key=lambda item: (item.source, item.line, item.js_name))
+    cpp_names: dict[str, ObjectExport] = {}
+    js_names: dict[str, ObjectExport] = {}
+    for item in objects:
+        if item.cpp_name in cpp_names:
+            first = cpp_names[item.cpp_name]
+            raise CodegenError(
+                f"{item.source}:{item.line}: module {module_name!r}, export "
+                f"{item.js_name!r}: duplicate exported C++ object name "
+                f"{item.cpp_name!r}; first exported at "
+                f"{first.source}:{first.line}"
+            )
+        if item.js_name in js_names:
+            first = js_names[item.js_name]
+            raise CodegenError(
+                f"{item.source}:{item.line}: module {module_name!r}, export "
+                f"{item.js_name!r}: duplicate JavaScript object export; "
+                f"first exported at {first.source}:{first.line}"
+            )
+        cpp_names[item.cpp_name] = item
+        js_names[item.js_name] = item
+    return objects
+
+
+def scan_bindings(
+    module_root: Path,
+    *,
+    backend: str | None = None,
+    module_name: str | None = None,
+) -> ScannedBindings:
+    resolved_backend, resolved_name = _scan_context(
+        module_root, backend, module_name
+    )
+    exports = scan_sources(
+        module_root,
+        backend=resolved_backend,
+        module_name=resolved_name,
+    )
+    objects = scan_objects(
+        module_root,
+        backend=resolved_backend,
+        module_name=resolved_name,
+    )
+    free_names = {export.js_name: export for export in exports}
+    for item in objects:
+        if item.js_name in free_names:
+            first = free_names[item.js_name]
+            raise CodegenError(
+                f"{item.source}:{item.line}: module {resolved_name!r}, export "
+                f"{item.js_name!r}: JavaScript name collides with free-function "
+                f"export at {first.source}:{first.line}; give the function or "
+                "object a different annotation name"
+            )
+    return ScannedBindings(tuple(exports), tuple(objects))
+
+
 def _cpp_declarations(exports: list[Export]) -> str:
     declarations = []
     for export in exports:
@@ -1235,7 +1916,11 @@ def _cpp_declarations(exports: list[Export]) -> str:
     return "\n".join(declarations)
 
 
-def _typescript(config: dict[str, object], exports: list[Export]) -> str:
+def _typescript(
+    config: dict[str, object],
+    exports: list[Export],
+    objects: list[ObjectExport],
+) -> str:
     module_name = str(config["module_name"])
     backend = _normalize_backend(config["backend"])
     type_map = {
@@ -1254,9 +1939,43 @@ def _typescript(config: dict[str, object], exports: list[Export]) -> str:
         if backend == "jni" and export.return_type != "void":
             result = f"Promise<{result}>"
         methods.append(f"  {export.js_name}({parameters}): {result};")
-    body = "\n".join(methods)
+    object_interfaces: list[str] = []
+    object_properties: list[str] = []
+    for item in objects:
+        object_methods: list[str] = []
+        for method in item.methods:
+            parameters = ", ".join(
+                f"{parameter.name}: {type_map[parameter.cpp_type]}"
+                for parameter in method.parameters
+            )
+            object_methods.append(
+                f"  {method.js_name}({parameters}): "
+                f"{type_map[method.return_type]};"
+            )
+        constructor_parameters = ", ".join(
+            f"{parameter.name}: {type_map[parameter.cpp_type]}"
+            for parameter in item.constructor.parameters
+        )
+        object_interfaces.append(
+            f"export interface {item.js_name} {{\n"
+            f"{chr(10).join(object_methods)}\n"
+            "}\n\n"
+            f"export interface {item.js_name}Factory {{\n"
+            f"  create({constructor_parameters}): {item.js_name};\n"
+            "}"
+        )
+        object_properties.append(
+            f"  {item.js_name}: {item.js_name}Factory;"
+        )
+    body = "\n".join(object_properties + methods)
+    interface_prefix = (
+        "\n\n".join(object_interfaces) + "\n\n"
+        if object_interfaces
+        else ""
+    )
     return (
         "/* Generated by supernote_module_generator. Do not edit. */\n"
+        f"{interface_prefix}"
         f"export interface {module_name}Module {{\n{body}\n}}\n\n"
         f"declare const {module_name}: {module_name}Module;\n"
         f"export default {module_name};\n"
@@ -1646,13 +2365,236 @@ def _jsi_type_check(parameter: Parameter, number: int) -> str:
     return f"!arguments[{number}].{method}"
 
 
-def _jsi_binding(config: dict[str, object], exports: list[Export]) -> str:
+def _jsi_object_callable_body(
+    *,
+    parameters: tuple[Parameter, ...],
+    diagnostic_name: str,
+    call: str,
+    return_type: str,
+    indent: str,
+) -> str:
+    expected_parameters = ", ".join(
+        {
+            "bool": "boolean",
+            "double": "number",
+            "std::string": "string",
+        }[parameter.cpp_type]
+        + f" {parameter.name}"
+        for parameter in parameters
+    )
+    expected_description = (
+        f"{len(parameters)} argument"
+        f"{'' if len(parameters) == 1 else 's'}"
+        f" ({expected_parameters})"
+    )
+    count_prefix = (
+        f"{diagnostic_name}: expected {expected_description}; received "
+    )
+    lines = [
+        f"{indent}if (argument_count != {len(parameters)}) {{",
+        f"{indent}  throw facebook::jsi::JSError(",
+        f"{indent}      runtime, std::string({json.dumps(count_prefix)}) +",
+        f"{indent}      std::to_string(argument_count));",
+        f"{indent}}}",
+    ]
+    for number, parameter in enumerate(parameters):
+        js_type = {
+            "bool": "boolean",
+            "double": "number",
+            "std::string": "string",
+        }[parameter.cpp_type]
+        type_error = (
+            f"{diagnostic_name}: argument {number + 1} ({parameter.name}) "
+            f"must be a {js_type}; expected {expected_description}"
+        )
+        lines.extend(
+            [
+                f"{indent}if ({_jsi_type_check(parameter, number)}) {{",
+                f"{indent}  throw facebook::jsi::JSError(",
+                f"{indent}      runtime, {json.dumps(type_error)});",
+                f"{indent}}}",
+            ]
+        )
+    if return_type == "void":
+        result = [f"{indent}  {call};", f"{indent}  return Value::undefined();"]
+    elif return_type == "std::string":
+        result = [
+            f"{indent}  const auto result = {call};",
+            f"{indent}  return Value(String::createFromUtf8(runtime, result));",
+        ]
+    else:
+        result = [f"{indent}  return Value({call});"]
+    lines.extend([f"{indent}try {{", *result])
+    lines.extend(
+        [
+            f"{indent}}} catch (const facebook::jsi::JSError &) {{",
+            f"{indent}  throw;",
+            f"{indent}}} catch (const std::exception &error) {{",
+            f"{indent}  throw facebook::jsi::JSError(",
+            f"{indent}      runtime, std::string("
+            f"{json.dumps(diagnostic_name + ': ')}) + error.what());",
+            f"{indent}}} catch (...) {{",
+            f"{indent}  throw facebook::jsi::JSError(",
+            f"{indent}      runtime, "
+            f"{json.dumps(diagnostic_name + ': unknown C++ exception')});",
+            f"{indent}}}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _jsi_object_wrapper(
+    module_name: str,
+    item: ObjectExport,
+    index: int,
+) -> str:
+    class_name = f"GeneratedObject{index}HostObject"
+    method_branches: list[str] = []
+    for method in item.methods:
+        arguments = ", ".join(
+            _jsi_argument(parameter, number)
+            for number, parameter in enumerate(method.parameters)
+        )
+        call = f"native_instance->{method.cpp_name}({arguments})"
+        body = _jsi_object_callable_body(
+            parameters=method.parameters,
+            diagnostic_name=f"{module_name}.{item.js_name}.{method.js_name}",
+            call=call,
+            return_type=method.return_type,
+            indent="          ",
+        )
+        arguments_parameter = (
+            "const Value *arguments"
+            if method.parameters
+            else "const Value *"
+        )
+        method_branches.append(
+            f"    if (property_name == {json.dumps(method.js_name)}) {{\n"
+            f"      std::shared_ptr<{item.cpp_name}> native_instance = instance_;\n"
+            "      return Function::createFromHostFunction(\n"
+            "          runtime,\n"
+            f"          PropNameID::forAscii(runtime, "
+            f"{json.dumps(method.js_name)}),\n"
+            f"          {len(method.parameters)},\n"
+            "          [native_instance = std::move(native_instance)](\n"
+            "              facebook::jsi::Runtime &runtime,\n"
+            "              const Value &,\n"
+            f"              {arguments_parameter},\n"
+            "              std::size_t argument_count) -> Value {\n"
+            f"{body}\n"
+            "          });\n"
+            "    }"
+        )
+    property_names = "\n".join(
+        "    properties.push_back(facebook::jsi::PropNameID::forAscii("
+        f"runtime, {json.dumps(method.js_name)}));"
+        for method in item.methods
+    )
+    if not property_names:
+        property_names = "    (void)runtime;"
+    return f"""class {class_name} final : public facebook::jsi::HostObject {{
+ public:
+  explicit {class_name}(std::shared_ptr<{item.cpp_name}> instance)
+      : instance_(std::move(instance)) {{}}
+
+  facebook::jsi::Value get(
+      facebook::jsi::Runtime &runtime,
+      const facebook::jsi::PropNameID &name) override {{
+    using facebook::jsi::Function;
+    using facebook::jsi::PropNameID;
+    using facebook::jsi::String;
+    using facebook::jsi::Value;
+    const std::string property_name = name.utf8(runtime);
+{chr(10).join(method_branches)}
+    return Value::undefined();
+  }}
+
+  std::vector<facebook::jsi::PropNameID> getPropertyNames(
+      facebook::jsi::Runtime &runtime) override {{
+    std::vector<facebook::jsi::PropNameID> properties;
+    properties.reserve({len(item.methods)});
+{property_names}
+    return properties;
+  }}
+
+ private:
+  std::shared_ptr<{item.cpp_name}> instance_;
+}};"""
+
+
+def _jsi_object_registration(
+    module_name: str,
+    item: ObjectExport,
+    index: int,
+) -> str:
+    arguments = ", ".join(
+        _jsi_argument(parameter, number)
+        for number, parameter in enumerate(item.constructor.parameters)
+    )
+    native_call = f"std::make_shared<{item.cpp_name}>({arguments})"
+    callable_body = _jsi_object_callable_body(
+        parameters=item.constructor.parameters,
+        diagnostic_name=f"{module_name}.{item.js_name}.create",
+        call=native_call,
+        return_type="__object_factory__",
+        indent="          ",
+    )
+    arguments_parameter = (
+        "const Value *arguments"
+        if item.constructor.parameters
+        else "const Value *"
+    )
+    factory_result = f"return Value({native_call});"
+    callable_body = callable_body.replace(
+        factory_result,
+        f"auto native_instance = {native_call};\n"
+        "            return Value(Object::createFromHostObject(\n"
+        "                runtime,\n"
+        f"                std::make_shared<GeneratedObject{index}HostObject>(\n"
+        "                    std::move(native_instance))));",
+    )
+    return (
+        "  {\n"
+        "    Object object_type(runtime);\n"
+        "    auto create = Function::createFromHostFunction(\n"
+        "        runtime,\n"
+        "        PropNameID::forAscii(runtime, \"create\"),\n"
+        f"        {len(item.constructor.parameters)},\n"
+        "        [](facebook::jsi::Runtime &runtime,\n"
+        "           const Value &,\n"
+        f"           {arguments_parameter},\n"
+        "           std::size_t argument_count) -> Value {\n"
+        f"{callable_body}\n"
+        "        });\n"
+        "    object_type.setProperty(runtime, \"create\", std::move(create));\n"
+        f"    exports.setProperty(runtime, {json.dumps(item.js_name)}, "
+        "std::move(object_type));\n"
+        "  }"
+    )
+
+
+def _jsi_binding(
+    config: dict[str, object],
+    exports: list[Export],
+    objects: list[ObjectExport],
+) -> str:
     namespace = str(config["android_namespace"])
     module_name = str(config["module_name"])
     class_prefix = str(config["class_prefix"])
     installer = f"{namespace}.generated.{class_prefix}JsiModule"
     global_name = str(config["jsi_global_name"])
     declarations = _cpp_declarations(exports)
+    object_includes = "\n".join(
+        f'#include "{item.include}"' for item in objects
+    )
+    object_include_block = f"{object_includes}\n\n" if object_includes else ""
+    object_memory_include = "#include <memory>\n" if objects else ""
+    object_vector_include = "#include <vector>\n" if objects else ""
+    object_wrappers = "\n\n".join(
+        _jsi_object_wrapper(module_name, item, index)
+        for index, item in enumerate(objects)
+    )
+    object_wrapper_block = f"{object_wrappers}\n\n" if object_wrappers else ""
     registrations: list[str] = []
     for export in exports:
         expected_parameters = ", ".join(
@@ -1738,6 +2680,10 @@ def _jsi_binding(config: dict[str, object], exports: list[Export]) -> str:
             "std::move(function));\n"
             "  }"
         )
+    registrations.extend(
+        _jsi_object_registration(module_name, item, index)
+        for index, item in enumerate(objects)
+    )
     return f"""#include <jni.h>
 #include <jsi/jsi.h>
 
@@ -1745,10 +2691,10 @@ def _jsi_binding(config: dict[str, object], exports: list[Export]) -> str:
 
 #include <cstdint>
 #include <exception>
-#include <string>
+{object_memory_include}#include <string>
 #include <utility>
-
-{declarations}
+{object_vector_include}
+{object_include_block}{declarations}
 
 namespace {{
 
@@ -1756,7 +2702,7 @@ constexpr char kLogTag[] = "SupernoteJsi{class_prefix}";
 constexpr char kInstallerClassName[] = {json.dumps(installer)};
 constexpr char kGlobalName[] = {json.dumps(global_name)};
 
-void clear_pending_exception(JNIEnv *env, const char *operation) {{
+{object_wrapper_block}void clear_pending_exception(JNIEnv *env, const char *operation) {{
   if (!env->ExceptionCheck()) {{
     return;
   }}
@@ -1863,17 +2809,19 @@ def _contents(
     module_root: Path,
     config: dict[str, object],
     exports: list[Export],
+    objects: list[ObjectExport],
 ) -> dict[Path, str]:
     generated = module_root / "android/build/generated/supernote"
     backend = _normalize_backend(config["backend"])
     manifest = {
         "backend": backend,
         "exports": [export.manifest() for export in exports],
+        "objects": [item.manifest() for item in objects],
     }
     result = {
         generated / "exports.json":
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        module_root / "index.d.ts": _typescript(config, exports),
+        module_root / "index.d.ts": _typescript(config, exports, objects),
     }
     if backend == "jni":
         package_path = str(config["android_namespace"]).replace(".", "/")
@@ -1886,7 +2834,7 @@ def _contents(
         )
     elif backend == "jsi":
         result[generated / "jni/generated_bindings.cpp"] = _jsi_binding(
-            config, exports
+            config, exports, objects
         )
     else:
         raise CodegenError(
@@ -1904,12 +2852,14 @@ def generate(module_root: Path, *, check: bool = False) -> list[Export]:
         raise CodegenError(f"could not read {config_path}: {exc}") from exc
     config = dict(config)
     config["backend"] = _normalize_backend(config.get("backend"))
-    exports = scan_sources(
+    bindings = scan_bindings(
         module_root,
         backend=str(config["backend"]),
         module_name=str(config.get("module_name", module_root.name)),
     )
-    outputs = _contents(module_root, config, exports)
+    exports = list(bindings.exports)
+    objects = list(bindings.objects)
+    outputs = _contents(module_root, config, exports, objects)
     if check:
         stale = [
             str(path)
