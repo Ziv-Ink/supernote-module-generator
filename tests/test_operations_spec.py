@@ -71,6 +71,89 @@ def test_add_generates_every_public_module_type(tmp_path: Path, module_type: str
         assert (module / "android/src/main/cpp/math.cpp").is_file()
 
 
+@pytest.mark.parametrize(
+    ("identity", "new_type", "expected"),
+    [
+        ("javascript", "native", 'JavaScript name "Existing" is already used'),
+        ("namespace", "native", 'Android namespace "com.example.existing" is already used'),
+        ("native_library", "jni", "Native library name collides"),
+        ("jsi_global", "jsi", "JSI registration name collides"),
+        ("gradle_project", "native", "Generated Gradle registration name collides"),
+    ],
+)
+def test_add_rejects_generated_identity_collisions(
+    tmp_path: Path,
+    monkeypatch,
+    identity: str,
+    new_type: str,
+    expected: str,
+):
+    root = plugin(tmp_path)
+    code, _, stderr = invoke(
+        root,
+        [
+            "add",
+            "local-existing",
+            "--type",
+            "jsi",
+            "--javascript-name",
+            "Existing",
+            "--android-namespace",
+            "com.example.existing",
+            "--skip-install",
+            "--yes",
+        ],
+    )
+    assert code == 0, stderr
+    metadata = json.loads(
+        (root / "local_modules/local-existing/.supernote-module.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    javascript_name = "Existing" if identity == "javascript" else "Candidate"
+    android_namespace = (
+        "com.example.existing"
+        if identity == "namespace"
+        else "com.example.candidate"
+    )
+    if identity == "native_library":
+        monkeypatch.setattr(
+            "supernote_module_generator.operations.native_library_name",
+            lambda _: metadata["native_library_name"],
+        )
+    elif identity == "jsi_global":
+        monkeypatch.setattr(
+            "supernote_module_generator.operations.jsi_global_name",
+            lambda _: metadata["jsi_global_name"],
+        )
+    elif identity == "gradle_project":
+        monkeypatch.setattr(
+            "supernote_module_generator.operations.gradle_project_name",
+            lambda _: "forced-collision",
+        )
+
+    code, _, stderr = invoke(
+        root,
+        [
+            "add",
+            "local-candidate",
+            "--type",
+            new_type,
+            "--javascript-name",
+            javascript_name,
+            "--android-namespace",
+            android_namespace,
+            "--skip-install",
+            "--yes",
+        ],
+    )
+
+    assert code == 2
+    assert expected in stderr
+    assert not (root / "local_modules/local-candidate").exists()
+
+
 def test_update_preserves_user_owned_native_source(tmp_path: Path):
     root = plugin(tmp_path)
     assert invoke(root, ["add", "local-preserve", "--type", "native", "--skip-install", "--yes"])[0] == 0

@@ -259,6 +259,49 @@ class BindingCodegenScannerTests(unittest.TestCase):
             self.assertIn("Promise<number>", declarations)
             self.assertIn("LocalTest.add: ", generated)
 
+    def test_jni_free_function_generates_native_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jni")
+            binding_codegen.generate(module)
+            generated = (
+                module
+                / "android/build/generated/supernote/jni/generated_bindings.cpp"
+            ).read_text(encoding="utf-8")
+
+            self.assertIn("JNINativeMethod methods[]", generated)
+            self.assertIn(
+                '{const_cast<char *>("native0"), const_cast<char *>("(DD)D")',
+                generated,
+            )
+            self.assertIn("reinterpret_cast<void *>(native_0)", generated)
+            self.assertIn(
+                "env->RegisterNatives(module_class, methods, method_count)",
+                generated,
+            )
+
+    def test_jsi_sync_free_function_generates_host_function_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            binding_codegen.generate(module)
+            generated = (
+                module
+                / "android/build/generated/supernote/jni/generated_bindings.cpp"
+            ).read_text(encoding="utf-8")
+            declarations = (module / "index.d.ts").read_text(encoding="utf-8")
+
+            self.assertIn("Function::createFromHostFunction", generated)
+            self.assertIn(
+                'PropNameID::forAscii(runtime, "add")',
+                generated,
+            )
+            self.assertIn("if (argument_count != 2)", generated)
+            self.assertIn(
+                'exports.setProperty(runtime, "add", std::move(function))',
+                generated,
+            )
+            self.assertIn("add(left: number, right: number): number;", declarations)
+            self.assertNotIn("Promise<number>", declarations)
+
     def test_generated_errors_include_module_export_and_jsi_argument_details(self):
         source = (
             "// @SupernoteExport\n"
