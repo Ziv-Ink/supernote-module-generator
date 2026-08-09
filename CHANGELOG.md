@@ -4,7 +4,14 @@ This file records user-visible changes to the generator. Documentation on the
 default branch may be newer than the latest published package; released users
 should also check their installed version with `supernote-module --version`.
 
-## 1.1.0.dev0 - Unreleased
+## 2.0.0.dev0 - Unreleased
+
+- Begin the language-neutral V2 source/semantic/lowering architecture.
+- Preserve `supernote-module-generator` and `supernote-module` as the package
+  and command identities while reserving stable `2.0.0` for the completed V2
+  release.
+
+## 1.1.0.dev0 - Historical V1 development baseline
 
 - Added first-class JSI native C++ object exports with generated HostObject
   lifetime management, `ObjectName.create(...)` factories, TypeScript types,
