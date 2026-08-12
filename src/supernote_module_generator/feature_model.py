@@ -34,8 +34,8 @@ class ImplementationFamily(str, Enum):
 class ImplementationRoots:
     """User-owned roots available to every feature, regardless of starters."""
 
-    native: str = "native"
-    jvm: str = "jvm"
+    native: str = "android/src/main/cpp"
+    jvm: str = "android/src/main/java"
 
     def __post_init__(self) -> None:
         _validate_relative_path(self.native, "native implementation root")

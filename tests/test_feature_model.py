@@ -52,13 +52,16 @@ def feature(name: str, *starter_files: str) -> FeatureManifest:
 
 
 def test_feature_manifest_is_language_neutral_and_starters_are_bookkeeping():
-    manifest = feature("document", "native/document.cpp")
+    manifest = feature("document", "android/src/main/cpp/document.cpp")
     value = manifest.manifest()
 
     assert value["schema_version"] == FEATURE_MANIFEST_SCHEMA_VERSION
     assert value["kind"] == "supernote_feature"
-    assert value["implementation_roots"] == {"native": "native", "jvm": "jvm"}
-    assert value["starter_files"] == ["native/document.cpp"]
+    assert value["implementation_roots"] == {
+        "native": "android/src/main/cpp",
+        "jvm": "android/src/main/java",
+    }
+    assert value["starter_files"] == ["android/src/main/cpp/document.cpp"]
     assert "backend" not in value
     assert "implementation" not in value
     assert "starter_families" not in value
@@ -84,10 +87,15 @@ def test_requirements_come_from_semantics_and_may_mix_languages():
 def test_starter_selection_does_not_change_derived_requirements_or_identity():
     api = SemanticApi(functions=(binding("read", language="cpp", public=True),))
     native = FeatureRegistryEntry.create(
-        feature("document", "native/document.cpp"), api
+        feature("document", "android/src/main/cpp/document.cpp"), api
     )
     both = FeatureRegistryEntry.create(
-        feature("document", "native/document.cpp", "jvm/Document.kt"), api
+        feature(
+            "document",
+            "android/src/main/cpp/document.cpp",
+            "android/src/main/java/Document.kt",
+        ),
+        api,
     )
 
     assert native.feature.feature_id == both.feature.feature_id
