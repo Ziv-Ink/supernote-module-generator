@@ -282,6 +282,16 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     assert semantic.kind is SemanticClassKind.JS_OBJECT
     assert semantic.constructor.parameters[0].type is SemanticType.STRING
     assert [item.name for item in semantic.methods] == ["pageCount"]
+    generated = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
+        project_jvm_owners((owner,)),
+        feature_id=FEATURE_ID,
+        module_name="Documents",
+    )
+    assert "GeneratedJvmObject0HostObject" in generated
+    assert "Object::createFromHostObject" in generated
+    assert 'property == "pageCount"' in generated
+    assert "std::shared_ptr<JvmOwner> owner_" in generated
 
 
 def test_internal_jvm_class_is_a_hidden_feature_service():

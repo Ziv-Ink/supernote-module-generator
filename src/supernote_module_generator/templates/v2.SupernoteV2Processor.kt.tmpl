@@ -302,6 +302,7 @@ class SupernoteV2Processor(
         fail(owner.source.path, "Java static and instance feature methods cannot share one owner")
       }
       owner.form = "java_static"
+      owner.constructors.clear()
     }
   }
 

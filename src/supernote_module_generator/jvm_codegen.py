@@ -17,6 +17,8 @@ from .semantic import (
     ExecutionMode,
     SemanticApi,
     SemanticBinding,
+    SemanticClass,
+    SemanticClassKind,
     SemanticType,
 )
 from .source_models import (
@@ -73,12 +75,25 @@ def render_jvm_feature_jsi(
     by_source = {
         binding.source.declaration_id: binding for binding in semantic.functions
     }
-    for item in semantic.classes:
-        if item.methods or item.capabilities.routable:
+    owners_by_source = {
+        owner.provenance.declaration_id: owner for owner in manifest.owners
+    }
+    object_wrappers: list[str] = []
+    object_registrations: list[str] = []
+    for index, item in enumerate(semantic.classes):
+        owner = owners_by_source.get(item.source.declaration_id)
+        if owner is None:
             raise JvmCodegenError(
-                f"{item.source.path}:{item.source.line}: JVM-backed object/service "
+                f"{item.source.path}:{item.source.line}: JVM class source facts are missing"
+            )
+        if item.kind is SemanticClassKind.INTERNAL_SERVICE:
+            raise JvmCodegenError(
+                f"{item.source.path}:{item.source.line}: internal JVM service "
                 "routing is recognized but not implemented yet"
             )
+        wrapper, registration = _render_object(owner, item, index, module_name)
+        object_wrappers.append(wrapper)
+        object_registrations.append(registration)
     registrations: list[str] = []
     for owner in manifest.owners:
         if owner.intent.role is not DeclarationRole.ORDINARY:
@@ -307,6 +322,8 @@ void require_no_implementation_exception(JNIEnv *env) {{
   throw JvmImplementationFailure("Kotlin/Java implementation failed");
 }}
 
+{chr(10).join(object_wrappers)}
+
 }}  // namespace
 
 void register_jvm_feature(
@@ -321,6 +338,7 @@ void register_jvm_feature(
 
   auto exports = feature_registry.getPropertyAsObject(runtime, kFeatureId);
 {chr(10).join(registrations)}
+{chr(10).join(object_registrations)}
 }}
 
 }}  // namespace supernote::generated::jvm_feature_{suffix}
@@ -397,12 +415,234 @@ def _render_function(
     )
 
 
+def _render_object(
+    owner: JvmOwnerSource,
+    item: SemanticClass,
+    index: int,
+    module_name: str,
+) -> tuple[str, str]:
+    constructors = {
+        constructor.provenance.declaration_id: constructor
+        for constructor in owner.constructors
+    }
+    constructor = constructors.get(item.constructor.source.declaration_id)
+    if constructor is None:
+        raise JvmCodegenError(
+            f"{item.source.path}:{item.source.line}: selected JVM constructor facts are missing"
+        )
+    declarations = {
+        declaration.provenance.declaration_id: declaration
+        for declaration in owner.declarations
+    }
+    method_rows = []
+    route_arguments = []
+    route_members = []
+    route_parameters = []
+    route_setup = []
+    route_captures = []
+    for method_index, method in enumerate(item.methods):
+        source = declarations.get(method.source.declaration_id)
+        if source is None:
+            raise JvmCodegenError(
+                f"{method.source.path}:{method.source.line}: JVM method facts are missing"
+            )
+        if not method.capabilities.javascript_public:
+            raise _error(source, "internal JVM object-method routing is not implemented yet")
+        if method.execution is ExecutionMode.ASYNC or source.is_suspend:
+            raise _error(source, "async JVM object-method routing is not implemented yet")
+        route_name = f"method_route_{method_index}"
+        route_parameters.append(
+            f"std::shared_ptr<LazyJvmRoute> {route_name}"
+        )
+        route_arguments.append(f"std::move({route_name})")
+        route_members.append(f"  std::shared_ptr<LazyJvmRoute> {route_name}_;")
+        route_setup.append(
+            f"    auto {route_name} = std::make_shared<LazyJvmRoute>(\n"
+            f"        {json.dumps(_adapter_class(source.adapter_identity))},\n"
+            f"        {json.dumps(_adapter_descriptor(method, owner))});"
+        )
+        route_captures.append(route_name)
+        validations = _validations(
+            method, f"{module_name}.{item.name}.{method.name}"
+        )
+        invocation = _invocation(method, True)
+        method_rows.append(
+            f'''    if (property == {json.dumps(method.name)}) {{
+      auto route = {route_name}_;
+      auto owner = owner_;
+      auto feature_session = feature_session_;
+      return facebook::jsi::Value(facebook::jsi::Function::createFromHostFunction(
+          runtime,
+          facebook::jsi::PropNameID::forAscii(runtime, {json.dumps(method.name)}),
+          {len(method.parameters)},
+          [route, owner, feature_session](
+              facebook::jsi::Runtime &runtime,
+              const facebook::jsi::Value &,
+              const facebook::jsi::Value *arguments,
+              std::size_t argument_count) -> facebook::jsi::Value {{
+{validations}
+            try {{
+              if (!feature_session ||
+                  feature_session->state() != supernote::runtime::FeatureState::ACTIVE) {{
+                supernote_throw_error(
+                    runtime, "FEATURE_CLOSED", "feature is closed");
+              }}
+              auto resolved = route->get(feature_session);
+              AttachedEnv attached;
+              auto *env = attached.get();
+              if (env == nullptr) {{
+                throw std::runtime_error("cannot attach to JavaVM");
+              }}
+              LocalFrame frame(env);
+{_indent(invocation, 14)}
+            }} catch (const facebook::jsi::JSError &) {{
+              throw;
+            }} catch (const JvmImplementationFailure &error) {{
+              supernote_throw_error(
+                  runtime, "IMPLEMENTATION_ERROR", error.what());
+            }} catch (const std::exception &error) {{
+              supernote_throw_error(runtime, "INTERNAL", error.what());
+            }}
+          }}));
+    }}'''
+        )
+    constructor_parameters = ",\n      ".join(
+        [
+            "std::shared_ptr<JvmOwner> owner",
+            "std::shared_ptr<supernote::runtime::FeatureSession> feature_session",
+            *route_parameters,
+        ]
+    )
+    initializers = ",\n        ".join(
+        [
+            "owner_(std::move(owner))",
+            "feature_session_(std::move(feature_session))",
+            *[
+                f"method_route_{method_index}_(std::move(method_route_{method_index}))"
+                for method_index in range(len(item.methods))
+            ],
+        ]
+    )
+    names = "\n".join(
+        "    names.push_back(facebook::jsi::PropNameID::forAscii(\n"
+        f"        runtime, {json.dumps(method.name)}));"
+        for method in item.methods
+        if method.capabilities.javascript_public
+    )
+    wrapper = f'''class GeneratedJvmObject{index}HostObject final
+    : public facebook::jsi::HostObject {{
+ public:
+  GeneratedJvmObject{index}HostObject(
+      {constructor_parameters})
+      : {initializers} {{}}
+
+  facebook::jsi::Value get(
+      facebook::jsi::Runtime &runtime,
+      const facebook::jsi::PropNameID &name) override {{
+    const auto property = name.utf8(runtime);
+{chr(10).join(method_rows)}
+    return facebook::jsi::Value::undefined();
+  }}
+
+  std::vector<facebook::jsi::PropNameID> getPropertyNames(
+      facebook::jsi::Runtime &runtime) override {{
+    std::vector<facebook::jsi::PropNameID> names;
+    names.reserve({len(item.methods)});
+{names}
+    return names;
+  }}
+
+ private:
+  std::shared_ptr<JvmOwner> owner_;
+  std::shared_ptr<supernote::runtime::FeatureSession> feature_session_;
+{chr(10).join(route_members)}
+}};'''
+    constructor_route = _adapter_class(constructor.adapter_identity)
+    constructor_descriptor = _object_constructor_descriptor(owner, item)
+    validation = _validations_parameters(
+        item.constructor.parameters,
+        f"{module_name}.{item.name}.create",
+    )
+    jvm_arguments = _argument_lines(item.constructor.parameters, 1)
+    captured = ", ".join(["constructor_route", "feature_session", *route_captures])
+    wrapper_arguments = ",\n"
+    wrapper_arguments += " " * 20
+    wrapper_arguments = wrapper_arguments.join(
+        ["std::move(owner)", "feature_session", *route_arguments]
+    )
+    registration = f'''  {{
+    auto constructor_route = std::make_shared<LazyJvmRoute>(
+        {json.dumps(constructor_route)}, {json.dumps(constructor_descriptor)});
+{chr(10).join(route_setup)}
+    Object object_type(runtime);
+    auto create = Function::createFromHostFunction(
+        runtime,
+        PropNameID::forAscii(runtime, "create"),
+        {len(item.constructor.parameters)},
+        [{captured}](facebook::jsi::Runtime &runtime,
+           const Value &,
+           const Value *arguments,
+           std::size_t argument_count) -> Value {{
+{validation}
+          try {{
+            if (!feature_session ||
+                feature_session->state() != supernote::runtime::FeatureState::ACTIVE) {{
+              supernote_throw_error(
+                  runtime, "FEATURE_CLOSED", "feature is closed");
+            }}
+            auto resolved = constructor_route->get(feature_session);
+            auto runtime_session = feature_session->runtime();
+            auto context = runtime_session
+                ? runtime_session->platform_context() : nullptr;
+            if (!context) {{
+              throw std::runtime_error("platform Context is unavailable");
+            }}
+            AttachedEnv attached;
+            auto *env = attached.get();
+            if (env == nullptr) {{
+              throw std::runtime_error("cannot attach to JavaVM");
+            }}
+            LocalFrame frame(env);
+            jvalue jvm_arguments[{max(1, len(item.constructor.parameters) + 1)}]{{}};
+            jvm_arguments[0].l = static_cast<jobject>(context.get());
+{chr(10).join(jvm_arguments)}
+            auto local = env->CallStaticObjectMethodA(
+                static_cast<jclass>(resolved->adapter_class.get()),
+                resolved->method, jvm_arguments);
+            require_no_implementation_exception(env);
+            if (local == nullptr) {{
+              throw std::runtime_error("JVM object constructor returned null");
+            }}
+            auto owner = std::make_shared<JvmOwner>(retain_global(env, local));
+            return Value(facebook::jsi::Object::createFromHostObject(
+                runtime,
+                std::make_shared<GeneratedJvmObject{index}HostObject>(
+                    {wrapper_arguments})));
+          }} catch (const facebook::jsi::JSError &) {{
+            throw;
+          }} catch (const JvmImplementationFailure &error) {{
+            supernote_throw_error(
+                runtime, "IMPLEMENTATION_ERROR", error.what());
+          }} catch (const std::exception &error) {{
+            supernote_throw_error(runtime, "INTERNAL", error.what());
+          }}
+        }});
+    object_type.setProperty(runtime, "create", std::move(create));
+    exports.setProperty(runtime, {json.dumps(item.name)}, std::move(object_type));
+  }}'''
+    return wrapper, registration
+
+
 def _validations(binding: SemanticBinding, diagnostic: str) -> str:
+    return _validations_parameters(binding.parameters, diagnostic)
+
+
+def _validations_parameters(parameters, diagnostic: str) -> str:
     expected = ", ".join(
         f"{_jsi_expected_type(_CPP_TYPES[item.type])} {item.name}"
-        for item in binding.parameters
+        for item in parameters
     )
-    count = len(binding.parameters)
+    count = len(parameters)
     description = f"{count} argument{'' if count == 1 else 's'} ({expected})"
     lines = [
         f"          if (argument_count != {count}) {{",
@@ -411,7 +651,7 @@ def _validations(binding: SemanticBinding, diagnostic: str) -> str:
         "                std::to_string(argument_count));",
         "          }",
     ]
-    for index, item in enumerate(binding.parameters):
+    for index, item in enumerate(parameters):
         parameter = Parameter(_CPP_TYPES[item.type], item.name)
         lines.extend(
             [
@@ -441,7 +681,63 @@ def _invocation(binding: SemanticBinding, takes_owner: bool) -> str:
             "            jvm_arguments[0].l = "
             "static_cast<jobject>(owner->value.get());"
         )
-    for index, item in enumerate(binding.parameters):
+    lines.extend(_argument_lines(binding.parameters, offset))
+    call = _jni_call(binding.result)
+    if binding.result is SemanticType.VOID:
+        lines.append(
+            f"            env->{call}(static_cast<jclass>(resolved->adapter_class.get()), "
+            "resolved->method, jvm_arguments);"
+        )
+        lines.append("            require_no_implementation_exception(env);")
+        lines.append("            return facebook::jsi::Value::undefined();")
+        return "\n".join(lines)
+    lines.append(
+        f"            auto result = env->{call}("
+        "static_cast<jclass>(resolved->adapter_class.get()), "
+        "resolved->method, jvm_arguments);"
+    )
+    lines.append("            require_no_implementation_exception(env);")
+    if binding.result is SemanticType.BOOL:
+        lines.append("            return facebook::jsi::Value(result == JNI_TRUE);")
+    elif binding.result in {
+        SemanticType.INT32,
+        SemanticType.FLOAT32,
+        SemanticType.FLOAT64,
+    }:
+        lines.append(
+            "            return facebook::jsi::Value(static_cast<double>(result));"
+        )
+    elif binding.result is SemanticType.INT64:
+        lines.extend(
+            [
+                "            return facebook::jsi::Value(facebook::jsi::BigInt::fromInt64(",
+                "                runtime, static_cast<std::int64_t>(result)));",
+            ]
+        )
+    elif binding.result in {SemanticType.STRING, SemanticType.BYTES}:
+        lines.append(
+            "            const auto bytes = read_byte_array("
+            "env, static_cast<jbyteArray>(result));"
+        )
+        if binding.result is SemanticType.STRING:
+            lines.extend(
+                [
+                    "            const std::string text(",
+                    "                reinterpret_cast<const char *>(bytes.data()), bytes.size());",
+                    "            return facebook::jsi::Value(",
+                    "                facebook::jsi::String::createFromUtf8(runtime, text));",
+                ]
+            )
+        else:
+            lines.append("            return supernote_make_uint8_array(runtime, bytes);")
+    else:
+        raise AssertionError(binding.result)
+    return "\n".join(lines)
+
+
+def _argument_lines(parameters, offset: int) -> list[str]:
+    lines: list[str] = []
+    for index, item in enumerate(parameters):
         target = index + offset
         field = _JNI_FIELDS[item.type]
         if item.type is SemanticType.BOOL:
@@ -475,54 +771,7 @@ def _invocation(binding: SemanticBinding, takes_owner: bool) -> str:
         else:
             raise AssertionError(item.type)
         lines.append(f"            jvm_arguments[{target}].{field} = {value};")
-    call = _jni_call(binding.result)
-    if binding.result is SemanticType.VOID:
-        lines.append(
-            f"            env->{call}(static_cast<jclass>(resolved->adapter_class.get()), "
-            "resolved->method, jvm_arguments);"
-        )
-        lines.append("            require_no_implementation_exception(env);")
-        lines.append("            return Value::undefined();")
-        return "\n".join(lines)
-    lines.append(
-        f"            auto result = env->{call}("
-        "static_cast<jclass>(resolved->adapter_class.get()), "
-        "resolved->method, jvm_arguments);"
-    )
-    lines.append("            require_no_implementation_exception(env);")
-    if binding.result is SemanticType.BOOL:
-        lines.append("            return Value(result == JNI_TRUE);")
-    elif binding.result in {
-        SemanticType.INT32,
-        SemanticType.FLOAT32,
-        SemanticType.FLOAT64,
-    }:
-        lines.append("            return Value(static_cast<double>(result));")
-    elif binding.result is SemanticType.INT64:
-        lines.extend(
-            [
-                "            return Value(facebook::jsi::BigInt::fromInt64(",
-                "                runtime, static_cast<std::int64_t>(result)));",
-            ]
-        )
-    elif binding.result in {SemanticType.STRING, SemanticType.BYTES}:
-        lines.append(
-            "            const auto bytes = read_byte_array("
-            "env, static_cast<jbyteArray>(result));"
-        )
-        if binding.result is SemanticType.STRING:
-            lines.extend(
-                [
-                    "            const std::string text(",
-                    "                reinterpret_cast<const char *>(bytes.data()), bytes.size());",
-                    "            return Value(String::createFromUtf8(runtime, text));",
-                ]
-            )
-        else:
-            lines.append("            return supernote_make_uint8_array(runtime, bytes);")
-    else:
-        raise AssertionError(binding.result)
-    return "\n".join(lines)
+    return lines
 
 
 def _render_owner_setup(owner: JvmOwnerSource) -> str:
@@ -590,6 +839,19 @@ def _constructor_descriptor(owner: JvmOwnerSource) -> str:
     )
 
 
+def _object_constructor_descriptor(
+    owner: JvmOwnerSource, item: SemanticClass
+) -> str:
+    parameters = "".join(
+        _JNI_DESCRIPTOR[parameter.type]
+        for parameter in item.constructor.parameters
+    )
+    return (
+        "(Lcom/facebook/react/bridge/ReactApplicationContext;"
+        f"{parameters})L{owner.owner_class.replace('.', '/')};"
+    )
+
+
 def _jni_call(result: SemanticType) -> str:
     return {
         SemanticType.VOID: "CallStaticVoidMethodA",
@@ -619,3 +881,8 @@ def _error(source: JvmDeclarationSource, message: str) -> JvmCodegenError:
     return JvmCodegenError(
         f"{source.provenance.path}:{source.provenance.line}: {message}"
     )
+
+
+def _indent(value: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(prefix + line.lstrip() for line in value.splitlines())
