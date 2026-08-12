@@ -3962,6 +3962,7 @@ def _jsi_async_host_function(
     prelude: str = "",
     executor_captures: tuple[str, ...] = (),
     worker_captures_extra: tuple[str, ...] = (),
+    worker_prelude: str = "",
 ) -> str:
     expected_parameters = ", ".join(
         _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
@@ -4047,6 +4048,9 @@ def _jsi_async_host_function(
             "                    runtime, operation_id, std::move(value));"
         )
     prelude_block = f"{prelude}\n" if prelude else ""
+    worker_prelude_block = (
+        f"{worker_prelude}\n" if worker_prelude else ""
+    )
     return f'''Function::createFromHostFunction(
         runtime,
         PropNameID::forAscii(runtime, {json.dumps(js_name)}),
@@ -4103,6 +4107,7 @@ def _jsi_async_host_function(
                         supernote::runtime::CancellationToken executor_cancel) mutable {{
                       if (executor_cancel.is_cancelled() ||
                           operation->cancellation_token().is_cancelled()) return;
+{worker_prelude_block}
                       try {{
 {execution}
                       }} catch (const std::exception &error) {{

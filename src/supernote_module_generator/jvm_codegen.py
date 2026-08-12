@@ -6,6 +6,8 @@ from typing import Iterable
 
 from .binding_codegen import (
     Parameter,
+    _jsi_async_helpers,
+    _jsi_async_host_function,
     _jsi_expected_type,
     _jsi_range_validation,
     _jsi_type_check,
@@ -95,6 +97,7 @@ def render_jvm_feature_jsi(
         object_wrappers.append(wrapper)
         object_registrations.append(registration)
     registrations: list[str] = []
+    has_async = False
     for owner in manifest.owners:
         if owner.intent.role is not DeclarationRole.ORDINARY:
             continue
@@ -105,12 +108,28 @@ def render_jvm_feature_jsi(
             if binding.capabilities.routable and not binding.capabilities.javascript_public:
                 raise _error(declaration, "internal JVM routing is not implemented yet")
             if binding.execution is ExecutionMode.ASYNC:
-                raise _error(declaration, "async JVM routing is not implemented yet")
+                if declaration.is_suspend:
+                    raise _error(
+                        declaration,
+                        "Kotlin suspend routing is recognized but not implemented yet",
+                    )
+                registrations.append(
+                    _render_async_function(
+                        owner, declaration, binding, module_name
+                    )
+                )
+                has_async = True
+                continue
             if declaration.is_suspend:
                 raise _error(declaration, "Kotlin suspend routing is not implemented yet")
             registrations.append(
                 _render_function(owner, declaration, binding, module_name)
             )
+    has_async = has_async or any(
+        method.execution is ExecutionMode.ASYNC
+        for item in semantic.classes
+        for method in item.methods
+    )
     suffix = _feature_suffix(feature_id)
     helpers = _jsi_value_helpers().replace(
         "auto exports = runtime.global().getPropertyAsObject(runtime, kGlobalName);",
@@ -118,6 +137,8 @@ def render_jvm_feature_jsi(
         "      runtime, kFeatureRegistryGlobal);\n"
         "  auto exports = registry.getPropertyAsObject(runtime, kFeatureId);",
     )
+    if has_async:
+        helpers += "\n\n" + _jsi_async_helpers()
     return f'''#include <jni.h>
 #include <jsi/jsi.h>
 
@@ -131,6 +152,7 @@ def render_jvm_feature_jsi(
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -415,6 +437,161 @@ def _render_function(
     )
 
 
+def _render_async_function(
+    owner: JvmOwnerSource,
+    source: JvmDeclarationSource,
+    binding: SemanticBinding,
+    module_name: str,
+) -> str:
+    route_class = _adapter_class(source.adapter_identity)
+    takes_owner = owner.form is JvmOwnerForm.CLASS
+    descriptor = _adapter_descriptor(binding, owner if takes_owner else None)
+    setup = [
+        f"    auto route = std::make_shared<LazyJvmRoute>(\n"
+        f"        {json.dumps(route_class)}, {json.dumps(descriptor)});"
+    ]
+    invoker_captures = ["route"]
+    owner_setup = ""
+    if takes_owner:
+        constructor = _owner_constructor(owner)
+        setup.append(
+            "    auto owner_route = std::make_shared<LazyJvmRoute>(\n"
+            f"        {json.dumps(_adapter_class(constructor.adapter_identity))}, "
+            f"{json.dumps(_constructor_descriptor(owner))});"
+        )
+        invoker_captures.append("owner_route")
+        owner_setup = _render_owner_setup(owner).replace(
+            "feature_session", "implementation_feature"
+        )
+    result_type = (
+        "void"
+        if binding.result is SemanticType.VOID
+        else _CPP_TYPES[binding.result]
+    )
+    parameter_rows = [
+        "const std::shared_ptr<supernote::runtime::FeatureSession> "
+        "&implementation_feature"
+    ]
+    parameter_rows.extend(
+        _owned_cpp_parameter(parameter.type, parameter.name)
+        for parameter in binding.parameters
+    )
+    invocation = _worker_invocation(binding, takes_owner)
+    invoker = (
+        f"    auto invoke = [{', '.join(invoker_captures)}](\n"
+        f"        {', '.join(parameter_rows)}) -> {result_type} {{\n"
+        f"{owner_setup}"
+        "      auto resolved = route->get(implementation_feature);\n"
+        "      AttachedEnv attached;\n"
+        "      auto *env = attached.get();\n"
+        "      if (env == nullptr) {\n"
+        "        throw std::runtime_error(\"cannot attach to JavaVM\");\n"
+        "      }\n"
+        "      LocalFrame frame(env);\n"
+        f"{invocation}\n"
+        "    };"
+    )
+    call = "invoke(implementation_feature"
+    if binding.parameters:
+        call += ", __SUPERNOTE_ARGUMENTS__"
+    call += ")"
+    function = _jsi_async_host_function(
+        js_name=binding.name,
+        diagnostic=f"{module_name}.{binding.name}",
+        parameters=tuple(
+            Parameter(_CPP_TYPES[item.type], item.name)
+            for item in binding.parameters
+        ),
+        return_type=result_type,
+        call=call,
+        outer_captures=("invoke", "feature_session"),
+        executor_captures=("invoke",),
+        worker_captures_extra=("invoke",),
+        worker_prelude=(
+            "                      auto implementation_feature = weak_feature.lock();\n"
+            "                      if (!implementation_feature ||\n"
+            "                          implementation_feature->state() !=\n"
+            "                              supernote::runtime::FeatureState::ACTIVE) return;"
+        ),
+    )
+    return (
+        "  {\n"
+        + "\n".join(setup)
+        + "\n"
+        + invoker
+        + "\n"
+        + f"    auto function = {function};\n"
+        + f"    exports.setProperty(runtime, {json.dumps(binding.name)}, "
+        + "std::move(function));\n"
+        + "  }"
+    )
+
+
+def _render_async_object_method(
+    item: SemanticClass,
+    method: SemanticBinding,
+    route_name: str,
+    module_name: str,
+) -> str:
+    result_type = (
+        "void"
+        if method.result is SemanticType.VOID
+        else _CPP_TYPES[method.result]
+    )
+    parameter_rows = [
+        "const std::shared_ptr<supernote::runtime::FeatureSession> "
+        "&implementation_feature"
+    ]
+    parameter_rows.extend(
+        _owned_cpp_parameter(parameter.type, parameter.name)
+        for parameter in method.parameters
+    )
+    invocation = _worker_invocation(method, True)
+    invoker = (
+        "      auto invoke = [route, owner](\n"
+        f"          {', '.join(parameter_rows)}) -> {result_type} {{\n"
+        "        auto resolved = route->get(implementation_feature);\n"
+        "        AttachedEnv attached;\n"
+        "        auto *env = attached.get();\n"
+        "        if (env == nullptr) {\n"
+        "          throw std::runtime_error(\"cannot attach to JavaVM\");\n"
+        "        }\n"
+        "        LocalFrame frame(env);\n"
+        f"{_indent(invocation, 8)}\n"
+        "      };"
+    )
+    call = "invoke(implementation_feature"
+    if method.parameters:
+        call += ", __SUPERNOTE_ARGUMENTS__"
+    call += ")"
+    function = _jsi_async_host_function(
+        js_name=method.name,
+        diagnostic=f"{module_name}.{item.name}.{method.name}",
+        parameters=tuple(
+            Parameter(_CPP_TYPES[parameter.type], parameter.name)
+            for parameter in method.parameters
+        ),
+        return_type=result_type,
+        call=call,
+        outer_captures=("invoke", "feature_session"),
+        executor_captures=("invoke",),
+        worker_captures_extra=("invoke",),
+        worker_prelude=(
+            "                      auto implementation_feature = weak_feature.lock();\n"
+            "                      if (!implementation_feature ||\n"
+            "                          implementation_feature->state() !=\n"
+            "                              supernote::runtime::FeatureState::ACTIVE) return;"
+        ),
+    )
+    return f'''    if (property == {json.dumps(method.name)}) {{
+      auto route = {route_name}_;
+      auto owner = owner_;
+      auto feature_session = feature_session_;
+{invoker}
+      return facebook::jsi::Value({function});
+    }}'''
+
+
 def _render_object(
     owner: JvmOwnerSource,
     item: SemanticClass,
@@ -448,8 +625,11 @@ def _render_object(
             )
         if not method.capabilities.javascript_public:
             raise _error(source, "internal JVM object-method routing is not implemented yet")
-        if method.execution is ExecutionMode.ASYNC or source.is_suspend:
-            raise _error(source, "async JVM object-method routing is not implemented yet")
+        if source.is_suspend:
+            raise _error(
+                source,
+                "Kotlin suspend object-method routing is recognized but not implemented yet",
+            )
         route_name = f"method_route_{method_index}"
         route_parameters.append(
             f"std::shared_ptr<LazyJvmRoute> {route_name}"
@@ -462,6 +642,13 @@ def _render_object(
             f"        {json.dumps(_adapter_descriptor(method, owner))});"
         )
         route_captures.append(route_name)
+        if method.execution is ExecutionMode.ASYNC:
+            method_rows.append(
+                _render_async_object_method(
+                    item, method, route_name, module_name
+                )
+            )
+            continue
         validations = _validations(
             method, f"{module_name}.{item.name}.{method.name}"
         )
@@ -539,6 +726,10 @@ def _render_object(
   facebook::jsi::Value get(
       facebook::jsi::Runtime &runtime,
       const facebook::jsi::PropNameID &name) override {{
+    using facebook::jsi::Function;
+    using facebook::jsi::PropNameID;
+    using facebook::jsi::String;
+    using facebook::jsi::Value;
     const auto property = name.utf8(runtime);
 {chr(10).join(method_rows)}
     return facebook::jsi::Value::undefined();
@@ -733,6 +924,94 @@ def _invocation(binding: SemanticBinding, takes_owner: bool) -> str:
     else:
         raise AssertionError(binding.result)
     return "\n".join(lines)
+
+
+def _owned_cpp_parameter(type_: SemanticType, name: str) -> str:
+    cpp_type = _CPP_TYPES[type_]
+    if type_ in {SemanticType.STRING, SemanticType.BYTES}:
+        return f"const {cpp_type} &{name}"
+    return f"{cpp_type} {name}"
+
+
+def _worker_invocation(
+    binding: SemanticBinding,
+    takes_owner: bool,
+) -> str:
+    indent = "      "
+    offset = 1 if takes_owner else 0
+    size = len(binding.parameters) + offset
+    lines = [f"{indent}jvalue jvm_arguments[{max(1, size)}]{{}};"]
+    if takes_owner:
+        lines.append(
+            f"{indent}jvm_arguments[0].l = "
+            "static_cast<jobject>(owner->value.get());"
+        )
+    lines.extend(_owned_argument_lines(binding.parameters, offset, indent))
+    call = _jni_call(binding.result)
+    call_expression = (
+        f"env->{call}(static_cast<jclass>(resolved->adapter_class.get()), "
+        "resolved->method, jvm_arguments)"
+    )
+    if binding.result is SemanticType.VOID:
+        lines.append(f"{indent}{call_expression};")
+        lines.append(f"{indent}require_no_implementation_exception(env);")
+        return "\n".join(lines)
+    lines.append(f"{indent}auto result = {call_expression};")
+    lines.append(f"{indent}require_no_implementation_exception(env);")
+    if binding.result is SemanticType.BOOL:
+        lines.append(f"{indent}return result == JNI_TRUE;")
+    elif binding.result is SemanticType.INT32:
+        lines.append(f"{indent}return static_cast<std::int32_t>(result);")
+    elif binding.result is SemanticType.INT64:
+        lines.append(f"{indent}return static_cast<std::int64_t>(result);")
+    elif binding.result is SemanticType.FLOAT32:
+        lines.append(f"{indent}return static_cast<float>(result);")
+    elif binding.result is SemanticType.FLOAT64:
+        lines.append(f"{indent}return static_cast<double>(result);")
+    elif binding.result in {SemanticType.STRING, SemanticType.BYTES}:
+        lines.append(
+            f"{indent}const auto bytes = read_byte_array("
+            "env, static_cast<jbyteArray>(result));"
+        )
+        if binding.result is SemanticType.STRING:
+            lines.append(
+                f"{indent}return std::string("
+                "reinterpret_cast<const char *>(bytes.data()), bytes.size());"
+            )
+        else:
+            lines.append(f"{indent}return bytes;")
+    else:
+        raise AssertionError(binding.result)
+    return "\n".join(lines)
+
+
+def _owned_argument_lines(parameters, offset: int, indent: str) -> list[str]:
+    lines: list[str] = []
+    for index, item in enumerate(parameters):
+        target = index + offset
+        field = _JNI_FIELDS[item.type]
+        name = item.name
+        if item.type is SemanticType.BOOL:
+            value = f"{name} ? JNI_TRUE : JNI_FALSE"
+        elif item.type is SemanticType.INT32:
+            value = f"static_cast<jint>({name})"
+        elif item.type is SemanticType.INT64:
+            value = f"static_cast<jlong>({name})"
+        elif item.type is SemanticType.FLOAT32:
+            value = f"static_cast<jfloat>({name})"
+        elif item.type is SemanticType.FLOAT64:
+            value = f"static_cast<jdouble>({name})"
+        elif item.type is SemanticType.STRING:
+            value = (
+                "write_byte_array(env, reinterpret_cast<const std::byte *>("
+                f"{name}.data()), {name}.size())"
+            )
+        elif item.type is SemanticType.BYTES:
+            value = f"write_byte_array(env, {name}.data(), {name}.size())"
+        else:
+            raise AssertionError(item.type)
+        lines.append(f"{indent}jvm_arguments[{target}].{field} = {value};")
+    return lines
 
 
 def _argument_lines(parameters, offset: int) -> list[str]:

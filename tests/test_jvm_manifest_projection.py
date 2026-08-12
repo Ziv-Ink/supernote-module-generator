@@ -219,6 +219,58 @@ def test_sync_jvm_route_targets_ksp_adapter_and_feature_scoped_owner():
     assert 'loadClass' in source
 
 
+def test_blocking_jvm_async_route_uses_shared_worker_and_owned_values():
+    owner_name = "com.example.DocumentApi"
+    context = JvmParameterSource(
+        "android.content.Context",
+        "context",
+        injected=JvmInjectedDependency.CONTEXT,
+    )
+    load = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "loadPage",
+        "(I)[B",
+        (JvmParameterSource("kotlin.Int", "page"),),
+        "kotlin.ByteArray",
+        SupernoteMarker.EXPORT,
+        SupernoteMarker.ASYNC,
+    )
+    owner = JvmOwnerSource(
+        provenance(jvm_owner_identity(owner_name), JvmLanguage.KOTLIN, "Api.kt", 3),
+        JvmLanguage.KOTLIN,
+        owner_name,
+        "DocumentApi",
+        JvmOwnerForm.CLASS,
+        intent(DeclarationTarget.CLASS),
+        (
+            constructor(
+                owner_name,
+                JvmLanguage.KOTLIN,
+                "(Landroid/content/Context;)V",
+                (context,),
+            ),
+        ),
+        (load,),
+    )
+    source = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
+        project_jvm_owners((owner,)),
+        feature_id=FEATURE_ID,
+        module_name="Document",
+    )
+
+    assert 'getPropertyAsFunction(runtime, "Promise")' in source
+    assert "process_services().workers().submit" in source
+    assert "auto implementation_feature = weak_feature.lock()" in source
+    assert "feature_session->service<JvmOwner>" not in source
+    assert "implementation_feature->service<JvmOwner>" in source
+    assert "CallStaticObjectMethodA" in source
+    assert "supernote_input_0" in source
+    worker = source.index("auto invoke =")
+    assert "facebook::jsi::Runtime" not in source[worker:source.index("};", worker)]
+
+
 def test_kotlin_and_java_canonical_type_tables_are_exact():
     assert jvm_type_table(JvmLanguage.KOTLIN) == {
         "kotlin.Unit": SemanticType.VOID,
@@ -292,6 +344,45 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     assert "Object::createFromHostObject" in generated
     assert 'property == "pageCount"' in generated
     assert "std::shared_ptr<JvmOwner> owner_" in generated
+
+
+def test_blocking_jvm_async_object_method_retains_global_receiver():
+    owner_name = "com.example.Document"
+    load = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "loadPage",
+        "(I)[B",
+        (JvmParameterSource("kotlin.Int", "page"),),
+        "kotlin.ByteArray",
+        SupernoteMarker.EXPORT,
+        SupernoteMarker.ASYNC,
+        target=DeclarationTarget.METHOD,
+    )
+    owner = JvmOwnerSource(
+        provenance(jvm_owner_identity(owner_name), JvmLanguage.KOTLIN, "Document.kt", 2),
+        JvmLanguage.KOTLIN,
+        owner_name,
+        "Document",
+        JvmOwnerForm.CLASS,
+        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        (constructor(owner_name, JvmLanguage.KOTLIN),),
+        (load,),
+    )
+    generated = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
+        project_jvm_owners((owner,)),
+        feature_id=FEATURE_ID,
+        module_name="Documents",
+    )
+
+    assert 'getPropertyAsFunction(runtime, "Promise")' in generated
+    assert "auto owner = owner_;" in generated
+    assert "auto invoke = [route, owner]" in generated
+    assert "process_services().workers().submit" in generated
+    assert "jvm_arguments[0].l" in generated
+    assert "owner->value.get()" in generated
+    assert "CallStaticObjectMethodA" in generated
 
 
 def test_internal_jvm_class_is_a_hidden_feature_service():
