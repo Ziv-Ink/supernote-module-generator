@@ -342,7 +342,8 @@ def _async_definition(
         {result_type} outcome = {result_type}::failure(supernote::Error(
             supernote::ErrorCode::INTERNAL, "operation did not complete"));
         try {{
-{service_setup}      {invoke}
+{service_setup}      feature.reset();
+      {invoke}
         }} catch (const supernote::Error &error) {{
           outcome = {result_type}::failure(error);
         }} catch (const std::exception &error) {{
@@ -353,8 +354,11 @@ def _async_definition(
               supernote::ErrorCode::IMPLEMENTATION_ERROR,
               "unknown C++ implementation failure"));
         }}
+        feature.reset();
+        auto completion_feature = weak_feature.lock();
         if (operation->cancellation_token().is_cancelled() ||
-            !feature->claim_internal_completion(operation)) return;
+            !completion_feature ||
+            !completion_feature->claim_internal_completion(operation)) return;
         deliver_callback(*callback, std::move(outcome));
       }});
   operation->set_work(work);

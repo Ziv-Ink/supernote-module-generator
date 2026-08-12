@@ -615,7 +615,7 @@ class FeatureCallScope {
   FeatureCallScope &operator=(const FeatureCallScope &) = delete;
 
  private:
-  std::shared_ptr<FeatureSession> previous_;
+  std::weak_ptr<FeatureSession> previous_;
 };
 
 std::shared_ptr<FeatureSession> current_feature_session() noexcept;
@@ -1274,21 +1274,21 @@ void FeatureSession::erase_pending(SessionId operation_id) noexcept {
 }
 
 namespace {
-thread_local std::shared_ptr<FeatureSession> g_current_feature;
+thread_local std::weak_ptr<FeatureSession> g_current_feature;
 }
 
 FeatureCallScope::FeatureCallScope(
     std::shared_ptr<FeatureSession> feature) noexcept
-    : previous_(std::move(g_current_feature)) {
-  g_current_feature = std::move(feature);
+    : previous_(g_current_feature) {
+  g_current_feature = feature;
 }
 
 FeatureCallScope::~FeatureCallScope() {
-  g_current_feature = std::move(previous_);
+  g_current_feature = previous_;
 }
 
 std::shared_ptr<FeatureSession> current_feature_session() noexcept {
-  return g_current_feature;
+  return g_current_feature.lock();
 }
 
 ProcessServices::ProcessServices()

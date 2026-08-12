@@ -285,6 +285,8 @@ def test_blocking_jvm_async_route_uses_shared_worker_and_owned_values():
     assert 'getPropertyAsFunction(runtime, "Promise")' in source
     assert "process_services().workers().submit" in source
     assert "auto implementation_feature = weak_feature.lock()" in source
+    assert "invoke(std::move(implementation_feature)" in source
+    assert "implementation_feature.reset();" in source
     assert "feature_session->service<JvmOwner>" not in source
     assert "implementation_feature->service<JvmOwner>" in source
     assert "CallStaticObjectMethodA" in source

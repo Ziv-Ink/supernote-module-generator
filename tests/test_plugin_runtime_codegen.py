@@ -67,7 +67,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert services.count("static ProcessServices services") == 1
     assert "class FeatureCallScope" in services_header
     assert "claim_internal_completion" in services_header
-    assert "thread_local std::shared_ptr<FeatureSession>" in services
+    assert "thread_local std::weak_ptr<FeatureSession>" in services
     assert "enum class ErrorCode" in public_header
     assert "class Result final" in public_header
     assert "supernote:feature:" in source
@@ -235,6 +235,18 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               replacement->invalidate();
               if (!js_queue.empty() || !dropped->cancellation_token().is_cancelled() ||
                   dropped->winner() != OperationWinner::CANCELLED_BY_RUNTIME) return 6;
+
+              auto scoped_runtime = RuntimeSession::create(
+                  [](RuntimeSession::JsTask) {});
+              auto scoped_feature = FeatureSession::create(scoped_runtime, cleanup);
+              std::weak_ptr<FeatureSession> scoped_weak = scoped_feature;
+              {
+                FeatureCallScope scope(scoped_feature);
+                scoped_runtime->invalidate();
+                scoped_feature.reset();
+                if (!scoped_weak.expired()) return 22;
+                if (current_feature_session()) return 23;
+              }
 
               BoundedExecutor executor(1, 2);
               std::atomic<int> worker_initialized{0};

@@ -300,6 +300,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
             self.assertIn('"RESOURCE_EXHAUSTED"', source)
             self.assertIn("BigInt::fromInt64", source)
             self.assertIn("operation, operation_id, weak_feature", source)
+            self.assertIn("implementation_feature.reset();", source)
             self.assertIn("static_cast<std::size_t>(1)", source)
             self.assertNotIn("jsi::Runtime *runtime", source)
 

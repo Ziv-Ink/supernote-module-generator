@@ -529,7 +529,7 @@ def _render_internal_blocking_helper(
     owner_setup = _render_internal_owner_setup(owner) if takes_owner else ""
     invocation = _worker_invocation(binding, takes_owner)
     return f'''static {result_type} {helper_name}(
-    const std::shared_ptr<supernote::runtime::FeatureSession> &feature{signature_tail}) {{
+    std::shared_ptr<supernote::runtime::FeatureSession> feature{signature_tail}) {{
   auto route = feature->service<LazyJvmRoute>(
       {json.dumps(route_key)}, [] {{
         return std::make_shared<LazyJvmRoute>(
@@ -537,6 +537,7 @@ def _render_internal_blocking_helper(
             {json.dumps(descriptor)});
       }});
 {owner_setup}  auto resolved = route->get(feature);
+  feature.reset();
   AttachedEnv attached;
   auto *env = attached.get();
   if (env == nullptr) {{
@@ -573,9 +574,9 @@ def _render_internal_sync_facade(
     arguments = ", ".join(item.name for item in binding.parameters)
     call_tail = f", {arguments}" if arguments else ""
     invoke = (
-        f"route::{helper_name}(feature{call_tail});\n    return;"
+        f"route::{helper_name}(std::move(feature){call_tail});\n    return;"
         if binding.result is SemanticType.VOID
-        else f"return route::{helper_name}(feature{call_tail});"
+        else f"return route::{helper_name}(std::move(feature){call_tail});"
     )
     return f'''{result_type} {facade_name}({parameters}) {{
   auto feature = supernote::runtime::current_feature_session();
@@ -621,13 +622,13 @@ def _render_internal_blocking_async_facade(
     result_type = _internal_result_type(binding.result)
     if binding.result is SemanticType.VOID:
         invoke = (
-            f"route::{helper_name}(feature{call_tail});\n"
+            f"route::{helper_name}(std::move(feature){call_tail});\n"
             "      outcome = supernote::Result<void>::success();"
         )
     else:
         invoke = (
             f"outcome = {result_type}::success(\n"
-            f"          route::{helper_name}(feature{call_tail}));"
+            f"          route::{helper_name}(std::move(feature){call_tail}));"
         )
     return f'''void {facade_name}({signature}) {{
   auto feature = supernote::runtime::current_feature_session();
@@ -674,8 +675,11 @@ def _render_internal_blocking_async_facade(
               supernote::ErrorCode::INTERNAL,
               "unknown generated JVM route failure"));
         }}
+        feature.reset();
+        auto completion_feature = weak_feature.lock();
         if (operation->cancellation_token().is_cancelled() ||
-            !feature->claim_internal_completion(operation)) return;
+            !completion_feature ||
+            !completion_feature->claim_internal_completion(operation)) return;
         route::deliver_internal_callback(*callback, std::move(outcome));
       }});
   operation->set_work(work);
@@ -733,7 +737,7 @@ def _render_internal_suspend_route(
     )
     helper = f'''static std::pair<std::shared_ptr<void>, std::shared_ptr<JvmRoute>>
 {helper_name}(
-    const std::shared_ptr<supernote::runtime::FeatureSession> &feature,
+    std::shared_ptr<supernote::runtime::FeatureSession> feature,
     supernote::runtime::SessionId completion_id{signature_tail}) {{
   auto route = feature->service<LazyJvmRoute>(
       {json.dumps(route_key)}, [] {{
@@ -749,6 +753,7 @@ def _render_internal_suspend_route(
       }});
 {owner_setup}  auto resolved = route->get(feature);
   auto cancel_resolved = cancel_route->get(feature);
+  feature.reset();
   AttachedEnv attached;
   auto *env = attached.get();
   if (env == nullptr) {{
@@ -876,7 +881,7 @@ def _render_internal_suspend_facade(
         namespace route = supernote::generated::jvm_feature_{feature_suffix};
         try {{
           auto launched = route::{helper_name}(
-              feature, completion_id{call_tail});
+              std::move(feature), completion_id{call_tail});
           auto job = std::move(launched.first);
           auto cancel_route = std::move(launched.second);
           operation->set_cancel_hook(
@@ -1111,8 +1116,8 @@ def _render_async_function(
         else _CPP_TYPES[binding.result]
     )
     parameter_rows = [
-        "const std::shared_ptr<supernote::runtime::FeatureSession> "
-        "&implementation_feature"
+        "std::shared_ptr<supernote::runtime::FeatureSession> "
+        "implementation_feature"
     ]
     parameter_rows.extend(
         _owned_cpp_parameter(parameter.type, parameter.name)
@@ -1124,6 +1129,7 @@ def _render_async_function(
         f"        {', '.join(parameter_rows)}) -> {result_type} {{\n"
         f"{owner_setup}"
         "      auto resolved = route->get(implementation_feature);\n"
+        "      implementation_feature.reset();\n"
         "      AttachedEnv attached;\n"
         "      auto *env = attached.get();\n"
         "      if (env == nullptr) {\n"
@@ -1133,7 +1139,7 @@ def _render_async_function(
         f"{invocation}\n"
         "    };"
     )
-    call = "invoke(implementation_feature"
+    call = "invoke(std::move(implementation_feature)"
     if binding.parameters:
         call += ", __SUPERNOTE_ARGUMENTS__"
     call += ")"
@@ -1153,6 +1159,7 @@ def _render_async_function(
             "                      if (implementation_feature->state() !=\n"
             "                              supernote::runtime::FeatureState::ACTIVE) return;"
         ),
+        release_feature_before_execution=False,
     )
     return (
         "  {\n"
@@ -1501,8 +1508,8 @@ def _render_async_object_method(
         else _CPP_TYPES[method.result]
     )
     parameter_rows = [
-        "const std::shared_ptr<supernote::runtime::FeatureSession> "
-        "&implementation_feature"
+        "std::shared_ptr<supernote::runtime::FeatureSession> "
+        "implementation_feature"
     ]
     parameter_rows.extend(
         _owned_cpp_parameter(parameter.type, parameter.name)
@@ -1513,6 +1520,7 @@ def _render_async_object_method(
         "      auto invoke = [route, owner](\n"
         f"          {', '.join(parameter_rows)}) -> {result_type} {{\n"
         "        auto resolved = route->get(implementation_feature);\n"
+        "        implementation_feature.reset();\n"
         "        AttachedEnv attached;\n"
         "        auto *env = attached.get();\n"
         "        if (env == nullptr) {\n"
@@ -1522,7 +1530,7 @@ def _render_async_object_method(
         f"{_indent(invocation, 8)}\n"
         "      };"
     )
-    call = "invoke(implementation_feature"
+    call = "invoke(std::move(implementation_feature)"
     if method.parameters:
         call += ", __SUPERNOTE_ARGUMENTS__"
     call += ")"
@@ -1542,6 +1550,7 @@ def _render_async_object_method(
             "                      if (implementation_feature->state() !=\n"
             "                              supernote::runtime::FeatureState::ACTIVE) return;"
         ),
+        release_feature_before_execution=False,
     )
     return f'''    if (property == {json.dumps(method.name)}) {{
       auto route = {route_name}_;

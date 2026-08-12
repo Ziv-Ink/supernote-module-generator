@@ -3972,6 +3972,7 @@ def _jsi_async_host_function(
     executor_captures: tuple[str, ...] = (),
     worker_captures_extra: tuple[str, ...] = (),
     worker_prelude: str = "",
+    release_feature_before_execution: bool = True,
 ) -> str:
     expected_parameters = ", ".join(
         _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
@@ -4060,6 +4061,11 @@ def _jsi_async_host_function(
     worker_prelude_block = (
         f"{worker_prelude}\n" if worker_prelude else ""
     )
+    feature_release = (
+        "                      implementation_feature.reset();\n"
+        if release_feature_before_execution
+        else ""
+    )
     return f'''Function::createFromHostFunction(
         runtime,
         PropNameID::forAscii(runtime, {json.dumps(js_name)}),
@@ -4121,6 +4127,7 @@ def _jsi_async_host_function(
                       supernote::runtime::FeatureCallScope feature_call_scope(
                           implementation_feature);
 {worker_prelude_block}
+{feature_release}
                       try {{
 {execution}
                       }} catch (const std::exception &error) {{

@@ -59,6 +59,8 @@ def test_cpp_internal_facade_is_typed_hidden_and_feature_scoped(tmp_path: Path):
     assert 'feature->service<::IndexService>' in source
     assert "process_services().workers().submit" in source
     assert "claim_internal_completion" in source
+    assert "feature.reset();" in source
+    assert "auto completion_feature = weak_feature.lock();" in source
     assert "deliver_callback" in source
     assert "facebook::jsi" not in source
     assert "Promise" not in source
