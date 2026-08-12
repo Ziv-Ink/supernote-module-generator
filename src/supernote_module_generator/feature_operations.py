@@ -20,6 +20,7 @@ from .plugin_runtime_codegen import (
     RUNTIME_RELATIVE_ROOT,
     stage_plugin_runtime,
 )
+from .plugin_build_integration import set_runtime_wiring, verify_runtime_wiring
 from .semantic import SemanticApi
 
 
@@ -35,6 +36,8 @@ class FeatureOperationService:
         self.features_root = self.root / "local_modules"
 
     def add(self, config: FeatureConfig) -> Path:
+        had_features = bool(self.feature_paths())
+        verify_runtime_wiring(self.root, enabled=had_features)
         destination = config.output.resolve()
         if destination.exists():
             raise FeatureOperationError(f"feature already exists: {config.npm_name}")
@@ -44,6 +47,7 @@ class FeatureOperationService:
         runtime_backup = None
         feature_activated = False
         runtime_activated = False
+        integration_mutated = False
         try:
             future = self._entries(extra=(staged_feature,), excluding=())
             staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
@@ -53,6 +57,9 @@ class FeatureOperationService:
                 staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
             )
             runtime_activated = True
+            set_runtime_wiring(self.root, enabled=True)
+            integration_mutated = True
+            verify_runtime_wiring(self.root, enabled=True)
             self._finalize(feature_backup)
             self._finalize(runtime_backup)
             return destination
@@ -61,12 +68,16 @@ class FeatureOperationService:
                 self._restore(destination, feature_backup)
             if runtime_activated:
                 self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
+            if integration_mutated:
+                set_runtime_wiring(self.root, enabled=had_features)
             shutil.rmtree(staged_feature, ignore_errors=True)
             if staged_runtime is not None:
                 shutil.rmtree(staged_runtime, ignore_errors=True)
             raise
 
     def update(self, npm_name: str) -> Path:
+        had_features = bool(self.feature_paths())
+        verify_runtime_wiring(self.root, enabled=had_features)
         current = self.find(npm_name)
         metadata = read_feature_manifest(current)
         raw = json.loads((current / ".supernote-module.json").read_text())
@@ -86,6 +97,7 @@ class FeatureOperationService:
         runtime_backup = None
         feature_activated = False
         runtime_activated = False
+        integration_mutated = False
         try:
             future = self._entries(extra=(staged_feature,), excluding=(current,))
             staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
@@ -95,6 +107,9 @@ class FeatureOperationService:
                 staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
             )
             runtime_activated = True
+            set_runtime_wiring(self.root, enabled=True)
+            integration_mutated = True
+            verify_runtime_wiring(self.root, enabled=True)
             self._finalize(feature_backup)
             self._finalize(runtime_backup)
             return current
@@ -103,25 +118,41 @@ class FeatureOperationService:
                 self._restore(current, feature_backup)
             if runtime_activated:
                 self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
+            if integration_mutated:
+                set_runtime_wiring(self.root, enabled=had_features)
             shutil.rmtree(staged_feature, ignore_errors=True)
             if staged_runtime is not None:
                 shutil.rmtree(staged_runtime, ignore_errors=True)
             raise
 
     def remove(self, npm_name: str) -> None:
+        had_features = bool(self.feature_paths())
+        verify_runtime_wiring(self.root, enabled=had_features)
         current = self.find(npm_name)
         staged_runtime = None
         runtime_backup = None
         runtime_activated = False
+        integration_mutated = False
         feature_backup = current.parent / f".{current.name}.removed-{uuid.uuid4().hex}"
         try:
             future = self._entries(extra=(), excluding=(current,))
-            staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
+            if future:
+                staged_runtime = stage_plugin_runtime(
+                    self.root, self._registry(future)
+                )
             os.replace(current, feature_backup)
-            runtime_backup = self._activate(
-                staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
-            )
+            if staged_runtime is not None:
+                runtime_backup = self._activate(
+                    staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
+                )
+            else:
+                runtime_backup = self._deactivate(
+                    self.root / RUNTIME_RELATIVE_ROOT
+                )
             runtime_activated = True
+            set_runtime_wiring(self.root, enabled=bool(future))
+            integration_mutated = True
+            verify_runtime_wiring(self.root, enabled=bool(future))
             shutil.rmtree(feature_backup)
             self._finalize(runtime_backup)
         except Exception:
@@ -129,6 +160,8 @@ class FeatureOperationService:
                 os.replace(feature_backup, current)
             if runtime_activated:
                 self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
+            if integration_mutated:
+                set_runtime_wiring(self.root, enabled=had_features)
             if staged_runtime is not None:
                 shutil.rmtree(staged_runtime, ignore_errors=True)
             raise
@@ -213,6 +246,16 @@ class FeatureOperationService:
             shutil.rmtree(destination)
         if backup.exists():
             os.replace(backup, destination)
+
+    @staticmethod
+    def _deactivate(destination: Path) -> Path | None:
+        if not destination.exists():
+            return None
+        backup = destination.parent / (
+            f".{destination.name}.backup-{uuid.uuid4().hex}"
+        )
+        os.replace(destination, backup)
+        return backup
 
     @staticmethod
     def _finalize(backup: Path | None) -> None:

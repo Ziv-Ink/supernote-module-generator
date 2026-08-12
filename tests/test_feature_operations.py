@@ -12,7 +12,11 @@ from supernote_module_generator.feature_operations import (
 
 
 def plugin(tmp_path: Path) -> Path:
-    (tmp_path / "android").mkdir()
+    (tmp_path / "android/app").mkdir(parents=True)
+    (tmp_path / "android/settings.gradle").write_text(
+        "rootProject.name = 'fixture'\n"
+    )
+    (tmp_path / "android/app/build.gradle").write_text("plugins {}\n")
     (tmp_path / "package.json").write_text('{"name":"test-plugin"}\n')
     return tmp_path
 
@@ -73,3 +77,22 @@ def test_add_rolls_back_feature_when_registry_projection_fails(tmp_path: Path):
 
     assert not bad.output.exists()
     assert registry(root) == before
+
+
+def test_removing_last_feature_removes_shared_component_and_wiring(tmp_path: Path):
+    root = plugin(tmp_path)
+    service = FeatureOperationService(root)
+    service.add(config(root, "only"))
+    assert "supernote-v2-runtime" in (
+        root / "android/settings.gradle"
+    ).read_text()
+
+    service.remove("only")
+
+    assert not (root / "android/.supernote-module/v2-runtime").exists()
+    assert "supernote-v2-runtime" not in (
+        root / "android/settings.gradle"
+    ).read_text()
+    assert "supernote-v2-runtime" not in (
+        root / "android/app/build.gradle"
+    ).read_text()
