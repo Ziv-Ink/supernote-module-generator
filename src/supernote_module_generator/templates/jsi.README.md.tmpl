@@ -18,20 +18,23 @@ double add(double left, double right) {
 
 ## Persistent C++ objects
 
-JSI modules can also expose persistent C++ objects. Put
-`@SupernoteExportObject` on a class or struct in a C++ header below
-`android/src/main/cpp/`:
+JSI modules can also expose persistent C++ objects. Put `@SupernoteExport` on
+the class or struct and on each method that JavaScript should see. Ordinary
+unmarked public methods remain C++-only.
 
 ```cpp
 // Counter.hpp
 #pragma once
 
-// @SupernoteExportObject
+// @SupernoteExport
 class Counter {
 public:
   Counter(double initial);
+  // @SupernoteExport
   double value() const;
+  // @SupernoteExport
   void increment(double amount);
+  void rebuildInternalCache();
 
 private:
   double value_;
@@ -48,8 +51,8 @@ console.log(counter.value());
 ```
 
 Each returned JavaScript object represents a persistent native C++ instance.
-Supported public instance methods are exposed automatically. Native objects are
-JSI-only, and their constructors and methods remain synchronous.
+Only explicitly marked methods enter JavaScript. Native objects are JSI-only,
+and their constructors and methods remain synchronous in this starter.
 
 ## Call it from your plugin
 

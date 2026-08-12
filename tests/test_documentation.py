@@ -228,12 +228,14 @@ def test_generated_jsi_readme_documents_native_objects(tmp_path: Path):
     readme = (module / "README.md").read_text(encoding="utf-8")
 
     assert "## Persistent C++ objects" in readme
-    assert "// @SupernoteExportObject" in readme
+    assert readme.count("// @SupernoteExport") >= 3
+    assert "SupernoteExportObject" not in readme
     assert "android/src/main/cpp/" in readme
     assert "class Counter" in readme
     assert "DocsJsi.Counter.create(10)" in readme
     assert "persistent native C++ instance" in readme
-    assert "Supported public instance methods" in readme
+    assert "Only explicitly marked methods" in readme
+    assert "unmarked public methods" in readme
     assert "JSI-only" in readme
     assert "remain synchronous" in readme
     assert f"{WIKI_ROOT}/JSI-Modules" in readme

@@ -19,6 +19,7 @@ if __package__:
         DeclarationRole,
         ExecutionMode,
         SemanticApi,
+        SemanticClassKind,
         SourceProvenance,
     )
     from .source_models import (
@@ -43,6 +44,7 @@ else:
         DeclarationRole,
         ExecutionMode,
         SemanticApi,
+        SemanticClassKind,
         SourceProvenance,
     )
     from supernote_codegen.source_models import (  # type: ignore[no-redef]
@@ -2792,18 +2794,6 @@ def scan_sources(
     module_name: str | None = None,
 ) -> list[Export]:
     backend, module_name = _scan_context(module_root, backend, module_name)
-    classes = scan_cpp_class_source_model(module_root, module_name=module_name)
-    if classes:
-        first = classes[0]
-        raise _source_error(
-            module_root,
-            module_root / first.provenance.path,
-            first.provenance.line,
-            module_name,
-            first.cpp_name,
-            "V2 class/member semantics were recognized, but explicit "
-            "HostObject/service lowering is not implemented yet",
-        )
     sources = scan_cpp_source_model(module_root, module_name=module_name)
     try:
         semantics = project_cpp_functions(sources)
@@ -2828,6 +2818,118 @@ def scan_sources(
     return exports
 
 
+def _lower_sync_object(
+    module_root: Path,
+    source: CppClassSource,
+    *,
+    module_name: str,
+) -> ObjectExport:
+    try:
+        semantic = project_cpp_api((), (source,)).classes[0]
+    except (CppProjectionError, SourceModelError, ValueError) as exc:
+        raise CodegenError(str(exc)) from exc
+    path = module_root / source.provenance.path
+    if semantic.kind is SemanticClassKind.INTERNAL_SERVICE:
+        raise _source_error(
+            module_root,
+            path,
+            source.provenance.line,
+            module_name,
+            source.cpp_name,
+            "SupernoteInternal class semantics were recognized, but the "
+            "FeatureSession service route is not implemented yet",
+        )
+    selected = next(
+        constructor
+        for constructor in source.constructors
+        if constructor.provenance.declaration_id
+        == semantic.constructor.source.declaration_id
+    )
+    constructor_types = {
+        parameter.type_spelling for parameter in selected.parameters
+    }
+    unsupported_constructor = sorted(
+        constructor_types - (LEGACY_SYNC_LOWERING_TYPES - {"void"})
+    )
+    if unsupported_constructor:
+        raise _source_error(
+            module_root,
+            path,
+            selected.provenance.line,
+            module_name,
+            f"{source.cpp_name}.create",
+            "constructor semantic types were recognized, but HostObject "
+            "conversion is not implemented yet for "
+            + ", ".join(unsupported_constructor),
+        )
+    methods: list[ObjectMethod] = []
+    for method in source.methods:
+        if method.intent.role is DeclarationRole.INTERNAL:
+            raise _source_error(
+                module_root,
+                path,
+                method.provenance.line,
+                module_name,
+                f"{source.cpp_name}.{method.cpp_name}",
+                "SupernoteInternal object methods were recognized, but their "
+                "receiver-aware internal route is not implemented yet",
+            )
+        if method.intent.execution is ExecutionMode.ASYNC:
+            raise _source_error(
+                module_root,
+                path,
+                method.provenance.line,
+                module_name,
+                f"{source.cpp_name}.{method.cpp_name}",
+                "SupernoteAsync object methods were recognized, but async "
+                "HostObject lowering is not implemented yet",
+            )
+        used_types = {method.return_type_spelling}
+        used_types.update(
+            parameter.type_spelling for parameter in method.parameters
+        )
+        unsupported = sorted(used_types - LEGACY_SYNC_LOWERING_TYPES)
+        if unsupported:
+            raise _source_error(
+                module_root,
+                path,
+                method.provenance.line,
+                module_name,
+                f"{source.cpp_name}.{method.cpp_name}",
+                "method semantic types were recognized, but HostObject "
+                "conversion is not implemented yet for "
+                + ", ".join(unsupported),
+            )
+        methods.append(
+            ObjectMethod(
+                line=method.provenance.line,
+                cpp_name=method.cpp_name,
+                js_name=method.cpp_name,
+                return_type=method.return_type_spelling,
+                parameters=tuple(
+                    Parameter(parameter.type_spelling, parameter.name)
+                    for parameter in method.parameters
+                ),
+                const=method.const,
+                noexcept=method.noexcept,
+            )
+        )
+    return ObjectExport(
+        source=source.provenance.path,
+        include=source.include,
+        line=source.provenance.line,
+        cpp_name=source.cpp_name,
+        js_name=source.cpp_name,
+        constructor=ObjectConstructor(
+            tuple(
+                Parameter(parameter.type_spelling, parameter.name)
+                for parameter in selected.parameters
+            )
+        ),
+        methods=tuple(methods),
+    )
+
+
 def scan_objects(
     module_root: Path,
     *,
@@ -2838,53 +2940,51 @@ def scan_objects(
     if not source_root.is_dir():
         raise CodegenError(f"missing C/C++ source directory: {source_root}")
     backend, module_name = _scan_context(module_root, backend, module_name)
-    objects: list[ObjectExport] = []
-    for path in sorted(item for item in source_root.rglob("*") if item.is_file()):
-        suffix = path.suffix.lower()
-        if suffix not in CPP_SUFFIXES | FORBIDDEN_TAG_SUFFIXES:
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8")
         lexed = _lex_source(text)
-        markers: list[tuple[_LineComment, str | None]] = []
         for comment in lexed.comments:
-            is_candidate, renamed = _object_marker_name(comment)
+            is_candidate, _ = _object_marker_name(comment)
             if not is_candidate:
                 continue
-            if OBJECT_ANNOTATION.fullmatch(comment.text.strip()) is None:
-                raise _source_error(
-                    module_root, path, comment.line, module_name, None,
-                    "malformed object export tag; use "
-                    "// @SupernoteExportObject or "
-                    '// @SupernoteExportObject(name = "JavascriptName")',
-                )
-            if suffix not in CPP_HEADER_SUFFIXES:
-                raise _source_error(
-                    module_root, path, comment.line, module_name,
-                    renamed,
-                    "native object export tags are allowed only in .h, .hh, "
-                    ".hpp, or .hxx files under android/src/main/cpp",
-                )
-            if backend != "jsi":
-                raise _source_error(
-                    module_root, path, comment.line, module_name,
-                    renamed,
-                    "native object exports are currently supported only by "
-                    "the JSI backend",
-                )
-            markers.append((comment, renamed))
-        for marker, renamed in markers:
-            objects.append(
-                _parse_object_export(
-                    module_root=module_root,
-                    source_root=source_root,
-                    path=path,
-                    text=text,
-                    lexed=lexed,
-                    marker=marker,
-                    renamed=renamed,
-                    module_name=module_name,
-                )
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                None,
+                "SupernoteExportObject is removed in V2; mark the class with "
+                "SupernoteExport and mark each generated method explicitly",
             )
+    class_sources = scan_cpp_class_source_model(
+        module_root,
+        module_name=module_name,
+    )
+    public_classes = [
+        source
+        for source in class_sources
+        if source.intent.role is DeclarationRole.EXPORTED
+    ]
+    if public_classes and backend != "jsi":
+        first = public_classes[0]
+        raise _source_error(
+            module_root,
+            module_root / first.provenance.path,
+            first.provenance.line,
+            module_name,
+            first.cpp_name,
+            "JavaScript-public C++ objects require the JSI frontend",
+        )
+    objects = [
+        _lower_sync_object(
+            module_root,
+            source,
+            module_name=module_name,
+        )
+        for source in class_sources
+    ]
     objects.sort(key=lambda item: (item.source, item.line, item.js_name))
     cpp_names: dict[str, ObjectExport] = {}
     js_names: dict[str, ObjectExport] = {}
@@ -2926,8 +3026,8 @@ def _validate_typescript_names(
                     f"{item.source}:{item.line}: module {module_name!r}, "
                     f"export {item.js_name!r}: generated TypeScript name "
                     f"{generated_name!r} for the {role} collides with the "
-                    f"generated module interface {module_interface!r}; choose "
-                    "a different @SupernoteExportObject(name = \"...\")"
+                    f"generated module interface {module_interface!r}; rename "
+                    "the source class"
                 )
             previous = generated_names.get(generated_name)
             if previous is not None:
@@ -2937,8 +3037,8 @@ def _validate_typescript_names(
                     f"export {item.js_name!r}: generated TypeScript name "
                     f"{generated_name!r} for the {role} conflicts with the "
                     f"{first_role} generated for object export "
-                    f"{first.js_name!r} at {first.source}:{first.line}; choose "
-                    "a different @SupernoteExportObject(name = \"...\")"
+                    f"{first.js_name!r} at {first.source}:{first.line}; rename "
+                    "one source class"
                 )
             generated_names[generated_name] = (item, role)
 
@@ -2969,8 +3069,8 @@ def scan_bindings(
             raise CodegenError(
                 f"{item.source}:{item.line}: module {resolved_name!r}, export "
                 f"{item.js_name!r}: JavaScript name collides with free-function "
-                f"export at {first.source}:{first.line}; give the function or "
-                "object a different annotation name"
+                f"export at {first.source}:{first.line}; rename the function "
+                "or class in source"
             )
     _validate_typescript_names(objects, resolved_name)
     return ScannedBindings(tuple(exports), tuple(objects))
