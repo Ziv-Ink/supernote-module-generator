@@ -10,6 +10,8 @@ from .errors import ConfigurationError
 
 
 PROJECT_NAME = "supernote-v2-runtime"
+ANNOTATIONS_PROJECT = "supernote-v2-annotations"
+PROCESSOR_PROJECT = "supernote-v2-processor"
 START = "// supernote-module-v2-runtime"
 END = "// end supernote-module-v2-runtime"
 
@@ -77,17 +79,20 @@ def verify_runtime_wiring(plugin_root: Path, *, enabled: bool) -> None:
 
 
 def _settings_block(kotlin: bool) -> str:
+    projects = (
+        (PROJECT_NAME, ".supernote-module/v2-runtime"),
+        (ANNOTATIONS_PROJECT, ".supernote-module/v2-runtime/annotations"),
+        (PROCESSOR_PROJECT, ".supernote-module/v2-runtime/processor"),
+    )
     if kotlin:
-        body = (
-            f'include(":{PROJECT_NAME}")\n'
-            f'project(":{PROJECT_NAME}").projectDir = '
-            'file(".supernote-module/v2-runtime")'
+        body = "\n".join(
+            f'include(":{name}")\nproject(":{name}").projectDir = file("{path}")'
+            for name, path in projects
         )
     else:
-        body = (
-            f"include ':{PROJECT_NAME}'\n"
-            f"project(':{PROJECT_NAME}').projectDir = "
-            "file('.supernote-module/v2-runtime')"
+        body = "\n".join(
+            f"include ':{name}'\nproject(':{name}').projectDir = file('{path}')"
+            for name, path in projects
         )
     return f"{START}\n{body}\n{END}"
 

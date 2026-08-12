@@ -1,0 +1,475 @@
+package supernote.generated.processor
+
+import com.google.devtools.ksp.getConstructors
+import com.google.devtools.ksp.getVisibility
+import com.google.devtools.ksp.processing.Dependencies
+import com.google.devtools.ksp.processing.Resolver
+import com.google.devtools.ksp.processing.SymbolProcessor
+import com.google.devtools.ksp.processing.SymbolProcessorEnvironment
+import com.google.devtools.ksp.processing.SymbolProcessorProvider
+import com.google.devtools.ksp.symbol.ClassKind
+import com.google.devtools.ksp.symbol.FileLocation
+import com.google.devtools.ksp.symbol.KSAnnotated
+import com.google.devtools.ksp.symbol.KSAnnotation
+import com.google.devtools.ksp.symbol.KSClassDeclaration
+import com.google.devtools.ksp.symbol.KSDeclaration
+import com.google.devtools.ksp.symbol.KSFile
+import com.google.devtools.ksp.symbol.KSFunctionDeclaration
+import com.google.devtools.ksp.symbol.KSNode
+import com.google.devtools.ksp.symbol.KSType
+import com.google.devtools.ksp.symbol.Modifier
+import com.google.devtools.ksp.symbol.Nullability
+import com.google.devtools.ksp.symbol.Origin
+import com.google.devtools.ksp.symbol.Visibility
+import com.google.devtools.ksp.validate
+import java.io.OutputStreamWriter
+import java.nio.file.Path
+import java.security.MessageDigest
+import kotlin.io.path.invariantSeparatorsPathString
+
+private const val manifestSchema = 1
+private const val manifestKind = "supernote_jvm_source_manifest"
+private val markerOrder = listOf(
+  "SupernoteExport",
+  "SupernoteInternal",
+  "SupernoteAsync",
+  "SupernoteConstructor",
+)
+private val markerNames = markerOrder.associateWith {
+  "supernote.generated.annotations.$it"
+}
+
+class SupernoteV2Processor(
+  private val environment: SymbolProcessorEnvironment,
+) : SymbolProcessor {
+  private var generated = false
+
+  override fun process(resolver: Resolver): List<KSAnnotated> {
+    if (generated) return emptyList()
+    val symbols = linkedMapOf<String, KSAnnotated>()
+    markerNames.values.forEach { annotation ->
+      resolver.getSymbolsWithAnnotation(annotation).forEach { symbol ->
+        symbols.putIfAbsent(symbolKey(symbol), symbol)
+      }
+    }
+    val invalid = symbols.values.filterNot { it.validate() }
+    if (invalid.isNotEmpty()) return invalid
+    val roots = featureRoots()
+    val grouped = symbols.values.groupBy { symbol ->
+      val file = containingFile(symbol) ?: fail(symbol, "marked declarations require a source file")
+      roots.singleOrNull { it.contains(file.filePath) }
+        ?: fail(symbol, "marked declaration is outside every configured feature JVM root")
+    }
+    grouped.toSortedMap(compareBy { it.featureId }).forEach { (root, featureSymbols) ->
+      generateFeature(root, featureSymbols)
+    }
+    generated = true
+    return emptyList()
+  }
+
+  private fun generateFeature(root: FeatureRoot, symbols: List<KSAnnotated>) {
+    val classSymbols = linkedMapOf<String, KSClassDeclaration>()
+    val functions = mutableListOf<KSFunctionDeclaration>()
+    symbols.forEach { symbol ->
+      when (symbol) {
+        is KSClassDeclaration -> classSymbols[ownerName(symbol)] = symbol
+        is KSFunctionDeclaration -> {
+          val parent = symbol.parentDeclaration as? KSClassDeclaration
+          if (symbol.simpleName.asString() == "<init>") {
+            if (parent == null) fail(symbol, "SupernoteConstructor requires a class constructor")
+            classSymbols[ownerName(parent)] = parent
+          } else {
+            functions += symbol
+            if (parent != null) classSymbols.putIfAbsent(ownerName(parent), parent)
+          }
+        }
+        else -> fail(symbol, "Supernote markers may annotate only classes, functions, methods, or constructors")
+      }
+    }
+    val owners = linkedMapOf<String, OwnerFact>()
+    classSymbols.values.forEach { declaration ->
+      val owner = ownerName(declaration)
+      owners[owner] = classOwner(root, declaration)
+    }
+    functions.forEach { function ->
+      validateFunctionMarkers(function)
+      val parent = function.parentDeclaration as? KSClassDeclaration
+      val owner = if (parent == null) {
+        val candidate = topLevelOwner(root, function)
+        owners.getOrPut(candidate.ownerClass) { candidate }
+      } else owners.getValue(ownerName(parent))
+      owner.declarations += declarationFact(root, owner, function)
+      owners.putIfAbsent(owner.ownerClass, owner)
+    }
+    owners.values.forEach(::validateOwner)
+    val files = symbols.mapNotNull(::containingFile).distinct().toTypedArray()
+    val output = environment.codeGenerator.createNewFile(
+      Dependencies(true, *files),
+      "supernote.generated.manifests",
+      "jvm-source-${hash(root.featureId).take(20)}",
+      "json",
+    )
+    OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
+      writer.write(manifestJson(root, owners.values.sortedBy { it.declarationId }))
+    }
+  }
+
+  private fun classOwner(root: FeatureRoot, declaration: KSClassDeclaration): OwnerFact {
+    val language = language(declaration)
+    val owner = ownerName(declaration)
+    val marked = markers(declaration)
+    if ("SupernoteAsync" in marked || "SupernoteConstructor" in marked) {
+      fail(declaration, "classes accept only SupernoteExport or SupernoteInternal")
+    }
+    validateReachability(declaration, marked)
+    val form = when {
+      declaration.classKind == ClassKind.OBJECT -> "kotlin_object"
+      else -> "class"
+    }
+    val constructors = if (form == "class") constructors(root, declaration, language, owner) else mutableListOf()
+    return OwnerFact(
+      declarationId = ownerIdentity(owner),
+      language = language,
+      ownerClass = owner,
+      sourceName = declaration.simpleName.asString(),
+      form = form,
+      visibility = visibility(declaration),
+      markers = markerFacts(declaration),
+      source = source(root, declaration, ownerIdentity(owner), language),
+      constructors = constructors,
+    )
+  }
+
+  private fun topLevelOwner(root: FeatureRoot, function: KSFunctionDeclaration): OwnerFact {
+    val file = function.containingFile ?: fail(function, "top-level function has no source file")
+    if (function.origin == Origin.JAVA) fail(function, "Java functions must belong to a class")
+    val base = file.fileName.substringBeforeLast('.')
+    if (!Regex("^[A-Za-z_][A-Za-z0-9_]*$").matches(base)) {
+      fail(function, "top-level Kotlin source file name must be a JVM-safe identifier")
+    }
+    val owner = listOf(file.packageName.asString(), "${base}Kt").filter { it.isNotEmpty() }.joinToString(".")
+    return OwnerFact(
+      declarationId = ownerIdentity(owner),
+      language = "kotlin",
+      ownerClass = owner,
+      sourceName = "${base}Kt",
+      form = "kotlin_top_level",
+      visibility = "public",
+      markers = emptyList(),
+      source = source(root, function, ownerIdentity(owner), "kotlin"),
+      constructors = mutableListOf(),
+    )
+  }
+
+  private fun constructors(
+    root: FeatureRoot,
+    owner: KSClassDeclaration,
+    language: String,
+    ownerName: String,
+  ): MutableList<ConstructorFact> {
+    val declared = owner.getConstructors().toList()
+    if (declared.isEmpty()) {
+      val descriptor = "()V"
+      val id = declarationIdentity(ownerName, "<init>", descriptor)
+      return mutableListOf(
+        ConstructorFact(
+          id, descriptor, mutableListOf(), "public", emptyList(),
+          adapterIdentity(id), source(root, owner, id, language),
+        ),
+      )
+    }
+    return declared.map { constructor ->
+      val marked = markers(constructor)
+      if (marked.any { it != "SupernoteConstructor" }) {
+        fail(constructor, "constructors accept only SupernoteConstructor")
+      }
+      val parameters = constructor.parameters.mapIndexed { index, parameter ->
+        parameter(root, constructor, parameter.type.resolve(), parameter.name?.asString() ?: "arg$index", language, true)
+      }.toMutableList()
+      val descriptor = "(" + parameters.joinToString("") { descriptor(it.jvmType) } + ")V"
+      val id = declarationIdentity(ownerName, "<init>", descriptor)
+      ConstructorFact(
+        id, descriptor, parameters, visibility(constructor), markerFacts(constructor),
+        adapterIdentity(id), source(root, constructor, id, language),
+      )
+    }.toMutableList()
+  }
+
+  private fun declarationFact(
+    root: FeatureRoot,
+    owner: OwnerFact,
+    function: KSFunctionDeclaration,
+  ): DeclarationFact {
+    if (visibility(function) != "public") fail(function, "marked JVM declarations must be public")
+    if (Modifier.ABSTRACT in function.modifiers) fail(function, "marked JVM declarations must be concrete")
+    if (function.typeParameters.isNotEmpty() || function.extensionReceiver != null) {
+      fail(function, "generic and extension declarations are unsupported")
+    }
+    val parameters = function.parameters.mapIndexed { index, value ->
+      if (value.isVararg) fail(function, "vararg is unsupported")
+      parameter(root, function, value.type.resolve(), value.name?.asString() ?: "arg$index", owner.language, false)
+    }.toMutableList()
+    val returned = function.returnType?.resolve() ?: fail(function, "marked declaration requires an explicit result type")
+    val result = sourceType(returned, owner.language)
+    validateValueType(function, result, returned.nullability == Nullability.NULLABLE, true)
+    val suspend = Modifier.SUSPEND in function.modifiers
+    val marked = markers(function)
+    if (suspend && "SupernoteAsync" !in marked) {
+      fail(function, "Kotlin suspend requires explicit SupernoteAsync")
+    }
+    val actualParameters = parameters.joinToString("") { descriptor(it.jvmType) }
+    val jvmDescriptor = if (suspend) {
+      "(${actualParameters}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;"
+    } else {
+      "($actualParameters)${descriptor(result)}"
+    }
+    val name = function.simpleName.asString()
+    val id = declarationIdentity(owner.ownerClass, name, jvmDescriptor)
+    return DeclarationFact(
+      id, owner.declarationId, owner.ownerClass, name, jvmDescriptor,
+      parameters, result, returned.nullability == Nullability.NULLABLE,
+      markerFacts(function), visibility(function), adapterIdentity(id), owner.language,
+      suspend, isStatic(function), source(root, function, id, owner.language),
+    )
+  }
+
+  private fun parameter(
+    root: FeatureRoot,
+    owner: KSNode,
+    type: KSType,
+    name: String,
+    language: String,
+    constructor: Boolean,
+  ): ParameterFact {
+    val sourceType = sourceType(type, language)
+    val nullable = type.nullability == Nullability.NULLABLE
+    val injected = if (constructor) when (sourceType) {
+      "android.content.Context" -> "android.content.Context"
+      "com.facebook.react.bridge.ReactApplicationContext" -> "com.facebook.react.bridge.ReactApplicationContext"
+      else -> null
+    } else null
+    if (injected == null) validateValueType(owner, sourceType, nullable, false)
+    if (injected != null && nullable) fail(owner, "runtime-injected dependencies cannot be nullable")
+    return ParameterFact(sourceType, name, nullable, injected)
+  }
+
+  private fun validateFunctionMarkers(function: KSFunctionDeclaration) {
+    val marked = markers(function)
+    if ("SupernoteConstructor" in marked) fail(function, "SupernoteConstructor is valid only on constructors")
+    validateReachability(function, marked)
+    if ("SupernoteAsync" in marked && marked.none { it == "SupernoteExport" || it == "SupernoteInternal" }) {
+      fail(function, "SupernoteAsync requires SupernoteExport or SupernoteInternal")
+    }
+  }
+
+  private fun validateReachability(node: KSNode, marked: Set<String>) {
+    if ("SupernoteExport" in marked && "SupernoteInternal" in marked) {
+      fail(node, "SupernoteExport and SupernoteInternal cannot mark one declaration")
+    }
+  }
+
+  private fun validateOwner(owner: OwnerFact) {
+    if (owner.visibility != "public") fail(owner.source.path, "JVM implementation owners must be public")
+    val role = when {
+      owner.markers.any { it.name == "SupernoteExport" } -> "export"
+      owner.markers.any { it.name == "SupernoteInternal" } -> "internal"
+      else -> "ordinary"
+    }
+    owner.declarations.forEach { declaration ->
+      val declarationRole = when {
+        declaration.markers.any { it.name == "SupernoteExport" } -> "export"
+        declaration.markers.any { it.name == "SupernoteInternal" } -> "internal"
+        else -> "ordinary"
+      }
+      if (role == "internal" && declarationRole != "internal") {
+        fail(declaration.source.path, "SupernoteInternal classes may contain only SupernoteInternal generated methods")
+      }
+      if (role != "ordinary" && declaration.isStatic) {
+        fail(declaration.source.path, "static methods are not object/service members")
+      }
+    }
+    if (role == "ordinary" && owner.language == "java" && owner.declarations.any { it.isStatic }) {
+      if (!owner.declarations.all { it.isStatic }) {
+        fail(owner.source.path, "Java static and instance feature methods cannot share one owner")
+      }
+      owner.form = "java_static"
+    }
+  }
+
+  private fun validateValueType(node: KSNode, name: String, nullable: Boolean, result: Boolean) {
+    if (nullable) fail(node, "nullable marked JVM values are deferred")
+    val kotlinTypes = setOf("kotlin.Unit", "kotlin.Boolean", "kotlin.Int", "kotlin.Long", "kotlin.Float", "kotlin.Double", "kotlin.String", "kotlin.ByteArray")
+    val javaTypes = setOf("void", "boolean", "int", "long", "float", "double", "java.lang.String", "byte[]")
+    if (name !in kotlinTypes && name !in javaTypes) fail(node, "unsupported marked JVM type $name")
+    if (!result && (name == "kotlin.Unit" || name == "void")) fail(node, "void/Unit is valid only as a result")
+  }
+
+  private fun featureRoots(): List<FeatureRoot> {
+    val pluginRoot = environment.options["supernotePluginRoot"] ?: error("Missing supernotePluginRoot")
+    val encoded = environment.options["supernoteFeatureRoots"] ?: error("Missing supernoteFeatureRoots")
+    return encoded.lines().filter { it.isNotBlank() }.map { line ->
+      val parts = line.split('\t')
+      require(parts.size == 2) { "Invalid supernoteFeatureRoots entry" }
+      FeatureRoot(parts[0], parts[1], java.nio.file.Paths.get(pluginRoot).resolve(parts[1]).toAbsolutePath().normalize())
+    }
+  }
+
+  private fun sourceType(type: KSType, language: String): String {
+    val qualified = type.declaration.qualifiedName?.asString() ?: type.toString()
+    if (language == "kotlin") return qualified
+    return when (qualified) {
+      "kotlin.Unit" -> "void"
+      "kotlin.Boolean" -> "boolean"
+      "kotlin.Int" -> "int"
+      "kotlin.Long" -> "long"
+      "kotlin.Float" -> "float"
+      "kotlin.Double" -> "double"
+      "kotlin.String" -> "java.lang.String"
+      "kotlin.ByteArray" -> "byte[]"
+      else -> qualified
+    }
+  }
+
+  private fun descriptor(type: String): String = when (type) {
+    "kotlin.Unit", "void" -> "V"
+    "kotlin.Boolean", "boolean" -> "Z"
+    "kotlin.Int", "int" -> "I"
+    "kotlin.Long", "long" -> "J"
+    "kotlin.Float", "float" -> "F"
+    "kotlin.Double", "double" -> "D"
+    "kotlin.String", "java.lang.String" -> "Ljava/lang/String;"
+    "kotlin.ByteArray", "byte[]" -> "[B"
+    else -> "L${type.replace('.', '/')};"
+  }
+
+  private fun language(declaration: KSDeclaration): String =
+    if (declaration.origin == Origin.JAVA || declaration.origin == Origin.JAVA_LIB) "java" else "kotlin"
+
+  private fun isStatic(function: KSFunctionDeclaration): Boolean =
+    function.parentDeclaration == null || function.modifiers.any { it.name == "JAVA_STATIC" || it.name == "STATIC" }
+
+  private fun ownerName(declaration: KSClassDeclaration): String =
+    declaration.qualifiedName?.asString() ?: fail(declaration, "JVM owner requires a qualified name")
+
+  private fun visibility(declaration: KSDeclaration): String =
+    declaration.getVisibility().name.lowercase()
+
+  private fun markers(node: KSAnnotated): Set<String> = markerFacts(node).map { it.name }.toSet()
+
+  private fun markerFacts(node: KSAnnotated): List<MarkerFact> {
+    val found = node.annotations.mapNotNull { annotation ->
+      val qualified = annotation.annotationType.resolve().declaration.qualifiedName?.asString()
+      val name = markerNames.entries.firstOrNull { it.value == qualified }?.key ?: return@mapNotNull null
+      val location = annotation.location as? FileLocation
+      MarkerFact(name, location?.lineNumber ?: sourceLine(node), 1)
+    }.toList()
+    return found.sortedBy { markerOrder.indexOf(it.name) }
+  }
+
+  private fun source(
+    root: FeatureRoot,
+    node: KSNode,
+    declarationId: String,
+    language: String,
+  ): SourceFact {
+    val file = containingFile(node) ?: fail(node, "marked declaration has no source file")
+    val relative = root.relative(file.filePath)
+    return SourceFact(declarationId, language, relative, sourceLine(node), 1)
+  }
+
+  private fun sourceLine(node: KSNode): Int = (node.location as? FileLocation)?.lineNumber ?: 1
+
+  private fun containingFile(node: KSNode): KSFile? = when (node) {
+    is KSDeclaration -> node.containingFile
+    else -> null
+  }
+
+  private fun symbolKey(symbol: KSAnnotated): String =
+    when (symbol) {
+      is KSDeclaration -> "${symbol.qualifiedName?.asString() ?: symbol.simpleName.asString()}@${symbol.location}"
+      else -> "${symbol::class.qualifiedName}@${symbol.location}"
+    }
+
+  private fun ownerIdentity(owner: String): String = "jvm:$owner"
+  private fun declarationIdentity(owner: String, name: String, descriptor: String): String = "jvm:$owner#$name$descriptor"
+  private fun adapterIdentity(id: String): String = "supernote.jvm.adapter.${hash(id).take(20)}"
+  private fun hash(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+  private fun fail(node: KSNode, message: String): Nothing {
+    environment.logger.error("Supernote V2: $message", node)
+    throw IllegalArgumentException(message)
+  }
+
+  private fun fail(path: String, message: String): Nothing {
+    environment.logger.error("Supernote V2: $path: $message")
+    throw IllegalArgumentException(message)
+  }
+}
+
+private data class FeatureRoot(val featureId: String, val relative: String, val absolute: Path) {
+  fun contains(file: String): Boolean = java.nio.file.Paths.get(file).toAbsolutePath().normalize().startsWith(absolute)
+  fun relative(file: String): String = absolute.relativize(java.nio.file.Paths.get(file).toAbsolutePath().normalize()).invariantSeparatorsPathString
+}
+private data class MarkerFact(val name: String, val line: Int, val column: Int)
+private data class SourceFact(val declarationId: String, val language: String, val path: String, val line: Int, val column: Int)
+private data class ParameterFact(val jvmType: String, val name: String, val nullable: Boolean, val injected: String?)
+private data class ConstructorFact(val declarationId: String, val descriptor: String, val parameters: MutableList<ParameterFact>, val visibility: String, val markers: List<MarkerFact>, val adapterIdentity: String, val source: SourceFact)
+private data class DeclarationFact(val declarationId: String, val ownerDeclarationId: String, val ownerClass: String, val name: String, val descriptor: String, val parameters: MutableList<ParameterFact>, val result: String, val resultNullable: Boolean, val markers: List<MarkerFact>, val visibility: String, val adapterIdentity: String, val language: String, val suspend: Boolean, val isStatic: Boolean, val source: SourceFact)
+private data class OwnerFact(val declarationId: String, val language: String, val ownerClass: String, val sourceName: String, var form: String, val visibility: String, val markers: List<MarkerFact>, val source: SourceFact, val constructors: MutableList<ConstructorFact>, val declarations: MutableList<DeclarationFact> = mutableListOf())
+
+private fun manifestJson(root: FeatureRoot, owners: List<OwnerFact>): String = json(
+  linkedMapOf(
+    "schema_version" to manifestSchema,
+    "kind" to manifestKind,
+    "feature_id" to root.featureId,
+    "frontend_version" to "${GENERATOR_VERSION}",
+    "owners" to owners.map(::ownerJson),
+  ),
+) + "\n"
+
+private fun ownerJson(value: OwnerFact): Map<String, Any?> = linkedMapOf(
+  "source" to sourceJson(value.source), "language" to value.language,
+  "owner_class" to value.ownerClass, "source_name" to value.sourceName,
+  "form" to value.form, "visibility" to value.visibility,
+  "markers" to value.markers.map(::markerJson),
+  "constructors" to value.constructors.sortedBy { it.declarationId }.map(::constructorJson),
+  "declarations" to value.declarations.sortedBy { it.declarationId }.map(::declarationJson),
+)
+private fun constructorJson(value: ConstructorFact): Map<String, Any?> = linkedMapOf(
+  "source" to sourceJson(value.source), "jvm_descriptor" to value.descriptor,
+  "parameters" to value.parameters.map(::parameterJson), "visibility" to value.visibility,
+  "markers" to value.markers.map(::markerJson), "adapter_identity" to value.adapterIdentity,
+)
+private fun declarationJson(value: DeclarationFact): Map<String, Any?> = linkedMapOf(
+  "source" to sourceJson(value.source), "owner_declaration_id" to value.ownerDeclarationId,
+  "owner_class" to value.ownerClass, "jvm_name" to value.name,
+  "jvm_descriptor" to value.descriptor, "parameters" to value.parameters.map(::parameterJson),
+  "result_jvm_type" to value.result, "result_nullable" to value.resultNullable,
+  "markers" to value.markers.map(::markerJson), "visibility" to value.visibility,
+  "adapter_identity" to value.adapterIdentity, "language" to value.language,
+  "is_suspend" to value.suspend, "is_static" to value.isStatic,
+)
+private fun sourceJson(value: SourceFact): Map<String, Any?> = linkedMapOf(
+  "declaration_id" to value.declarationId, "language" to value.language,
+  "path" to value.path, "line" to value.line, "column" to value.column,
+)
+private fun markerJson(value: MarkerFact): Map<String, Any?> = linkedMapOf("name" to value.name, "line" to value.line, "column" to value.column)
+private fun parameterJson(value: ParameterFact): Map<String, Any?> = linkedMapOf("jvm_type" to value.jvmType, "name" to value.name, "nullable" to value.nullable, "injected" to value.injected)
+
+private fun json(value: Any?): String = when (value) {
+  null -> "null"
+  is Boolean, is Number -> value.toString()
+  is String -> "\"" + value.flatMap { character -> when (character) {
+    '\\' -> "\\\\".asIterable(); '"' -> "\\\"".asIterable(); '\n' -> "\\n".asIterable();
+    '\r' -> "\\r".asIterable(); '\t' -> "\\t".asIterable(); else -> character.toString().asIterable()
+  }}.joinToString("") + "\""
+  is Map<*, *> -> value.entries.joinToString(prefix = "{", postfix = "}") { (key, item) -> json(key.toString()) + ":" + json(item) }
+  is Iterable<*> -> value.joinToString(prefix = "[", postfix = "]") { json(it) }
+  else -> error("Unsupported JSON value ${value::class}")
+}
+
+class SupernoteV2ProcessorProvider : SymbolProcessorProvider {
+  override fun create(environment: SymbolProcessorEnvironment): SymbolProcessor =
+    SupernoteV2Processor(environment)
+}

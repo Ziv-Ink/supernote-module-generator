@@ -24,7 +24,7 @@ def test_wires_one_plugin_runtime_project_idempotently(tmp_path: Path, kotlin: b
     set_runtime_wiring(tmp_path, enabled=True)
     assert (settings.read_text(), app.read_text()) == first
     verify_runtime_wiring(tmp_path, enabled=True)
-    assert first[0].count("include") == 1
+    assert first[0].count("include") == 3
     assert first[1].count("implementation") == 1
 
     set_runtime_wiring(tmp_path, enabled=False)

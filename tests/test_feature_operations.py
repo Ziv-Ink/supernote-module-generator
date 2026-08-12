@@ -1,14 +1,9 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
-from supernote_module_generator.feature_operations import (
-    FeatureOperationError,
-    FeatureOperationService,
-)
+from supernote_module_generator.feature_operations import FeatureOperationService
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -66,17 +61,20 @@ def test_add_update_remove_regenerate_one_shared_registry(tmp_path: Path):
     assert registry(root)["component_name"] == component
 
 
-def test_add_rolls_back_feature_when_registry_projection_fails(tmp_path: Path):
+def test_jvm_only_feature_is_scaffolded_for_ksp_without_python_source_parsing(
+    tmp_path: Path,
+):
     root = plugin(tmp_path)
     service = FeatureOperationService(root)
-    service.add(config(root, "good"))
-    before = registry(root)
-    bad = config(root, "bad", StarterFamily.JVM)
-    with pytest.raises(FeatureOperationError, match="KSP JVM manifest"):
-        service.add(bad)
+    jvm = config(root, "jvm", StarterFamily.JVM)
+    created = service.add(jvm)
 
-    assert not bad.output.exists()
-    assert registry(root) == before
+    assert created == jvm.output
+    assert not (created / "android/src/main/cpp").exists()
+    assert (created / "android/src/main/java/com/example/jvm/FeatureApi.kt").is_file()
+    gradle = (root / "android/.supernote-module/v2-runtime/build.gradle").read_text()
+    assert "local_modules/jvm/android/src/main/java" in gradle
+    assert "com.google.devtools.ksp" in gradle
 
 
 def test_removing_last_feature_removes_shared_component_and_wiring(tmp_path: Path):

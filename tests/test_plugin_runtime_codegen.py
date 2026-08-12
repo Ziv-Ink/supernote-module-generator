@@ -41,6 +41,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     cmake = (generated / "CMakeLists.txt").read_text()
     services = (generated / "src/runtime_services.cpp").read_text()
     source = (generated / "src/feature_registry.cpp").read_text()
+    gradle = (generated / "build.gradle").read_text()
+    processor = (
+        generated
+        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV2Processor.kt"
+    ).read_text()
 
     assert cmake.count("add_library(") == 1
     assert "runtime_services.cpp" in cmake
@@ -51,6 +56,19 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "supernote:feature:" in source
     assert '"Alpha"' in source
     assert '"Beta"' in source
+    assert gradle.count("com.android.library") == 1
+    assert "local_modules/@local/alpha/android/src/main/java" in gradle
+    assert "local_modules/@local/beta/android/src/main/java" in gradle
+    assert "supernoteFeatureRoots" in gradle
+    assert "schema_version" in processor
+    assert "getSymbolsWithAnnotation" in processor
+    assert "Kotlin suspend requires explicit SupernoteAsync" in processor
+    assert "ReactMethod" not in processor
+    assert "TypeScript" not in processor
+    assert (
+        generated
+        / "annotations/src/main/java/supernote/generated/annotations/SupernoteExport.java"
+    ).is_file()
 
 
 def test_registry_and_ownership_are_deterministic(tmp_path: Path):

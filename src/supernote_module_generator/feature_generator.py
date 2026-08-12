@@ -79,6 +79,7 @@ def stage_feature(
                 temporary,
                 relative,
                 f"package {config.android_namespace}\n\n"
+                "import supernote.generated.annotations.SupernoteExport\n\n"
                 "@SupernoteExport\n"
                 "fun greetFromJvm(name: String): String = \"Hello, $name\"\n",
             )

@@ -199,7 +199,6 @@ class FeatureOperationService:
         entries = []
         for path in paths:
             manifest = read_feature_manifest(path)
-            _reject_unprocessed_jvm_markers(path, manifest.roots)
             native_root = path / manifest.roots.native
             semantic = (
                 binding_codegen.scan_cpp_semantic_model(
@@ -284,20 +283,3 @@ def _starter_families(files: tuple[str, ...]) -> tuple[StarterFamily, ...]:
     if any(path.startswith("android/src/main/java/") for path in files):
         values.append(StarterFamily.JVM)
     return tuple(values)
-
-
-def _reject_unprocessed_jvm_markers(
-    path: Path,
-    roots: ImplementationRoots,
-) -> None:
-    root = path / roots.jvm
-    if not root.is_dir():
-        return
-    for source in root.rglob("*"):
-        if source.suffix not in {".kt", ".java"} or not source.is_file():
-            continue
-        text = source.read_text(encoding="utf-8")
-        if "@Supernote" in text:
-            raise FeatureOperationError(
-                f"{source}: KSP JVM manifest generation is not implemented yet"
-            )
