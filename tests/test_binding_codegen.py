@@ -926,7 +926,23 @@ public:
                 "(number left, boolean enabled)",
                 generated,
             )
+            self.assertIn('runtime, "IMPLEMENTATION_ERROR"', generated)
+            self.assertIn('runtime, "INTERNAL"', generated)
+            self.assertIn("__supernoteErrorConstructor", generated)
             self.assertIn("LocalTest.add: unknown C++ exception", generated)
+
+            declarations = (module / "index.d.ts").read_text(encoding="utf-8")
+            self.assertIn("export type SupernoteErrorCode =", declarations)
+            for code in (
+                "RESOURCE_EXHAUSTED",
+                "CANCELLED",
+                "FEATURE_CLOSED",
+                "IMPLEMENTATION_ERROR",
+                "INTERNAL",
+            ):
+                self.assertIn(f'\"{code}\"', declarations)
+            self.assertIn("export class SupernoteError extends Error", declarations)
+            self.assertIn("readonly code: SupernoteErrorCode", declarations)
 
     def test_rejects_user_owned_jni_on_load(self):
         source = (

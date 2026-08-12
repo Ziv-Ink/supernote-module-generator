@@ -105,6 +105,12 @@ def test_native_codegen_is_self_contained_and_checkable(tmp_path):
     starter = (module / "android/src/main/cpp/text.cpp").read_text()
     assert "// @SupernoteExport\nstd::string greet(" in starter
     assert "SupernoteExport(" not in starter
+    index = (module / "index.js").read_text()
+    assert "export class SupernoteError extends Error" in index
+    assert "this.name = 'SupernoteError'" in index
+    assert "this.code = code" in index
+    assert "Object.defineProperty(value, ERROR_CONSTRUCTOR_PROPERTY" in index
+    assert "property === ERROR_CONSTRUCTOR_PROPERTY" in index
 
     shutil.rmtree(module / "android/build/generated/supernote")
     (module / "index.d.ts").unlink()
