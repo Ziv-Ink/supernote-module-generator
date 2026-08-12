@@ -383,6 +383,64 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     assert "std::shared_ptr<JvmOwner> owner_" in generated
 
 
+def test_java_export_object_has_distinct_instance_and_worker_async_routes():
+    owner_name = "com.example.JavaDocument"
+    selected = constructor(
+        owner_name,
+        JvmLanguage.JAVA,
+        "(J)V",
+        (JvmParameterSource("long", "handle"),),
+    )
+    value = declaration(
+        owner_name,
+        JvmLanguage.JAVA,
+        "value",
+        "()J",
+        (),
+        "long",
+        SupernoteMarker.EXPORT,
+        target=DeclarationTarget.METHOD,
+    )
+    load = declaration(
+        owner_name,
+        JvmLanguage.JAVA,
+        "load",
+        "(I)[B",
+        (JvmParameterSource("int", "page"),),
+        "byte[]",
+        SupernoteMarker.EXPORT,
+        SupernoteMarker.ASYNC,
+        target=DeclarationTarget.METHOD,
+    )
+    owner = JvmOwnerSource(
+        provenance(
+            jvm_owner_identity(owner_name), JvmLanguage.JAVA, "JavaDocument.java", 2
+        ),
+        JvmLanguage.JAVA,
+        owner_name,
+        "JavaDocument",
+        JvmOwnerForm.CLASS,
+        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        (selected,),
+        (value, load),
+    )
+    semantic = project_jvm_owners((owner,))
+    generated = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
+        semantic,
+        feature_id=FEATURE_ID,
+        module_name="Documents",
+    )
+
+    assert semantic.classes[0].kind is SemanticClassKind.JS_OBJECT
+    assert "Object::createFromHostObject" in generated
+    assert "CallStaticObjectMethodA" in generated
+    assert 'property == "value"' in generated
+    assert 'property == "load"' in generated
+    assert "process_services().workers().submit" in generated
+    assert "auto owner = owner_" in generated
+
+
 def test_blocking_jvm_async_object_method_retains_global_receiver():
     owner_name = "com.example.Document"
     load = declaration(

@@ -57,6 +57,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     ).read_text()
 
     assert cmake.count("add_library(") == 1
+    assert '"${SUPERNOTE_NATIVE_ROOT}/*.c"' in cmake
+    assert "C_STANDARD 23 C_STANDARD_REQUIRED YES" in cmake
+    assert "target_compile_features" in cmake and "cxx_std_23" in cmake
     assert "runtime_services.cpp" in cmake
     assert "feature_registry.cpp" in cmake
     assert "local_modules/@local/alpha/android/src/main/cpp" in cmake
