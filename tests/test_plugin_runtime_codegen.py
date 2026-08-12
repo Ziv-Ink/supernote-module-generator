@@ -175,6 +175,18 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               std::promise<std::thread::id> *destroyed;
             };
 
+            struct BlockingService {
+              BlockingService(std::promise<void> *started,
+                              std::shared_future<void> release)
+                  : started(started), release(std::move(release)) {}
+              ~BlockingService() {
+                started->set_value();
+                release.wait();
+              }
+              std::promise<void> *started;
+              std::shared_future<void> release;
+            };
+
             int main() {
               std::vector<RuntimeSession::JsTask> js_queue;
               auto runtime = RuntimeSession::create(
@@ -297,6 +309,24 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               if (destroyed_future.wait_for(std::chrono::seconds(2)) !=
                   std::future_status::ready) return 10;
               if (destroyed_future.get() == releasing_thread) return 11;
+
+              std::promise<void> blocking_started;
+              auto blocking_started_future = blocking_started.get_future();
+              std::promise<void> allow_blocking_release;
+              auto blocking_release_future =
+                  allow_blocking_release.get_future().share();
+              auto blocking_feature = FeatureSession::create(
+                  RuntimeSession::create([](RuntimeSession::JsTask) {}), cleanup);
+              auto blocking = blocking_feature->service<BlockingService>(
+                  "cpp:BlockingService", [&] {
+                    return std::make_shared<BlockingService>(
+                        &blocking_started, blocking_release_future);
+                  });
+              blocking.reset();
+              blocking_feature->close_feature();
+              if (blocking_started_future.wait_for(std::chrono::seconds(2)) !=
+                  std::future_status::ready) return 21;
+              allow_blocking_release.set_value();
               cleanup->drain_and_shutdown();
               return 0;
             }

@@ -329,6 +329,12 @@ public:
             )
 
             self.assertIn('getPropertyAsFunction(runtime, "Promise")', source)
+            self.assertIn(
+                "supernote::runtime::ManagedRef<Document> instance_", source
+            )
+            self.assertIn(
+                "supernote::runtime::process_services().cleanup()", source
+            )
             self.assertIn("auto operation_receiver = native_instance", source)
             self.assertIn(
                 "operation_receiver = std::move(operation_receiver)", source

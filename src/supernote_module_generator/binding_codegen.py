@@ -4295,6 +4295,11 @@ def _jsi_object_wrapper(
     session_aware: bool,
 ) -> str:
     class_name = f"GeneratedObject{index}HostObject"
+    receiver_type = (
+        f"supernote::runtime::ManagedRef<{item.cpp_name}>"
+        if session_aware
+        else f"std::shared_ptr<{item.cpp_name}>"
+    )
     method_branches: list[str] = []
     for method in item.methods:
         if method.async_:
@@ -4323,7 +4328,7 @@ def _jsi_object_wrapper(
             )
             method_branches.append(
                 f"    if (property_name == {json.dumps(method.js_name)}) {{\n"
-                f"      std::shared_ptr<{item.cpp_name}> native_instance = instance_;\n"
+                f"      {receiver_type} native_instance = instance_;\n"
                 "      std::weak_ptr<supernote::runtime::FeatureSession> "
                 "weak_feature = feature_session_;\n"
                 f"      return {function};\n"
@@ -4342,8 +4347,13 @@ def _jsi_object_wrapper(
             return_type=method.return_type,
             indent="          ",
             pre_call=(
+                "if (!feature_session ||",
+                "    feature_session->state() != supernote::runtime::FeatureState::ACTIVE) {",
+                "  supernote_throw_error(",
+                '      runtime, "FEATURE_CLOSED", "feature is closed");',
+                "}",
                 "supernote::runtime::FeatureCallScope feature_call_scope("
-                "feature_session);",
+                "    feature_session);",
             )
             if session_aware
             else (),
@@ -4361,7 +4371,7 @@ def _jsi_object_wrapper(
         feature_capture = ", feature_session" if session_aware else ""
         method_branches.append(
             f"    if (property_name == {json.dumps(method.js_name)}) {{\n"
-            f"      std::shared_ptr<{item.cpp_name}> native_instance = instance_;\n"
+            f"      {receiver_type} native_instance = instance_;\n"
             f"{feature_setup}"
             "      return Function::createFromHostFunction(\n"
             "          runtime,\n"
@@ -4387,7 +4397,7 @@ def _jsi_object_wrapper(
         property_names = "    (void)runtime;"
     if session_aware:
         constructor = f"""  explicit {class_name}(
-      std::shared_ptr<{item.cpp_name}> instance,
+      supernote::runtime::ManagedRef<{item.cpp_name}> instance,
       std::weak_ptr<supernote::runtime::FeatureSession> feature_session)
       : instance_(std::move(instance)),
         feature_session_(std::move(feature_session)) {{}}"""
@@ -4425,7 +4435,7 @@ def _jsi_object_wrapper(
   }}
 
  private:
-  std::shared_ptr<{item.cpp_name}> instance_;{feature_member}
+  {receiver_type} instance_;{feature_member}
 }};"""
 
 
@@ -4468,13 +4478,23 @@ def _jsi_object_registration(
         else "const Value *"
     )
     factory_result = f"return Value({native_call});"
+    managed_receiver = (
+        "            auto managed_instance = "
+        f"supernote::runtime::ManagedRef<{item.cpp_name}>(\n"
+        "                std::move(native_instance),\n"
+        "                supernote::runtime::process_services().cleanup());\n"
+        if session_aware
+        else ""
+    )
+    receiver_argument = "managed_instance" if session_aware else "native_instance"
     callable_body = callable_body.replace(
         factory_result,
         f"auto native_instance = {native_call};\n"
+        f"{managed_receiver}"
         "            return Value(Object::createFromHostObject(\n"
         "                runtime,\n"
         f"                std::make_shared<GeneratedObject{index}HostObject>(\n"
-        "                    std::move(native_instance)"
+        f"                    std::move({receiver_argument})"
         + (", feature_session" if session_aware else "")
         + ")));",
     )
