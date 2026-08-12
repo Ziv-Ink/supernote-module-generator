@@ -7,6 +7,8 @@ import tempfile
 import unittest
 
 from supernote_module_generator import binding_codegen
+from supernote_module_generator.semantic import DeclarationRole, ExecutionMode
+from supernote_module_generator.source_models import SupernoteMarker
 
 
 class BindingCodegenScannerTests(unittest.TestCase):
@@ -53,7 +55,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return path
 
-    def test_spaced_rename_and_noexcept_are_supported(self):
+    def test_bare_export_noexcept_and_lexer_defenses_are_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(
                 Path(directory),
@@ -61,7 +63,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                     'const char *example = R"tag(// @SupernoteExport)tag";\n'
                     "/* // @SupernoteExport */\n"
                     "// Documentation mentions @SupernoteExport here.\n"
-                    '// @SupernoteExport(name = "difference")\n'
+                    "// @SupernoteExport\n"
                     "double subtract(\n"
                     "    double left,\n"
                     "    double right) noexcept {\n"
@@ -70,7 +72,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 ),
             )
             exports = binding_codegen.scan_sources(module)
-            self.assertEqual(["difference"], [export.js_name for export in exports])
+            self.assertEqual(["subtract"], [export.js_name for export in exports])
             self.assertEqual(4, exports[0].line)
             self.assertTrue(exports[0].noexcept)
             binding_codegen.generate(module)
@@ -88,6 +90,171 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 "double subtract(double left, double right) noexcept;",
                 generated,
             )
+
+    def test_cpp_source_and_semantic_models_cover_valid_v2_marker_combinations(self):
+        cases = (
+            (
+                "export-sync",
+                "// @SupernoteExport\n",
+                DeclarationRole.EXPORTED,
+                ExecutionMode.SYNC,
+            ),
+            (
+                "internal-sync",
+                "// @SupernoteInternal\n",
+                DeclarationRole.INTERNAL,
+                ExecutionMode.SYNC,
+            ),
+            (
+                "export-async",
+                "  // @SupernoteAsync\n\n// @SupernoteExport\n",
+                DeclarationRole.EXPORTED,
+                ExecutionMode.ASYNC,
+            ),
+            (
+                "internal-async",
+                "// @SupernoteInternal\n  // @SupernoteAsync\n",
+                DeclarationRole.INTERNAL,
+                ExecutionMode.ASYNC,
+            ),
+        )
+        for name, markers, role, execution in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(
+                    Path(directory),
+                    source=(
+                        markers
+                        + "std::int32_t pageCount(std::int64_t document) "
+                        "noexcept { return document > 0 ? 1 : 0; }\n"
+                    ),
+                )
+                sources = binding_codegen.scan_cpp_source_model(module)
+                self.assertEqual(1, len(sources))
+                self.assertEqual(role, sources[0].intent.role)
+                self.assertEqual(execution, sources[0].intent.execution)
+                self.assertEqual("std::int32_t", sources[0].return_type_spelling)
+                self.assertEqual(
+                    "std::int64_t",
+                    sources[0].parameters[0].type_spelling,
+                )
+                self.assertTrue(sources[0].noexcept)
+
+                semantics = binding_codegen.scan_cpp_semantic_model(module)
+                self.assertEqual(1, len(semantics.functions))
+                self.assertEqual(role, semantics.functions[0].capabilities.role)
+                self.assertEqual(execution, semantics.functions[0].execution)
+                self.assertEqual("pageCount", semantics.functions[0].name)
+
+    def test_cpp_source_model_ignores_ordinary_public_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(
+                Path(directory),
+                source="double ordinary(double value) { return value; }\n",
+            )
+            self.assertEqual([], binding_codegen.scan_cpp_source_model(module))
+            self.assertEqual(
+                (),
+                binding_codegen.scan_cpp_semantic_model(module).functions,
+            )
+
+    def test_cpp_source_identity_does_not_depend_on_blank_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory))
+            first = binding_codegen.scan_cpp_source_model(module)[0]
+            source = (module / "android/src/main/cpp/math.cpp").read_text(
+                encoding="utf-8"
+            )
+            (module / "android/src/main/cpp/math.cpp").write_text(
+                "\n\n" + source,
+                encoding="utf-8",
+            )
+            second = binding_codegen.scan_cpp_source_model(module)[0]
+            self.assertEqual(
+                first.provenance.declaration_id,
+                second.provenance.declaration_id,
+            )
+            self.assertNotEqual(first.provenance.line, second.provenance.line)
+
+    def test_rejects_invalid_v2_free_function_marker_combinations(self):
+        cases = (
+            (
+                "async-alone",
+                "// @SupernoteAsync\n",
+                "SupernoteAsync requires SupernoteExport or SupernoteInternal",
+            ),
+            (
+                "conflicting-role",
+                "// @SupernoteExport\n// @SupernoteInternal\n",
+                "SupernoteExport and SupernoteInternal cannot mark one declaration",
+            ),
+            (
+                "duplicate",
+                "// @SupernoteExport\n// @SupernoteExport\n",
+                "duplicate SupernoteExport marker",
+            ),
+            (
+                "constructor",
+                "// @SupernoteConstructor\n",
+                "SupernoteConstructor is valid only on a constructor",
+            ),
+            (
+                "alias",
+                '// @SupernoteExport(name = "renamed")\n',
+                "initial V2 markers take no arguments",
+            ),
+            (
+                "trailing-text",
+                "// @SupernoteExport trailing\n",
+                "malformed Supernote marker",
+            ),
+            (
+                "unknown",
+                "// @SupernoteService\n",
+                "unknown Supernote marker 'SupernoteService'",
+            ),
+        )
+        for name, markers, diagnostic in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(
+                    Path(directory),
+                    source=markers + "double value() { return 1.0; }\n",
+                )
+                with self.assertRaisesRegex(
+                    binding_codegen.CodegenError,
+                    re.escape(diagnostic),
+                ) as raised:
+                    binding_codegen.scan_cpp_source_model(module)
+                self.assertIn("math.cpp:", str(raised.exception))
+
+    def test_legacy_lowering_fails_closed_for_recognized_unimplemented_routes(self):
+        cases = (
+            (
+                "internal",
+                "// @SupernoteInternal\ndouble value() { return 1.0; }\n",
+                "generated C++ caller route is not implemented yet",
+            ),
+            (
+                "async",
+                "// @SupernoteExport\n// @SupernoteAsync\n"
+                "double value() { return 1.0; }\n",
+                "async lowering is not implemented yet",
+            ),
+            (
+                "recognized-type",
+                "// @SupernoteExport\n"
+                "std::int32_t value() { return 1; }\n",
+                "synchronous JSI/JNI conversion is not implemented yet for "
+                "std::int32_t",
+            ),
+        )
+        for name, source, diagnostic in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), source=source)
+                with self.assertRaisesRegex(
+                    binding_codegen.CodegenError,
+                    re.escape(diagnostic),
+                ):
+                    binding_codegen.scan_sources(module)
 
     def test_rejects_marker_in_preprocessor_conditional(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -144,18 +311,19 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 ):
                     binding_codegen.scan_sources(module)
 
-    def test_rejects_exact_markers_in_all_helper_and_header_suffixes(self):
-        for suffix in (
-            ".c",
-            ".h",
-            ".hh",
-            ".hpp",
-            ".hxx",
-            ".inl",
-            ".inc",
-            ".ipp",
-            ".tpp",
-        ):
+    def test_rejects_markers_in_c_headers_and_helper_suffixes(self):
+        cases = {
+            ".c": "direct marked C bindings are unsupported in initial V2",
+            ".h": "C++ header must mark a supported V2 class",
+            ".hh": "C++ header must mark a supported V2 class",
+            ".hpp": "C++ header must mark a supported V2 class",
+            ".hxx": "C++ header must mark a supported V2 class",
+            ".inl": "allowed only in .cc, .cpp, or .cxx",
+            ".inc": "allowed only in .cc, .cpp, or .cxx",
+            ".ipp": "allowed only in .cc, .cpp, or .cxx",
+            ".tpp": "allowed only in .cc, .cpp, or .cxx",
+        }
+        for suffix, diagnostic in cases.items():
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
                 module = self.make_module(Path(directory))
                 (module / f"android/src/main/cpp/forbidden{suffix}").write_text(
@@ -164,9 +332,9 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(
                     binding_codegen.CodegenError,
-                    "allowed only in .cc, .cpp, or .cxx",
+                    re.escape(diagnostic),
                 ):
-                    binding_codegen.scan_sources(module)
+                    binding_codegen.scan_cpp_source_model(module)
 
     def test_jni_reserved_names_do_not_apply_to_jsi(self):
         source = (
@@ -354,7 +522,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
             message = str(raised.exception)
             self.assertIn("math.cpp:1", message)
             self.assertIn("untagged global definition", message)
-            self.assertIn("exported C++ name 'add'", message)
+            self.assertIn("routable C++ name 'add'", message)
 
     def test_rejects_untagged_declaration_in_another_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -555,7 +723,7 @@ struct PublicByDefault {
             ),
             "unsupported-parameter": (
                 "double evaluate(int value);",
-                "argument 1 must be a named bool, double, or std::string",
+                "argument 1 must use one named canonical V2 value type",
             ),
             "static": (
                 "static double evaluate();",
@@ -823,7 +991,10 @@ public:
                 module,
                 "// @SupernoteExport\ndouble illegal(double value);\n",
             )
-            with self.assertRaisesRegex(binding_codegen.CodegenError, "allowed only in .cc"):
+            with self.assertRaisesRegex(
+                binding_codegen.CodegenError,
+                re.escape("C++ header must mark a supported V2 class"),
+            ):
                 binding_codegen.scan_bindings(module)
 
     def test_object_manifest_typescript_hostobject_and_lifetime_generation(self):

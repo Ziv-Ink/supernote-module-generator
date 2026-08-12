@@ -23,6 +23,14 @@ from .templates import render
 from .validation import package_path, validate_config
 
 
+CODEGEN_SUPPORT_MODULES = (
+    "semantic.py",
+    "source_models.py",
+    "cpp_projection.py",
+    "lowering.py",
+)
+
+
 def _write(root: Path, relative: str, content: str) -> None:
     target = root / relative
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -206,12 +214,24 @@ def stage(config: ProjectConfig, *, preserve_api_from: Path | None = None) -> Pa
                 render("jsi.Module.kt.tmpl", values),
             )
         if config.backend in {"cpp", "jni", "jsi"}:
+            package_root = Path(binding_codegen.__file__).parent
             codegen_source = Path(binding_codegen.__file__).read_text(encoding="utf-8")
             _write(
                 temporary,
                 "android/.supernote-module/codegen.py",
                 codegen_source,
             )
+            _write(
+                temporary,
+                "android/.supernote-module/supernote_codegen/__init__.py",
+                '"""Private support package for generated Supernote codegen."""\n',
+            )
+            for support_name in CODEGEN_SUPPORT_MODULES:
+                _write(
+                    temporary,
+                    f"android/.supernote-module/supernote_codegen/{support_name}",
+                    (package_root / support_name).read_text(encoding="utf-8"),
+                )
             codegen_config = {
                 "backend": config.backend,
                 "npm_name": config.npm_name,

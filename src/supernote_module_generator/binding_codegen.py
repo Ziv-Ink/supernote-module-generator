@@ -9,11 +9,50 @@ from pathlib import Path
 import re
 import sys
 
+if __package__:
+    from .cpp_projection import CppProjectionError, project_cpp_functions
+    from .semantic import (
+        DeclarationRole,
+        ExecutionMode,
+        SemanticApi,
+        SourceProvenance,
+    )
+    from .source_models import (
+        CppFunctionSource,
+        CppParameterSource,
+        DeclarationTarget,
+        MarkerOccurrence,
+        SourceIntent,
+        SourceModelError,
+        SupernoteMarker,
+    )
+else:
+    from supernote_codegen.cpp_projection import (  # type: ignore[no-redef]
+        CppProjectionError,
+        project_cpp_functions,
+    )
+    from supernote_codegen.semantic import (  # type: ignore[no-redef]
+        DeclarationRole,
+        ExecutionMode,
+        SemanticApi,
+        SourceProvenance,
+    )
+    from supernote_codegen.source_models import (  # type: ignore[no-redef]
+        CppFunctionSource,
+        CppParameterSource,
+        DeclarationTarget,
+        MarkerOccurrence,
+        SourceIntent,
+        SourceModelError,
+        SupernoteMarker,
+    )
 
-ANNOTATION = re.compile(
-    r"@SupernoteExport"
-    r"(?:\(\s*name\s*=\s*\"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\"\s*\))?"
-)
+
+SOURCE_MARKERS = {
+    marker.value: marker
+    for marker in SupernoteMarker
+}
+SOURCE_MARKER = re.compile(r"@(?P<name>Supernote[A-Za-z][A-Za-z0-9_]*)")
 OBJECT_ANNOTATION = re.compile(
     r"@SupernoteExportObject"
     r"(?:\(\s*name\s*=\s*\"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\"\s*\))?"
@@ -174,8 +213,19 @@ FORBIDDEN_DECLARATION_PREFIXES = {
     "using",
     "virtual",
 }
-SUPPORTED_PARAMETER_TYPES = {"bool", "double", "std::string"}
+SUPPORTED_PARAMETER_TYPES = {
+    "bool",
+    "int32_t",
+    "std::int32_t",
+    "int64_t",
+    "std::int64_t",
+    "float",
+    "double",
+    "std::string",
+    "std::vector<std::byte>",
+}
 SUPPORTED_RETURN_TYPES = SUPPORTED_PARAMETER_TYPES | {"void"}
+LEGACY_SYNC_LOWERING_TYPES = {"bool", "double", "std::string", "void"}
 
 
 class CodegenError(RuntimeError):
@@ -586,15 +636,31 @@ def _source_error(
     )
 
 
-def _marker_name(comment: _LineComment) -> tuple[bool, str | None]:
+def _source_marker(
+    comment: _LineComment,
+) -> tuple[bool, SupernoteMarker | None]:
     value = comment.text.strip()
-    match = ANNOTATION.fullmatch(value)
+    if re.match(r"@SupernoteExportObject(?:\b|\()", value):
+        return False, None
+    match = SOURCE_MARKER.fullmatch(value)
     if match:
-        return True, match.group("name")
-    is_candidate = bool(
-        re.match(r"@SupernoteExport(?:\b|\()", value)
-    )
-    return is_candidate, None
+        marker = SOURCE_MARKERS.get(match.group("name"))
+        return True, marker
+    return bool(re.match(r"@Supernote(?:[A-Za-z0-9_]|\()", value)), None
+
+
+@dataclass(frozen=True)
+class _MarkerStack:
+    comments: tuple[_LineComment, ...]
+    markers: tuple[SupernoteMarker, ...]
+
+    @property
+    def first(self) -> _LineComment:
+        return self.comments[0]
+
+    @property
+    def last(self) -> _LineComment:
+        return self.comments[-1]
 
 
 def _object_marker_name(comment: _LineComment) -> tuple[bool, str | None]:
@@ -609,6 +675,39 @@ def _tokens_text(tokens: list[_Token]) -> str:
     return " ".join(token.value for token in tokens)
 
 
+_CPP_TYPE_TOKENS = {
+    ("void",): "void",
+    ("bool",): "bool",
+    ("int32_t",): "int32_t",
+    ("int64_t",): "int64_t",
+    ("float",): "float",
+    ("double",): "double",
+    ("std", "::", "int32_t"): "std::int32_t",
+    ("std", "::", "int64_t"): "std::int64_t",
+    ("std", "::", "string"): "std::string",
+    (
+        "std",
+        "::",
+        "vector",
+        "<",
+        "std",
+        "::",
+        "byte",
+        ">",
+    ): "std::vector<std::byte>",
+}
+
+
+def _type_prefix(tokens: list[_Token]) -> tuple[str | None, int]:
+    values = tuple(token.value for token in tokens)
+    for pattern, spelling in sorted(
+        _CPP_TYPE_TOKENS.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if values[: len(pattern)] == pattern:
+            return spelling, len(pattern)
+    return None, 0
+
+
 def _parse_parameter(
     tokens: list[_Token],
     *,
@@ -621,8 +720,8 @@ def _parse_parameter(
 ) -> Parameter:
     line = tokens[0].line if tokens else marker_line
     expected = (
-        f"argument {argument_index} must be a named bool, double, or "
-        "std::string value, for example 'double value'"
+        f"argument {argument_index} must use one named canonical V2 value "
+        "type, for example 'std::int32_t value'"
     )
     if not tokens:
         raise _source_error(
@@ -656,22 +755,15 @@ def _parse_parameter(
                 f"{description} are not supported; {expected}",
             )
 
-    cpp_type: str | None = None
-    name: str | None = None
-    if (
-        len(tokens) == 2
-        and tokens[0].value in {"bool", "double"}
-        and tokens[1].kind == "identifier"
-    ):
-        cpp_type = tokens[0].value
-        name = tokens[1].value
-    elif (
-        len(tokens) == 4
-        and [token.value for token in tokens[:3]] == ["std", "::", "string"]
-        and tokens[3].kind == "identifier"
-    ):
-        cpp_type = "std::string"
-        name = tokens[3].value
+    cpp_type, consumed = _type_prefix(tokens)
+    name = (
+        tokens[consumed].value
+        if cpp_type is not None
+        and cpp_type != "void"
+        and consumed + 1 == len(tokens)
+        and tokens[consumed].kind == "identifier"
+        else None
+    )
     if cpp_type is None or name is None:
         raise _source_error(
             module_root,
@@ -694,50 +786,77 @@ def _parse_parameter(
     return Parameter(cpp_type, name)
 
 
-def _parse_export(
+def _parse_function_source(
     *,
     module_root: Path,
     path: Path,
     text: str,
     lexed: _LexedSource,
-    marker: _LineComment,
-    renamed: str | None,
+    stack: _MarkerStack,
     next_marker_start: int | None,
-    backend: str,
     module_name: str,
-) -> Export:
-    marker_export = renamed or "<pending>"
-    if not marker.line_only:
+) -> CppFunctionSource:
+    marker = stack.first
+    marker_export = "<pending>"
+    for comment in stack.comments:
+        if not comment.line_only:
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                marker_export,
+                "a Supernote marker must be a // comment on its own line",
+            )
+        if comment.conditional_depth:
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                marker_export,
+                "Supernote markers are not allowed inside a preprocessor "
+                "conditional (#if, #ifdef, or #ifndef block)",
+            )
+        if comment.brace_depth:
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                marker_export,
+                "a free-function marker must be at global C++ scope",
+            )
+
+    occurrences = tuple(
+        MarkerOccurrence(item, comment.line)
+        for item, comment in zip(stack.markers, stack.comments)
+    )
+    try:
+        intent = SourceIntent(DeclarationTarget.FUNCTION, occurrences)
+    except SourceModelError as exc:
+        diagnostic = stack.last
+        if len(stack.markers) != len(set(stack.markers)):
+            seen: set[SupernoteMarker] = set()
+            for item, comment in zip(stack.markers, stack.comments):
+                if item in seen:
+                    diagnostic = comment
+                    break
+                seen.add(item)
+        elif SupernoteMarker.ASYNC in stack.markers:
+            diagnostic = stack.comments[stack.markers.index(SupernoteMarker.ASYNC)]
+        elif SupernoteMarker.CONSTRUCTOR in stack.markers:
+            diagnostic = stack.comments[
+                stack.markers.index(SupernoteMarker.CONSTRUCTOR)
+            ]
         raise _source_error(
             module_root,
             path,
-            marker.line,
+            diagnostic.line,
             module_name,
             marker_export,
-            "the export marker must be a // comment on its own line; use "
-            "// @SupernoteExport",
-        )
-    if marker.conditional_depth:
-        raise _source_error(
-            module_root,
-            path,
-            marker.line,
-            module_name,
-            marker_export,
-            "export markers are not allowed inside #if, #ifdef, or #ifndef "
-            "blocks; move the complete exported definition outside the "
-            "preprocessor conditional",
-        )
-    if marker.brace_depth:
-        raise _source_error(
-            module_root,
-            path,
-            marker.line,
-            module_name,
-            marker_export,
-            "export must be a global, top-level C++ free function; namespaces, "
-            "classes, and function-local exports are not supported",
-        )
+            str(exc),
+        ) from exc
 
     active_tokens = [
         token for token in lexed.tokens if token.conditional_depth == 0
@@ -757,12 +876,12 @@ def _parse_export(
             module_name,
             marker_export,
             "unsupported declaration prefix before the marker "
-            f"{_tokens_text(prefix)!r}; place // @SupernoteExport immediately "
-            "before an unmodified function return type and remove static, "
-            "template, extern \"C\", attributes, or macros",
+            f"{_tokens_text(prefix)!r}; place the Supernote marker stack "
+            "immediately before an unmodified function return type and remove "
+            "static, template, extern \"C\", attributes, or macros",
         )
 
-    following = [token for token in active_tokens if token.start >= marker.end]
+    following = [token for token in active_tokens if token.start >= stack.last.end]
     if not following or (
         next_marker_start is not None
         and following[0].start >= next_marker_start
@@ -773,15 +892,16 @@ def _parse_export(
             marker.line,
             module_name,
             marker_export,
-            "tag must be followed by a supported top-level function definition; "
-            "expected 'double name(double value) {'",
+            "the Supernote marker stack must be followed by a supported "
+            "top-level function definition; expected "
+            "'std::int32_t name(std::int32_t value) {'",
         )
     first = following[0]
     intervening_directive = next(
         (
             directive
             for directive in lexed.directives
-            if marker.end <= directive.start < first.start
+            if stack.last.end <= directive.start < first.start
         ),
         None,
     )
@@ -792,10 +912,10 @@ def _parse_export(
             intervening_directive.line,
             module_name,
             marker_export,
-            "a preprocessor directive cannot occur between an export marker "
-            "and its function definition",
+            "a preprocessor directive cannot occur between a Supernote marker "
+            "stack and its function definition",
         )
-    between = text[marker.end:first.start]
+    between = text[stack.last.end:first.start]
     if between.strip():
         raise _source_error(
             module_root,
@@ -803,8 +923,8 @@ def _parse_export(
             marker.line,
             module_name,
             marker_export,
-            "only whitespace may appear between // @SupernoteExport and the "
-            "function return type",
+            "only whitespace may appear between the final Supernote marker "
+            "and the function return type",
         )
 
     cursor = 0
@@ -817,21 +937,12 @@ def _parse_export(
             module_name,
             marker_export,
             "not a supported top-level function definition: declaration "
-            f"modifier {first_value!r} is forbidden; exported functions must "
+            f"modifier {first_value!r} is forbidden; routable functions must "
             "have ordinary external C++ linkage with no modifiers",
         )
 
-    return_type: str | None = None
-    if first_value in {"bool", "double", "void"}:
-        return_type = first_value
-        cursor += 1
-    elif (
-        len(following) >= 3
-        and [token.value for token in following[:3]] == ["std", "::", "string"]
-    ):
-        return_type = "std::string"
-        cursor = 3
-    else:
+    return_type, consumed = _type_prefix(following)
+    if return_type is None:
         description = (
             "unsupported declaration prefix or macro"
             if following[cursor].kind == "identifier"
@@ -844,9 +955,10 @@ def _parse_export(
             module_name,
             marker_export,
             "not a supported top-level function definition: "
-            f"{description} {first_value!r}; expected a bool, double, "
-            "std::string, or void return type followed by a function name",
+            f"{description} {first_value!r}; expected one canonical V2 return "
+            "type followed by a function name",
         )
+    cursor = consumed
 
     if cursor >= len(following) or following[cursor].kind != "identifier":
         line = following[min(cursor, len(following) - 1)].line
@@ -861,7 +973,7 @@ def _parse_export(
         )
     function_token = following[cursor]
     cpp_name = function_token.value
-    js_name = renamed or cpp_name
+    js_name = cpp_name
     if cpp_name in CPP23_KEYWORDS:
         raise _source_error(
             module_root,
@@ -974,7 +1086,7 @@ def _parse_export(
         (
             item
             for item in lexed.directives
-            if marker.end <= item.start < opening.start
+            if stack.last.end <= item.start < opening.start
         ),
         None,
     )
@@ -985,7 +1097,7 @@ def _parse_export(
             directive.line,
             module_name,
             js_name,
-            "preprocessor directives are not supported inside an exported "
+            "preprocessor directives are not supported inside a marked "
             "signature",
         )
     if opening.value == ";":
@@ -1010,62 +1122,22 @@ def _parse_export(
             "qualifiers, or trailing return types)",
         )
 
-    if backend == "jni":
-        if js_name in JNI_RESERVED_IDENTIFIERS:
-            raise _source_error(
-                module_root,
-                path,
-                marker.line,
-                module_name,
-                js_name,
-                f"JavaScript export name {js_name!r} is reserved by "
-                "Kotlin/Java; choose a different @SupernoteExport name",
-            )
-        if (
-            js_name in GENERATED_KOTLIN_METHOD_NAMES
-            or re.fullmatch(r"native[0-9]+", js_name)
-        ):
-            raise _source_error(
-                module_root,
-                path,
-                marker.line,
-                module_name,
-                js_name,
-                f"JavaScript export name {js_name!r} collides with a generated "
-                "Kotlin method; choose a different @SupernoteExport name",
-            )
-        for argument_index, parameter in enumerate(parameters, start=1):
-            if parameter.name in JNI_RESERVED_IDENTIFIERS:
-                token = groups[argument_index - 1][-1]
-                raise _source_error(
-                    module_root,
-                    path,
-                    token.line,
-                    module_name,
-                    js_name,
-                    f"argument {argument_index} name {parameter.name!r} is "
-                    "reserved by Kotlin/Java; rename the C++ parameter",
-                )
-            if return_type != "void" and parameter.name == "promise":
-                token = groups[argument_index - 1][-1]
-                raise _source_error(
-                    module_root,
-                    path,
-                    token.line,
-                    module_name,
-                    js_name,
-                    f"argument {argument_index} name 'promise' collides with "
-                    "the generated React Native Promise parameter; rename the "
-                    "C++ parameter",
-                )
-
-    return Export(
-        source=str(path.relative_to(module_root)),
-        line=marker.line,
+    relative = str(path.relative_to(module_root))
+    signature = ",".join(parameter.cpp_type for parameter in parameters)
+    return CppFunctionSource(
+        provenance=SourceProvenance(
+            declaration_id=f"cpp:{relative}:{cpp_name}({signature})",
+            language="cpp",
+            path=relative,
+            line=marker.line,
+        ),
         cpp_name=cpp_name,
-        js_name=js_name,
-        return_type=return_type,
-        parameters=tuple(parameters),
+        return_type_spelling=return_type,
+        parameters=tuple(
+            CppParameterSource(parameter.cpp_type, parameter.name)
+            for parameter in parameters
+        ),
+        intent=intent,
         noexcept=is_noexcept,
         definition_offset=function_token.start,
     )
@@ -1624,12 +1696,12 @@ def _global_function_terminator(
 def _reject_untagged_global_functions(
     module_root: Path,
     lexed_sources: dict[Path, _LexedSource],
-    exports: list[Export],
+    sources: list[CppFunctionSource],
     module_name: str,
 ) -> None:
-    exported_by_name = {export.cpp_name: export for export in exports}
+    routable_by_name = {source.cpp_name: source for source in sources}
     tagged_locations = {
-        (export.source, export.definition_offset) for export in exports
+        (source.provenance.path, source.definition_offset) for source in sources
     }
     for path, lexed in lexed_sources.items():
         if path.suffix.lower() not in CPP_SUFFIXES:
@@ -1639,8 +1711,8 @@ def _reject_untagged_global_functions(
             token for token in lexed.tokens if token.conditional_depth == 0
         ]
         for index, token in enumerate(tokens):
-            exported = exported_by_name.get(token.value)
-            if exported is None or token.brace_depth != 0:
+            routed = routable_by_name.get(token.value)
+            if routed is None or token.brace_depth != 0:
                 continue
             if (source, token.start) in tagged_locations:
                 continue
@@ -1669,26 +1741,83 @@ def _reject_untagged_global_functions(
                 path,
                 token.line,
                 module_name,
-                exported.js_name,
-                f"untagged global {kind} for exported C++ name "
+                routed.cpp_name,
+                f"untagged global {kind} for routable C++ name "
                 f"{token.value!r} conflicts with the tagged definition at "
-                f"{exported.source}:{exported.line}; overloads and duplicate "
+                f"{routed.provenance.path}:{routed.provenance.line}; overloads "
+                "and duplicate "
                 "declarations are not supported. Keep exactly one global "
                 "function with this C++ name",
             )
 
 
-def scan_sources(
+def _marker_entries(
+    module_root: Path,
+    path: Path,
+    lexed: _LexedSource,
+    module_name: str,
+) -> list[tuple[_LineComment, SupernoteMarker]]:
+    entries: list[tuple[_LineComment, SupernoteMarker]] = []
+    for comment in lexed.comments:
+        is_candidate, marker = _source_marker(comment)
+        if not is_candidate:
+            continue
+        if marker is None:
+            value = comment.text.strip()
+            match = SOURCE_MARKER.fullmatch(value)
+            if match and match.group("name") not in SOURCE_MARKERS:
+                message = (
+                    f"unknown Supernote marker {match.group('name')!r}; supported "
+                    "markers are SupernoteExport, SupernoteInternal, "
+                    "SupernoteAsync, and SupernoteConstructor"
+                )
+            else:
+                message = (
+                    "malformed Supernote marker; initial V2 markers take no "
+                    "arguments and must be written exactly, for example "
+                    "// @SupernoteExport"
+                )
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                None,
+                message,
+            )
+        entries.append((comment, marker))
+    return entries
+
+
+def _marker_stacks(
+    text: str,
+    entries: list[tuple[_LineComment, SupernoteMarker]],
+) -> list[_MarkerStack]:
+    stacks: list[_MarkerStack] = []
+    comments: list[_LineComment] = []
+    markers: list[SupernoteMarker] = []
+    for comment, marker in entries:
+        if comments and text[comments[-1].end:comment.start].strip():
+            stacks.append(_MarkerStack(tuple(comments), tuple(markers)))
+            comments = []
+            markers = []
+        comments.append(comment)
+        markers.append(marker)
+    if comments:
+        stacks.append(_MarkerStack(tuple(comments), tuple(markers)))
+    return stacks
+
+
+def scan_cpp_source_model(
     module_root: Path,
     *,
-    backend: str | None = None,
     module_name: str | None = None,
-) -> list[Export]:
+) -> list[CppFunctionSource]:
     source_root = module_root / "android/src/main/cpp"
     if not source_root.is_dir():
         raise CodegenError(f"missing C/C++ source directory: {source_root}")
 
-    backend, module_name = _scan_context(module_root, backend, module_name)
+    _, module_name = _scan_context(module_root, None, module_name)
     all_sources = sorted(path for path in source_root.rglob("*") if path.is_file())
     lexed_sources: dict[Path, _LexedSource] = {}
     for path in all_sources:
@@ -1717,89 +1846,239 @@ def scan_sources(
                 )
         if suffix not in FORBIDDEN_TAG_SUFFIXES:
             continue
-        for comment in lexed.comments:
-            is_candidate, _ = _marker_name(comment)
-            if is_candidate:
-                raise _source_error(
-                    module_root,
-                    path,
-                    comment.line,
-                    module_name,
-                    None,
-                    "export tags are allowed only in .cc, .cpp, or .cxx files; "
-                    "move the exported definition into a C++ source file",
+        for comment, marker in _marker_entries(
+            module_root, path, lexed, module_name
+        ):
+            if suffix == ".c":
+                message = (
+                    "direct marked C bindings are unsupported in initial V2; "
+                    "use ordinary C23 implementation code behind a canonical "
+                    "marked C++ boundary"
                 )
+            elif suffix in CPP_HEADER_SUFFIXES:
+                message = (
+                    f"{marker.value} in a C++ header must mark a supported V2 "
+                    "class, constructor, or member; header binding parsing is "
+                    "not implemented yet"
+                )
+            else:
+                message = (
+                    "free-function Supernote markers are allowed only in .cc, "
+                    ".cpp, or .cxx files"
+                )
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                None,
+                message,
+            )
 
-    exports: list[Export] = []
+    sources: list[CppFunctionSource] = []
     for path in all_sources:
         if path.suffix.lower() not in CPP_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8")
         lexed = lexed_sources[path]
-        markers: list[tuple[_LineComment, str | None]] = []
-        for comment in lexed.comments:
-            is_candidate, renamed = _marker_name(comment)
-            if not is_candidate:
-                continue
-            if ANNOTATION.fullmatch(comment.text.strip()) is None:
-                raise _source_error(
-                    module_root,
-                    path,
-                    comment.line,
-                    module_name,
-                    None,
-                    "malformed export tag; use // @SupernoteExport or "
-                    '// @SupernoteExport(name = "javascriptName")',
-                )
-            markers.append((comment, renamed))
-        for index, (marker, renamed) in enumerate(markers):
+        stacks = _marker_stacks(
+            text,
+            _marker_entries(module_root, path, lexed, module_name),
+        )
+        for index, stack in enumerate(stacks):
             next_marker = (
-                markers[index + 1][0].start if index + 1 < len(markers) else None
+                stacks[index + 1].first.start if index + 1 < len(stacks) else None
             )
-            exports.append(
-                _parse_export(
+            sources.append(
+                _parse_function_source(
                     module_root=module_root,
                     path=path,
                     text=text,
                     lexed=lexed,
-                    marker=marker,
-                    renamed=renamed,
+                    stack=stack,
                     next_marker_start=next_marker,
-                    backend=backend,
                     module_name=module_name,
                 )
             )
 
-    exports.sort(key=lambda item: (item.source, item.line, item.js_name))
-    native_names: dict[str, Export] = {}
-    js_names: dict[str, Export] = {}
-    for export in exports:
-        if export.cpp_name in native_names:
-            first = native_names[export.cpp_name]
+    sources.sort(
+        key=lambda item: (
+            item.provenance.path,
+            item.provenance.line,
+            item.cpp_name,
+        )
+    )
+    native_names: dict[str, CppFunctionSource] = {}
+    for source in sources:
+        if source.cpp_name in native_names:
+            first = native_names[source.cpp_name]
             raise CodegenError(
-                f"{export.source}:{export.line}: module {module_name!r}, "
-                f"export {export.js_name!r}: overloaded or duplicate C++ "
-                f"function {export.cpp_name!r}; first exported at "
-                f"{first.source}:{first.line}. Rename one C++ function; "
+                f"{source.provenance.path}:{source.provenance.line}: module "
+                f"{module_name!r}, export {source.cpp_name!r}: overloaded or "
+                f"duplicate routable C++ function {source.cpp_name!r}; first "
+                f"marked at {first.provenance.path}:{first.provenance.line}. "
+                "Rename one C++ function; "
                 "overloads are not supported"
             )
-        if export.js_name in js_names:
-            first = js_names[export.js_name]
-            raise CodegenError(
-                f"{export.source}:{export.line}: module {module_name!r}, "
-                f"export {export.js_name!r}: duplicate JavaScript export "
-                f"{export.js_name!r}; first exported at "
-                f"{first.source}:{first.line}. Give every export a unique "
-                "@SupernoteExport name"
-            )
-        native_names[export.cpp_name] = export
-        js_names[export.js_name] = export
+        native_names[source.cpp_name] = source
     _reject_untagged_global_functions(
         module_root,
         lexed_sources,
-        exports,
+        sources,
         module_name,
     )
+    return sources
+
+
+def scan_cpp_semantic_model(
+    module_root: Path,
+    *,
+    module_name: str | None = None,
+) -> SemanticApi:
+    try:
+        return project_cpp_functions(
+            scan_cpp_source_model(module_root, module_name=module_name)
+        )
+    except (CppProjectionError, SourceModelError, ValueError) as exc:
+        raise CodegenError(str(exc)) from exc
+
+
+def _lower_sync_export(
+    module_root: Path,
+    source: CppFunctionSource,
+    *,
+    backend: str,
+    module_name: str,
+) -> Export:
+    path = module_root / source.provenance.path
+    name = source.cpp_name
+    if source.intent.role is DeclarationRole.INTERNAL:
+        raise _source_error(
+            module_root,
+            path,
+            source.provenance.line,
+            module_name,
+            name,
+            "SupernoteInternal was recognized, but its generated C++ caller "
+            "route is not implemented yet",
+        )
+    if source.intent.execution is ExecutionMode.ASYNC:
+        raise _source_error(
+            module_root,
+            path,
+            source.provenance.line,
+            module_name,
+            name,
+            "SupernoteAsync was recognized, but async lowering is not "
+            "implemented yet",
+        )
+    used_types = {source.return_type_spelling}
+    used_types.update(parameter.type_spelling for parameter in source.parameters)
+    unsupported = sorted(used_types - LEGACY_SYNC_LOWERING_TYPES)
+    if unsupported:
+        raise _source_error(
+            module_root,
+            path,
+            source.provenance.line,
+            module_name,
+            name,
+            "semantic type was recognized, but synchronous JSI/JNI conversion "
+            f"is not implemented yet for {', '.join(unsupported)}",
+        )
+
+    parameters = tuple(
+        Parameter(parameter.type_spelling, parameter.name)
+        for parameter in source.parameters
+    )
+    if backend == "jni":
+        if name in JNI_RESERVED_IDENTIFIERS:
+            raise _source_error(
+                module_root,
+                path,
+                source.provenance.line,
+                module_name,
+                name,
+                f"JavaScript export name {name!r} is reserved by Kotlin/Java; "
+                "rename the C++ function",
+            )
+        if (
+            name in GENERATED_KOTLIN_METHOD_NAMES
+            or re.fullmatch(r"native[0-9]+", name)
+        ):
+            raise _source_error(
+                module_root,
+                path,
+                source.provenance.line,
+                module_name,
+                name,
+                f"JavaScript export name {name!r} collides with a generated "
+                "Kotlin method; rename the C++ function",
+            )
+        for argument_index, parameter in enumerate(parameters, start=1):
+            if parameter.name in JNI_RESERVED_IDENTIFIERS:
+                raise _source_error(
+                    module_root,
+                    path,
+                    source.provenance.line,
+                    module_name,
+                    name,
+                    f"argument {argument_index} name {parameter.name!r} is "
+                    "reserved by Kotlin/Java; rename the C++ parameter",
+                )
+            if (
+                source.return_type_spelling != "void"
+                and parameter.name == "promise"
+            ):
+                raise _source_error(
+                    module_root,
+                    path,
+                    source.provenance.line,
+                    module_name,
+                    name,
+                    f"argument {argument_index} name 'promise' collides with "
+                    "the generated React Native Promise parameter; rename the "
+                    "C++ parameter",
+                )
+    return Export(
+        source=source.provenance.path,
+        line=source.provenance.line,
+        cpp_name=source.cpp_name,
+        js_name=source.cpp_name,
+        return_type=source.return_type_spelling,
+        parameters=parameters,
+        noexcept=source.noexcept,
+        definition_offset=source.definition_offset,
+    )
+
+
+def scan_sources(
+    module_root: Path,
+    *,
+    backend: str | None = None,
+    module_name: str | None = None,
+) -> list[Export]:
+    backend, module_name = _scan_context(module_root, backend, module_name)
+    sources = scan_cpp_source_model(module_root, module_name=module_name)
+    try:
+        semantics = project_cpp_functions(sources)
+    except (CppProjectionError, SourceModelError, ValueError) as exc:
+        raise CodegenError(str(exc)) from exc
+    by_source = {
+        binding.source.declaration_id: binding
+        for binding in semantics.functions
+    }
+    exports = []
+    for source in sources:
+        if source.provenance.declaration_id not in by_source:
+            continue
+        exports.append(
+            _lower_sync_export(
+                module_root,
+                source,
+                backend=backend,
+                module_name=module_name,
+            )
+        )
     return exports
 
 

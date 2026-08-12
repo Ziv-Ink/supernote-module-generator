@@ -93,11 +93,17 @@ val generateSupernoteBindings = tasks.register<Exec>("generateSupernoteBindings"
   )
   inputs.file(file(".supernote-module/codegen.py"))
   inputs.file(file(".supernote-module/codegen-config.json"))
+  inputs.files(
+    fileTree(".supernote-module/supernote_codegen") {
+      include("**/*.py")
+    },
+  )
   outputs.dir(layout.buildDirectory.dir("generated/supernote"))
   outputs.file(file("../index.d.ts"))
   workingDir(projectDir.parentFile)
   commandLine(
     System.getenv("SUPERNOTE_PYTHON") ?: "python3",
+    "-B",
     file(".supernote-module/codegen.py").absolutePath,
     "--module-root",
     projectDir.parentFile.absolutePath,

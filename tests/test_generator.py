@@ -1,5 +1,9 @@
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 from supernote_module_generator.config import ProjectConfig, native_class_prefix
 from supernote_module_generator.generator import generate
@@ -63,3 +67,71 @@ def test_force_replaces_only_generated_project(tmp_path):
     (target / "old").write_text("old")
     generate(config(tmp_path, output=target, force=True))
     assert not (target / "old").exists()
+
+
+def test_native_codegen_is_self_contained_and_checkable(tmp_path):
+    module = generate(
+        config(
+            tmp_path,
+            output=tmp_path / "local-jsi",
+            npm_name="local-jsi",
+            module_name="LocalJsi",
+            backend="jsi",
+            native_library_name="sn_local_jsi_test",
+            jsi_global_name="__supernoteLocalJsiTest",
+        )
+    )
+    codegen_root = module / "android/.supernote-module"
+    support_root = codegen_root / "supernote_codegen"
+    expected_support = {
+        "__init__.py",
+        "cpp_projection.py",
+        "lowering.py",
+        "semantic.py",
+        "source_models.py",
+    }
+    assert {path.name for path in support_root.iterdir()} == expected_support
+
+    metadata = json.loads((module / ".supernote-module.json").read_text())
+    for name in expected_support:
+        assert (
+            f"android/.supernote-module/supernote_codegen/{name}"
+            in metadata["generated_files"]
+        )
+
+    build_script = (module / "android/build.gradle.kts").read_text()
+    assert 'fileTree(".supernote-module/supernote_codegen")' in build_script
+    assert '"-B"' in build_script
+    starter = (module / "android/src/main/cpp/text.cpp").read_text()
+    assert "// @SupernoteExport\nstd::string greet(" in starter
+    assert "SupernoteExport(" not in starter
+
+    shutil.rmtree(module / "android/build/generated/supernote")
+    (module / "index.d.ts").unlink()
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    command = [
+        sys.executable,
+        "-B",
+        str(codegen_root / "codegen.py"),
+        "--module-root",
+        str(module),
+    ]
+    generated = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert generated.returncode == 0, generated.stderr
+    checked = subprocess.run(
+        [*command, "--check"],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert checked.returncode == 0, checked.stderr
