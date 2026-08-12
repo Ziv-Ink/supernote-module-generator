@@ -279,6 +279,15 @@ def test_repository_docs_contain_architectural_history_not_migration_tooling():
     )
 
 
+def test_release_guide_uses_the_v2_feature_model():
+    guide = (ROOT / "maintainers/releasing.md").read_text(encoding="utf-8")
+    assert "C/C++ starter" in guide
+    assert "Kotlin/Java starter" in guide
+    assert "one plugin runtime component" in guide
+    assert "all three module types" not in guide
+    assert "Add a Module" not in guide
+
+
 def test_public_material_does_not_reference_private_deploy_script():
     public_documents = [
         ROOT / "README.md",

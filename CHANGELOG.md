@@ -15,6 +15,9 @@ should also check their installed version with `supernote-module --version`.
 - Generate one shared plugin-level V2 runtime/build component with explicit
   source intent, common semantics, typed JSI/JNI routes, lifecycle safety, and
   TypeScript declarations.
+- Link the plugin runtime against host React Native/JSI libraries without
+  repackaging those libraries into the runtime AAR, preventing duplicate JNI
+  library failures in the parent Android application.
 - Add opt-in `remove --delete-build-files`; ordinary removal and `--yes`
   preserve plugin build output.
 
