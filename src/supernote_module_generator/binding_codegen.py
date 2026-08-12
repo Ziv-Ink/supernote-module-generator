@@ -10,7 +10,11 @@ import re
 import sys
 
 if __package__:
-    from .cpp_projection import CppProjectionError, project_cpp_functions
+    from .cpp_projection import (
+        CppProjectionError,
+        project_cpp_api,
+        project_cpp_functions,
+    )
     from .semantic import (
         DeclarationRole,
         ExecutionMode,
@@ -18,7 +22,10 @@ if __package__:
         SourceProvenance,
     )
     from .source_models import (
+        CppClassSource,
+        CppConstructorSource,
         CppFunctionSource,
+        CppMethodSource,
         CppParameterSource,
         DeclarationTarget,
         MarkerOccurrence,
@@ -29,6 +36,7 @@ if __package__:
 else:
     from supernote_codegen.cpp_projection import (  # type: ignore[no-redef]
         CppProjectionError,
+        project_cpp_api,
         project_cpp_functions,
     )
     from supernote_codegen.semantic import (  # type: ignore[no-redef]
@@ -38,7 +46,10 @@ else:
         SourceProvenance,
     )
     from supernote_codegen.source_models import (  # type: ignore[no-redef]
+        CppClassSource,
+        CppConstructorSource,
         CppFunctionSource,
+        CppMethodSource,
         CppParameterSource,
         DeclarationTarget,
         MarkerOccurrence,
@@ -1808,6 +1819,731 @@ def _marker_stacks(
     return stacks
 
 
+def _intent_from_stack(
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    stack: _MarkerStack,
+    target: DeclarationTarget,
+    export_name: str | None,
+) -> SourceIntent:
+    occurrences = tuple(
+        MarkerOccurrence(marker, comment.line)
+        for marker, comment in zip(stack.markers, stack.comments)
+    )
+    try:
+        return SourceIntent(target, occurrences)
+    except SourceModelError as exc:
+        diagnostic = stack.last
+        if len(stack.markers) != len(set(stack.markers)):
+            seen: set[SupernoteMarker] = set()
+            for marker, comment in zip(stack.markers, stack.comments):
+                if marker in seen:
+                    diagnostic = comment
+                    break
+                seen.add(marker)
+        elif SupernoteMarker.ASYNC in stack.markers:
+            diagnostic = stack.comments[
+                stack.markers.index(SupernoteMarker.ASYNC)
+            ]
+        elif SupernoteMarker.CONSTRUCTOR in stack.markers:
+            diagnostic = stack.comments[
+                stack.markers.index(SupernoteMarker.CONSTRUCTOR)
+            ]
+        raise _source_error(
+            module_root,
+            path,
+            diagnostic.line,
+            module_name,
+            export_name,
+            str(exc),
+        ) from exc
+
+
+def _validate_marker_stack_location(
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    stack: _MarkerStack,
+    *,
+    brace_depth: int,
+    description: str,
+) -> None:
+    for comment in stack.comments:
+        if not comment.line_only:
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                None,
+                "a Supernote marker must be a // comment on its own line",
+            )
+        if comment.conditional_depth:
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                None,
+                "Supernote markers are not allowed inside a preprocessor "
+                "conditional (#if, #ifdef, or #ifndef block)",
+            )
+        if comment.brace_depth != brace_depth:
+            raise _source_error(
+                module_root,
+                path,
+                comment.line,
+                module_name,
+                None,
+                f"a {description} marker must be at brace depth {brace_depth}",
+            )
+
+
+def _constructor_suffix(
+    tokens: list[_Token],
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    class_name: str,
+) -> tuple[bool, bool]:
+    is_noexcept = False
+    cursor = 0
+    if cursor < len(tokens) and tokens[cursor].value == "noexcept":
+        is_noexcept = True
+        cursor += 1
+        if cursor < len(tokens) and tokens[cursor].value == "(":
+            raise _source_error(
+                module_root,
+                path,
+                tokens[cursor].line,
+                module_name,
+                f"{class_name}.create",
+                "only bare noexcept is supported on a constructor",
+            )
+    deleted = False
+    if cursor < len(tokens):
+        if (
+            cursor + 2 == len(tokens)
+            and tokens[cursor].value == "="
+            and tokens[cursor + 1].value in {"default", "delete"}
+        ):
+            deleted = tokens[cursor + 1].value == "delete"
+            cursor += 2
+        else:
+            raise _source_error(
+                module_root,
+                path,
+                tokens[cursor].line,
+                module_name,
+                f"{class_name}.create",
+                "unsupported constructor suffix; only bare noexcept, "
+                "= default, or = delete is supported",
+            )
+    return is_noexcept, deleted
+
+
+def _parse_v2_class_source(
+    *,
+    module_root: Path,
+    source_root: Path,
+    path: Path,
+    text: str,
+    lexed: _LexedSource,
+    class_stack: _MarkerStack,
+    stacks: list[_MarkerStack],
+    module_name: str,
+) -> tuple[CppClassSource, set[int]]:
+    _validate_marker_stack_location(
+        module_root,
+        path,
+        module_name,
+        class_stack,
+        brace_depth=0,
+        description="class",
+    )
+    class_intent = _intent_from_stack(
+        module_root,
+        path,
+        module_name,
+        class_stack,
+        DeclarationTarget.CLASS,
+        None,
+    )
+    active_tokens = [
+        token for token in lexed.tokens if token.conditional_depth == 0
+    ]
+    preceding = [
+        token for token in active_tokens if token.end <= class_stack.first.start
+    ]
+    prefix: list[_Token] = []
+    for token in reversed(preceding):
+        if token.value in {";", "{", "}"}:
+            break
+        prefix.append(token)
+    prefix.reverse()
+    if prefix:
+        raise _source_error(
+            module_root,
+            path,
+            prefix[0].line,
+            module_name,
+            None,
+            "unsupported declaration prefix before the class marker "
+            f"{_tokens_text(prefix)!r}; templates and declaration modifiers "
+            "are not supported",
+        )
+    following = [
+        token for token in active_tokens if token.start >= class_stack.last.end
+    ]
+    if not following:
+        raise _source_error(
+            module_root,
+            path,
+            class_stack.first.line,
+            module_name,
+            None,
+            "a class marker stack must be followed by a complete class or "
+            "struct definition",
+        )
+    first = following[0]
+    if text[class_stack.last.end:first.start].strip():
+        raise _source_error(
+            module_root,
+            path,
+            class_stack.first.line,
+            module_name,
+            None,
+            "only whitespace may appear between the final class marker and "
+            "the class or struct definition",
+        )
+    if first.value not in {"class", "struct"}:
+        raise _source_error(
+            module_root,
+            path,
+            first.line,
+            module_name,
+            None,
+            "a class marker stack must be followed by a class or struct "
+            "definition",
+        )
+    if len(following) < 3 or following[1].kind != "identifier":
+        raise _source_error(
+            module_root,
+            path,
+            first.line,
+            module_name,
+            None,
+            "a marked class or struct must have an ordinary identifier name",
+        )
+    cpp_name = following[1].value
+    opening = next(
+        (
+            index
+            for index in range(2, len(following))
+            if following[index].value in {"{", ";"}
+        ),
+        None,
+    )
+    if opening is None or following[opening].value != "{":
+        raise _source_error(
+            module_root,
+            path,
+            first.line,
+            module_name,
+            cpp_name,
+            "a marked class requires a complete definition, not a declaration",
+        )
+    before_body = following[2:opening]
+    if any(token.value == ":" for token in before_body):
+        raise _source_error(
+            module_root,
+            path,
+            before_body[0].line,
+            module_name,
+            cpp_name,
+            "inheritance is not supported for initial V2 generated classes",
+        )
+    if before_body:
+        raise _source_error(
+            module_root,
+            path,
+            before_body[0].line,
+            module_name,
+            cpp_name,
+            f"unsupported tokens before marked class body "
+            f"{_tokens_text(before_body)!r}",
+        )
+    depth = 1
+    closing: int | None = None
+    cursor = opening + 1
+    while cursor < len(following):
+        if following[cursor].value == "{":
+            depth += 1
+        elif following[cursor].value == "}":
+            depth -= 1
+            if depth == 0:
+                closing = cursor
+                break
+        cursor += 1
+    if closing is None:
+        raise _source_error(
+            module_root,
+            path,
+            first.line,
+            module_name,
+            cpp_name,
+            "marked class definition is missing its closing '}'",
+        )
+    if closing + 1 >= len(following) or following[closing + 1].value != ";":
+        raise _source_error(
+            module_root,
+            path,
+            following[closing].line,
+            module_name,
+            cpp_name,
+            "marked class definition must end with '};'",
+        )
+
+    opening_token = following[opening]
+    closing_token = following[closing]
+    member_depth = opening_token.brace_depth + 1
+    body = following[opening + 1:closing]
+    declarations = _member_declarations(
+        body,
+        default_access="private" if first.value == "class" else "public",
+    )
+    member_stacks = [
+        stack
+        for stack in stacks
+        if opening_token.end <= stack.first.start < closing_token.start
+        and stack is not class_stack
+    ]
+    consumed = {comment.start for comment in class_stack.comments}
+    stack_by_declaration: dict[int, _MarkerStack] = {}
+    for stack in member_stacks:
+        _validate_marker_stack_location(
+            module_root,
+            path,
+            module_name,
+            stack,
+            brace_depth=member_depth,
+            description="class member",
+        )
+        declaration = next(
+            (
+                item
+                for item in declarations
+                if item[1] and item[1][0].start >= stack.last.end
+            ),
+            None,
+        )
+        if declaration is None:
+            raise _source_error(
+                module_root,
+                path,
+                stack.first.line,
+                module_name,
+                cpp_name,
+                "a member marker stack must be followed by a member "
+                "declaration",
+            )
+        access, tokens = declaration
+        if text[stack.last.end:tokens[0].start].strip():
+            raise _source_error(
+                module_root,
+                path,
+                stack.first.line,
+                module_name,
+                cpp_name,
+                "only whitespace may appear between the final member marker "
+                "and its declaration",
+            )
+        if tokens[0].start in stack_by_declaration:
+            raise _source_error(
+                module_root,
+                path,
+                stack.first.line,
+                module_name,
+                cpp_name,
+                "separate marker stacks cannot target the same member",
+            )
+        stack_by_declaration[tokens[0].start] = stack
+        consumed.update(comment.start for comment in stack.comments)
+
+    constructors: list[CppConstructorSource] = []
+    methods: list[CppMethodSource] = []
+    method_names: dict[str, int] = {}
+    constructor_ids: set[str] = set()
+    has_user_constructor = False
+    relative = str(path.relative_to(module_root))
+    for access, declaration in declarations:
+        if not declaration:
+            continue
+        stack = stack_by_declaration.get(declaration[0].start)
+        values = [token.value for token in declaration]
+        if "(" not in values:
+            if stack is not None:
+                raise _source_error(
+                    module_root,
+                    path,
+                    stack.first.line,
+                    module_name,
+                    cpp_name,
+                    "properties, fields, and other non-method generated "
+                    "members are deferred in initial V2",
+                )
+            continue
+        opening_index = values.index("(")
+        try:
+            groups, closing_index = _parameter_groups(
+                declaration,
+                opening_index,
+            )
+        except ValueError:
+            if stack is None:
+                continue
+            raise _source_error(
+                module_root,
+                path,
+                declaration[opening_index].line,
+                module_name,
+                cpp_name,
+                "missing ')' in marked member declaration",
+            ) from None
+        prefix_values = values[:opening_index]
+        suffix = declaration[closing_index + 1:]
+        is_destructor = prefix_values == ["~", cpp_name]
+        is_constructor = (
+            not is_destructor
+            and bool(prefix_values)
+            and prefix_values[-1] == cpp_name
+        )
+        if is_constructor:
+            has_user_constructor = True
+            if prefix_values not in ([cpp_name], ["explicit", cpp_name]):
+                if stack is not None:
+                    raise _source_error(
+                        module_root,
+                        path,
+                        declaration[0].line,
+                        module_name,
+                        f"{cpp_name}.create",
+                        "a generated constructor may use only the optional "
+                        "explicit modifier before its class name",
+                    )
+                continue
+            if _is_copy_or_move_constructor(groups, cpp_name):
+                if stack is not None:
+                    raise _source_error(
+                        module_root,
+                        path,
+                        stack.first.line,
+                        module_name,
+                        cpp_name,
+                        "copy and move constructors cannot be generated "
+                        "creation paths",
+                    )
+                continue
+            intent = (
+                _intent_from_stack(
+                    module_root,
+                    path,
+                    module_name,
+                    stack,
+                    DeclarationTarget.CONSTRUCTOR,
+                    f"{cpp_name}.create",
+                )
+                if stack is not None
+                else SourceIntent(DeclarationTarget.CONSTRUCTOR)
+            )
+            if stack is not None and access != "public":
+                raise _source_error(
+                    module_root,
+                    path,
+                    stack.first.line,
+                    module_name,
+                    f"{cpp_name}.create",
+                    "SupernoteConstructor must mark a public constructor",
+                )
+            try:
+                parsed_parameters = _parse_parameters(
+                    groups,
+                    module_root=module_root,
+                    path=path,
+                    marker_line=(stack.first.line if stack else declaration[0].line),
+                    module_name=module_name,
+                    export_name=f"{cpp_name}.create",
+                )
+            except CodegenError:
+                if stack is not None:
+                    raise
+                continue
+            try:
+                is_noexcept, deleted = _constructor_suffix(
+                    suffix,
+                    module_root=module_root,
+                    path=path,
+                    module_name=module_name,
+                    class_name=cpp_name,
+                )
+            except CodegenError:
+                if stack is not None:
+                    raise
+                continue
+            if stack is not None and deleted:
+                raise _source_error(
+                    module_root,
+                    path,
+                    stack.first.line,
+                    module_name,
+                    f"{cpp_name}.create",
+                    "SupernoteConstructor cannot select a deleted constructor",
+                )
+            signature = ",".join(
+                parameter.cpp_type for parameter in parsed_parameters
+            )
+            declaration_id = (
+                f"cpp:{relative}:constructor:{cpp_name}({signature})"
+            )
+            if declaration_id in constructor_ids:
+                raise _source_error(
+                    module_root,
+                    path,
+                    declaration[0].line,
+                    module_name,
+                    f"{cpp_name}.create",
+                    "duplicate constructor signature",
+                )
+            constructor_ids.add(declaration_id)
+            constructors.append(
+                CppConstructorSource(
+                    provenance=SourceProvenance(
+                        declaration_id=declaration_id,
+                        language="cpp",
+                        path=relative,
+                        line=declaration[0].line,
+                    ),
+                    parameters=tuple(
+                        CppParameterSource(parameter.cpp_type, parameter.name)
+                        for parameter in parsed_parameters
+                    ),
+                    access=access,
+                    intent=intent,
+                    deleted=deleted,
+                    explicit=prefix_values[0] == "explicit",
+                    noexcept=is_noexcept,
+                )
+            )
+            continue
+        if stack is None:
+            continue
+        if is_destructor:
+            raise _source_error(
+                module_root,
+                path,
+                stack.first.line,
+                module_name,
+                cpp_name,
+                "destructors cannot be generated members",
+            )
+        intent = _intent_from_stack(
+            module_root,
+            path,
+            module_name,
+            stack,
+            DeclarationTarget.METHOD,
+            cpp_name,
+        )
+        if access != "public":
+            raise _source_error(
+                module_root,
+                path,
+                stack.first.line,
+                module_name,
+                cpp_name,
+                "a generated method must be public in C++",
+            )
+        for forbidden, description in (
+            ("operator", "operators"),
+            ("static", "static methods"),
+            ("virtual", "virtual methods"),
+        ):
+            if forbidden in prefix_values:
+                raise _source_error(
+                    module_root,
+                    path,
+                    declaration[prefix_values.index(forbidden)].line,
+                    module_name,
+                    cpp_name,
+                    f"{description} are deferred generated-member forms",
+                )
+        return_type, consumed_type = _type_prefix(declaration[:opening_index])
+        if (
+            return_type is None
+            or consumed_type + 1 != opening_index
+            or declaration[consumed_type].kind != "identifier"
+        ):
+            raise _source_error(
+                module_root,
+                path,
+                declaration[0].line,
+                module_name,
+                cpp_name,
+                "a marked method must use one canonical V2 result type "
+                "followed by an ordinary method name",
+            )
+        method_name = declaration[consumed_type].value
+        if method_name in CPP23_KEYWORDS:
+            raise _source_error(
+                module_root,
+                path,
+                declaration[consumed_type].line,
+                module_name,
+                cpp_name,
+                f"method name {method_name!r} is a C++23 keyword",
+            )
+        if method_name in method_names:
+            raise _source_error(
+                module_root,
+                path,
+                declaration[consumed_type].line,
+                module_name,
+                cpp_name,
+                f"duplicate generated method name {method_name!r}; first "
+                f"marked at line {method_names[method_name]}",
+            )
+        parameters = _parse_parameters(
+            groups,
+            module_root=module_root,
+            path=path,
+            marker_line=stack.first.line,
+            module_name=module_name,
+            export_name=f"{cpp_name}.{method_name}",
+        )
+        is_const, is_noexcept = _parse_member_qualifiers(
+            suffix,
+            module_root=module_root,
+            path=path,
+            module_name=module_name,
+            export_name=f"{cpp_name}.{method_name}",
+            allow_const=True,
+            allow_default=False,
+        )
+        signature = ",".join(parameter.cpp_type for parameter in parameters)
+        method_names[method_name] = declaration[consumed_type].line
+        methods.append(
+            CppMethodSource(
+                provenance=SourceProvenance(
+                    declaration_id=(
+                        f"cpp:{relative}:{cpp_name}.{method_name}({signature})"
+                    ),
+                    language="cpp",
+                    path=relative,
+                    line=stack.first.line,
+                ),
+                cpp_name=method_name,
+                return_type_spelling=return_type,
+                parameters=tuple(
+                    CppParameterSource(parameter.cpp_type, parameter.name)
+                    for parameter in parameters
+                ),
+                intent=intent,
+                access=access,
+                const=is_const,
+                noexcept=is_noexcept,
+            )
+        )
+
+    if not has_user_constructor:
+        constructors.append(
+            CppConstructorSource(
+                provenance=SourceProvenance(
+                    declaration_id=(
+                        f"cpp:{relative}:constructor:{cpp_name}()#implicit"
+                    ),
+                    language="cpp",
+                    path=relative,
+                    line=class_stack.first.line,
+                ),
+                parameters=(),
+                access="public",
+                intent=SourceIntent(DeclarationTarget.CONSTRUCTOR),
+                implicit=True,
+            )
+        )
+    class_source = CppClassSource(
+        provenance=SourceProvenance(
+            declaration_id=f"cpp:{relative}:class:{cpp_name}",
+            language="cpp",
+            path=relative,
+            line=class_stack.first.line,
+        ),
+        cpp_name=cpp_name,
+        include=path.relative_to(source_root).as_posix(),
+        intent=class_intent,
+        constructors=tuple(constructors),
+        methods=tuple(methods),
+        declaration_kind=first.value,
+    )
+    return class_source, consumed
+
+
+def scan_cpp_class_source_model(
+    module_root: Path,
+    *,
+    module_name: str | None = None,
+) -> list[CppClassSource]:
+    source_root = module_root / "android/src/main/cpp"
+    if not source_root.is_dir():
+        raise CodegenError(f"missing C/C++ source directory: {source_root}")
+    _, module_name = _scan_context(module_root, None, module_name)
+    classes: list[CppClassSource] = []
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in CPP_HEADER_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        lexed = _lex_source(text)
+        entries = _marker_entries(module_root, path, lexed, module_name)
+        stacks = _marker_stacks(text, entries)
+        consumed: set[int] = set()
+        for stack in stacks:
+            if stack.first.brace_depth != 0:
+                continue
+            item, item_consumed = _parse_v2_class_source(
+                module_root=module_root,
+                source_root=source_root,
+                path=path,
+                text=text,
+                lexed=lexed,
+                class_stack=stack,
+                stacks=stacks,
+                module_name=module_name,
+            )
+            classes.append(item)
+            consumed.update(item_consumed)
+        for comment, _ in entries:
+            if comment.start not in consumed:
+                raise _source_error(
+                    module_root,
+                    path,
+                    comment.line,
+                    module_name,
+                    None,
+                    "a marked C++ member requires a marked top-level "
+                    "SupernoteExport or SupernoteInternal class",
+                )
+    classes.sort(
+        key=lambda item: (
+            item.provenance.path,
+            item.provenance.line,
+            item.cpp_name,
+        )
+    )
+    return classes
+
+
 def scan_cpp_source_model(
     module_root: Path,
     *,
@@ -1846,6 +2582,9 @@ def scan_cpp_source_model(
                 )
         if suffix not in FORBIDDEN_TAG_SUFFIXES:
             continue
+        if suffix in CPP_HEADER_SUFFIXES:
+            # Header markers are parsed by scan_cpp_class_source_model().
+            continue
         for comment, marker in _marker_entries(
             module_root, path, lexed, module_name
         ):
@@ -1854,12 +2593,6 @@ def scan_cpp_source_model(
                     "direct marked C bindings are unsupported in initial V2; "
                     "use ordinary C23 implementation code behind a canonical "
                     "marked C++ boundary"
-                )
-            elif suffix in CPP_HEADER_SUFFIXES:
-                message = (
-                    f"{marker.value} in a C++ header must mark a supported V2 "
-                    "class, constructor, or member; header binding parsing is "
-                    "not implemented yet"
                 )
             else:
                 message = (
@@ -1936,8 +2669,9 @@ def scan_cpp_semantic_model(
     module_name: str | None = None,
 ) -> SemanticApi:
     try:
-        return project_cpp_functions(
-            scan_cpp_source_model(module_root, module_name=module_name)
+        return project_cpp_api(
+            scan_cpp_source_model(module_root, module_name=module_name),
+            scan_cpp_class_source_model(module_root, module_name=module_name),
         )
     except (CppProjectionError, SourceModelError, ValueError) as exc:
         raise CodegenError(str(exc)) from exc
@@ -2058,6 +2792,18 @@ def scan_sources(
     module_name: str | None = None,
 ) -> list[Export]:
     backend, module_name = _scan_context(module_root, backend, module_name)
+    classes = scan_cpp_class_source_model(module_root, module_name=module_name)
+    if classes:
+        first = classes[0]
+        raise _source_error(
+            module_root,
+            module_root / first.provenance.path,
+            first.provenance.line,
+            module_name,
+            first.cpp_name,
+            "V2 class/member semantics were recognized, but explicit "
+            "HostObject/service lowering is not implemented yet",
+        )
     sources = scan_cpp_source_model(module_root, module_name=module_name)
     try:
         semantics = project_cpp_functions(sources)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Protocol, Tuple
 
 from .semantic import (
     BindingCapabilities,
@@ -10,14 +10,27 @@ from .semantic import (
     DeclarationRole,
     SemanticApi,
     SemanticBinding,
+    SemanticClass,
+    SemanticClassKind,
+    SemanticConstructor,
     SemanticParameter,
     SemanticType,
+    SourceProvenance,
 )
-from .source_models import CppFunctionSource
+from .source_models import (
+    CppClassSource,
+    CppConstructorSource,
+    CppFunctionSource,
+    CppMethodSource,
+)
 
 
 class CppProjectionError(ValueError):
     """A source-located C++ to semantic projection diagnostic."""
+
+
+class _CppDeclaration(Protocol):
+    provenance: SourceProvenance
 
 
 _CPP_TYPES = {
@@ -38,7 +51,7 @@ def canonical_cpp_type(
     spelling: str,
     *,
     result: bool,
-    source: CppFunctionSource,
+    source: _CppDeclaration,
 ) -> SemanticType:
     """Map one exact DR-027 C++ value spelling to a semantic type."""
 
@@ -66,6 +79,10 @@ def semantic_binding_id(source: CppFunctionSource) -> str:
     """Derive a semantic identity without using a JavaScript/public alias."""
 
     return f"supernote:binding:{source.provenance.declaration_id}"
+
+
+def semantic_class_id(source: CppClassSource) -> str:
+    return f"supernote:class:{source.provenance.declaration_id}"
 
 
 def project_cpp_function(
@@ -124,13 +141,211 @@ def project_cpp_functions(sources: Iterable[CppFunctionSource]) -> SemanticApi:
     return SemanticApi(functions=tuple(bindings))
 
 
+def _project_method(
+    source: CppMethodSource,
+    *,
+    owner: CppClassSource,
+    owner_id: str,
+    class_kind: SemanticClassKind,
+) -> SemanticBinding:
+    if source.intent.role is DeclarationRole.ORDINARY:
+        raise _error(source, "ordinary methods do not become semantic bindings")
+    if (
+        class_kind is SemanticClassKind.INTERNAL_SERVICE
+        and source.intent.role is not DeclarationRole.INTERNAL
+    ):
+        raise _error(
+            source,
+            "a SupernoteInternal class may contain only SupernoteInternal "
+            "generated methods",
+        )
+    parameters = tuple(
+        SemanticParameter(
+            parameter.name,
+            canonical_cpp_type(
+                parameter.type_spelling,
+                result=False,
+                source=source,
+            ),
+        )
+        for parameter in source.parameters
+    )
+    result = canonical_cpp_type(
+        source.return_type_spelling,
+        result=True,
+        source=source,
+    )
+    kind = (
+        BindingKind.OBJECT_METHOD
+        if class_kind is SemanticClassKind.JS_OBJECT
+        else BindingKind.SERVICE_METHOD
+    )
+    return SemanticBinding(
+        binding_id=f"supernote:binding:{source.provenance.declaration_id}",
+        kind=kind,
+        name=source.cpp_name,
+        capabilities=BindingCapabilities.for_role(source.intent.role),
+        execution=source.intent.execution,
+        parameters=parameters,
+        result=result,
+        source=source.provenance,
+        owner_id=owner_id,
+        owner_name=owner.cpp_name,
+    )
+
+
+def _constructor_parameters(
+    source: CppConstructorSource,
+) -> Optional[Tuple[SemanticParameter, ...]]:
+    try:
+        return tuple(
+            SemanticParameter(
+                parameter.name,
+                canonical_cpp_type(
+                    parameter.type_spelling,
+                    result=False,
+                    source=source,
+                ),
+            )
+            for parameter in source.parameters
+        )
+    except (CppProjectionError, ValueError):
+        if source.selected:
+            raise
+        return None
+
+
+def _select_js_constructor(
+    source: CppClassSource,
+) -> tuple[CppConstructorSource, Tuple[SemanticParameter, ...]]:
+    eligible = []
+    for constructor in source.constructors:
+        parameters = _constructor_parameters(constructor)
+        if (
+            constructor.access == "public"
+            and not constructor.deleted
+            and parameters is not None
+        ):
+            eligible.append((constructor, parameters))
+        elif constructor.selected:
+            raise _error(
+                constructor,
+                "SupernoteConstructor must select an eligible public, "
+                "non-deleted constructor using canonical V2 value types",
+            )
+    if not eligible:
+        raise _error(
+            source,
+            "a SupernoteExport class requires at least one eligible public "
+            "constructor; returned-only objects are deferred",
+        )
+    selected = [item for item in eligible if item[0].selected]
+    if len(eligible) == 1:
+        if len(selected) > 1:  # pragma: no cover - defensive
+            raise _error(source, "multiple constructors were selected")
+        return selected[0] if selected else eligible[0]
+    if len(selected) != 1:
+        raise _error(
+            source,
+            "multiple eligible constructors require exactly one "
+            "SupernoteConstructor selection",
+        )
+    return selected[0]
+
+
+def _select_service_constructor(
+    source: CppClassSource,
+) -> CppConstructorSource:
+    if any(constructor.selected for constructor in source.constructors):
+        raise _error(
+            source,
+            "SupernoteConstructor does not apply to a SupernoteInternal "
+            "feature service",
+        )
+    eligible = [
+        constructor
+        for constructor in source.constructors
+        if constructor.access == "public"
+        and not constructor.deleted
+        and not constructor.parameters
+    ]
+    if len(eligible) != 1:
+        raise _error(
+            source,
+            "a SupernoteInternal C++ class requires one unambiguous public "
+            "zero-argument construction path",
+        )
+    return eligible[0]
+
+
+def project_cpp_class(source: CppClassSource) -> Optional[SemanticClass]:
+    role = source.intent.role
+    if role is DeclarationRole.ORDINARY:
+        return None
+    if source.provenance.language != "cpp":
+        raise _error(
+            source,
+            f"invalid C++ frontend language {source.provenance.language!r}",
+        )
+    class_kind = (
+        SemanticClassKind.JS_OBJECT
+        if role is DeclarationRole.EXPORTED
+        else SemanticClassKind.INTERNAL_SERVICE
+    )
+    class_id = semantic_class_id(source)
+    if class_kind is SemanticClassKind.JS_OBJECT:
+        constructor_source, constructor_parameters = _select_js_constructor(source)
+    else:
+        constructor_source = _select_service_constructor(source)
+        constructor_parameters = ()
+    methods = tuple(
+        _project_method(
+            method,
+            owner=source,
+            owner_id=class_id,
+            class_kind=class_kind,
+        )
+        for method in source.methods
+        if method.intent.role is not DeclarationRole.ORDINARY
+    )
+    return SemanticClass(
+        class_id=class_id,
+        kind=class_kind,
+        name=source.cpp_name,
+        capabilities=BindingCapabilities.for_role(role),
+        source=source.provenance,
+        constructor=SemanticConstructor(
+            constructor_source.provenance,
+            constructor_parameters,
+        ),
+        methods=methods,
+    )
+
+
+def project_cpp_api(
+    functions: Iterable[CppFunctionSource],
+    classes: Iterable[CppClassSource],
+) -> SemanticApi:
+    bindings = []
+    for source in functions:
+        binding = project_cpp_function(source)
+        if binding is not None:
+            bindings.append(binding)
+    semantic_classes = []
+    for source in classes:
+        semantic_class = project_cpp_class(source)
+        if semantic_class is not None:
+            semantic_classes.append(semantic_class)
+    return SemanticApi(tuple(bindings), tuple(semantic_classes))
+
+
 def cpp_type_table() -> Dict[str, SemanticType]:
     """Return a copy for diagnostics/tests without exposing mutable state."""
 
     return dict(_CPP_TYPES)
 
 
-def _error(source: CppFunctionSource, message: str) -> CppProjectionError:
+def _error(source: _CppDeclaration, message: str) -> CppProjectionError:
     provenance = source.provenance
     return CppProjectionError(
         f"{provenance.path}:{provenance.line}:{provenance.column}: {message}"

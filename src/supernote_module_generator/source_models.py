@@ -150,6 +150,9 @@ class CppConstructorSource:
     access: str
     intent: SourceIntent
     deleted: bool = False
+    explicit: bool = False
+    noexcept: bool = False
+    implicit: bool = False
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.CONSTRUCTOR:
@@ -184,10 +187,13 @@ class CppClassSource:
     intent: SourceIntent
     constructors: Tuple[CppConstructorSource, ...]
     methods: Tuple[CppMethodSource, ...]
+    declaration_kind: str = "class"
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.CLASS:
             raise SourceModelError("a C++ class requires class source intent")
+        if self.declaration_kind not in {"class", "struct"}:
+            raise SourceModelError("a C++ class source kind must be class or struct")
 
 
 class JvmLanguage(str, Enum):

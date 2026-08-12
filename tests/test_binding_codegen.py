@@ -7,7 +7,12 @@ import tempfile
 import unittest
 
 from supernote_module_generator import binding_codegen
-from supernote_module_generator.semantic import DeclarationRole, ExecutionMode
+from supernote_module_generator.semantic import (
+    DeclarationRole,
+    ExecutionMode,
+    SemanticClassKind,
+    SemanticType,
+)
 from supernote_module_generator.source_models import SupernoteMarker
 
 
@@ -256,6 +261,310 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 ):
                     binding_codegen.scan_sources(module)
 
+    def test_cpp_class_source_and_semantic_models_use_explicit_member_intent(self):
+        source = """// @SupernoteExport
+class Document {
+public:
+  Document(std::string path);
+
+  // @SupernoteExport
+  std::int32_t pageCount() const noexcept;
+
+  // @SupernoteInternal
+  // @SupernoteAsync
+  std::vector<std::byte> rebuild(std::int32_t page);
+
+  int unsupportedButOrdinary();
+  static void ordinaryStatic();
+private:
+  void privateHelper();
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            classes = binding_codegen.scan_cpp_class_source_model(module)
+            self.assertEqual(1, len(classes))
+            item = classes[0]
+            self.assertEqual("Document", item.cpp_name)
+            self.assertEqual(DeclarationRole.EXPORTED, item.intent.role)
+            self.assertEqual(1, len(item.constructors))
+            self.assertEqual("std::string", item.constructors[0].parameters[0].type_spelling)
+            self.assertEqual(["pageCount", "rebuild"], [method.cpp_name for method in item.methods])
+            self.assertTrue(item.methods[0].const)
+            self.assertTrue(item.methods[0].noexcept)
+            self.assertEqual(DeclarationRole.INTERNAL, item.methods[1].intent.role)
+            self.assertEqual(ExecutionMode.ASYNC, item.methods[1].intent.execution)
+
+            semantic = binding_codegen.scan_cpp_semantic_model(module)
+            self.assertEqual(1, len(semantic.classes))
+            document = semantic.classes[0]
+            self.assertEqual(SemanticClassKind.JS_OBJECT, document.kind)
+            self.assertEqual(SemanticType.STRING, document.constructor.parameters[0].type)
+            self.assertEqual(["pageCount", "rebuild"], [method.name for method in document.methods])
+            self.assertTrue(document.methods[0].capabilities.javascript_public)
+            self.assertFalse(document.methods[1].capabilities.javascript_public)
+            self.assertEqual(ExecutionMode.ASYNC, document.methods[1].execution)
+
+    def test_cpp_class_constructor_selection_and_implicit_default(self):
+        selected = """// @SupernoteExport
+class Document {
+public:
+  Document(std::string path);
+  // @SupernoteConstructor
+  explicit Document(std::int64_t handle) noexcept;
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, selected)
+            item = binding_codegen.scan_cpp_class_source_model(module)[0]
+            self.assertTrue(item.constructors[1].selected)
+            self.assertTrue(item.constructors[1].explicit)
+            self.assertTrue(item.constructors[1].noexcept)
+            semantic = binding_codegen.scan_cpp_semantic_model(module).classes[0]
+            self.assertEqual(SemanticType.INT64, semantic.constructor.parameters[0].type)
+
+        implicit = """// @SupernoteExport
+struct Page {
+  // @SupernoteExport
+  void refresh();
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, implicit)
+            item = binding_codegen.scan_cpp_class_source_model(module)[0]
+            self.assertTrue(item.constructors[0].implicit)
+            semantic = binding_codegen.scan_cpp_semantic_model(module).classes[0]
+            self.assertEqual((), semantic.constructor.parameters)
+
+    def test_cpp_class_rejects_ambiguous_or_missing_creation_paths(self):
+        cases = (
+            (
+                "ambiguous",
+                """// @SupernoteExport
+class Document {
+public:
+  Document(std::string path);
+  Document(std::int64_t handle);
+};
+""",
+                "multiple eligible constructors require exactly one "
+                "SupernoteConstructor selection",
+            ),
+            (
+                "missing",
+                """// @SupernoteExport
+class Document {
+private:
+  Document();
+};
+""",
+                "requires at least one eligible public constructor",
+            ),
+        )
+        for name, source, diagnostic in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
+                self.write_object_header(module, source)
+                with self.assertRaisesRegex(
+                    binding_codegen.CodegenError,
+                    re.escape(diagnostic),
+                ):
+                    binding_codegen.scan_cpp_semantic_model(module)
+
+    def test_cpp_internal_class_projects_as_feature_service(self):
+        source = """// @SupernoteInternal
+class IndexService {
+public:
+  IndexService();
+
+  // @SupernoteInternal
+  std::int32_t rebuild();
+
+  void ordinaryHelper();
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            service = binding_codegen.scan_cpp_semantic_model(module).classes[0]
+            self.assertEqual(SemanticClassKind.INTERNAL_SERVICE, service.kind)
+            self.assertFalse(service.capabilities.javascript_public)
+            self.assertEqual(["rebuild"], [method.name for method in service.methods])
+            self.assertFalse(service.methods[0].capabilities.javascript_public)
+
+    def test_cpp_class_rejects_invalid_marked_members_and_containment(self):
+        cases = (
+            (
+                "unmarked-class",
+                """class Document {
+public:
+  Document();
+  // @SupernoteExport
+  void refresh();
+};
+""",
+                "requires a marked top-level",
+            ),
+            (
+                "private-method",
+                """// @SupernoteExport
+class Document {
+public:
+  Document();
+private:
+  // @SupernoteExport
+  void refresh();
+};
+""",
+                "generated method must be public",
+            ),
+            (
+                "field",
+                """// @SupernoteExport
+class Document {
+public:
+  Document();
+  // @SupernoteExport
+  std::int32_t pageCount;
+};
+""",
+                "properties, fields",
+            ),
+            (
+                "static",
+                """// @SupernoteExport
+class Document {
+public:
+  Document();
+  // @SupernoteExport
+  static void refresh();
+};
+""",
+                "static methods are deferred",
+            ),
+            (
+                "export-on-internal-service",
+                """// @SupernoteInternal
+class Service {
+public:
+  Service();
+  // @SupernoteExport
+  void refresh();
+};
+""",
+                "may contain only SupernoteInternal",
+            ),
+        )
+        for name, source, diagnostic in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
+                self.write_object_header(module, source)
+                with self.assertRaisesRegex(
+                    binding_codegen.CodegenError,
+                    re.escape(diagnostic),
+                ):
+                    binding_codegen.scan_cpp_semantic_model(module)
+
+    def test_cpp_class_and_member_marker_targets_fail_closed(self):
+        cases = (
+            (
+                "class-role-conflict",
+                """// @SupernoteExport
+// @SupernoteInternal
+class Document { public: Document(); };
+""",
+                "SupernoteExport and SupernoteInternal cannot mark one declaration",
+            ),
+            (
+                "async-class",
+                """// @SupernoteExport
+// @SupernoteAsync
+class Document { public: Document(); };
+""",
+                "SupernoteAsync cannot mark a class",
+            ),
+            (
+                "constructor-on-class",
+                """// @SupernoteConstructor
+class Document { public: Document(); };
+""",
+                "SupernoteConstructor is valid only on a constructor",
+            ),
+            (
+                "async-only-method",
+                """// @SupernoteExport
+class Document {
+public:
+  Document();
+  // @SupernoteAsync
+  void refresh();
+};
+""",
+                "SupernoteAsync requires SupernoteExport or SupernoteInternal",
+            ),
+            (
+                "constructor-on-method",
+                """// @SupernoteExport
+class Document {
+public:
+  Document();
+  // @SupernoteConstructor
+  void refresh();
+};
+""",
+                "SupernoteConstructor is valid only on a constructor",
+            ),
+            (
+                "constructor-on-service",
+                """// @SupernoteInternal
+class Service {
+public:
+  // @SupernoteConstructor
+  Service();
+};
+""",
+                "SupernoteConstructor does not apply to a SupernoteInternal",
+            ),
+            (
+                "two-selected-constructors",
+                """// @SupernoteExport
+class Document {
+public:
+  // @SupernoteConstructor
+  Document(std::string path);
+  // @SupernoteConstructor
+  Document(std::int64_t handle);
+};
+""",
+                "multiple eligible constructors require exactly one",
+            ),
+        )
+        for name, source, diagnostic in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
+                self.write_object_header(module, source)
+                with self.assertRaisesRegex(
+                    binding_codegen.CodegenError,
+                    re.escape(diagnostic),
+                ):
+                    binding_codegen.scan_cpp_semantic_model(module)
+
+    def test_v2_class_lowering_fails_explicitly_until_hostobject_route_lands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                "// @SupernoteExport\nclass Page { public: Page(); };\n",
+            )
+            with self.assertRaisesRegex(
+                binding_codegen.CodegenError,
+                "HostObject/service lowering is not implemented yet",
+            ):
+                binding_codegen.scan_bindings(module)
+
     def test_rejects_marker_in_preprocessor_conditional(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(
@@ -314,10 +623,10 @@ class BindingCodegenScannerTests(unittest.TestCase):
     def test_rejects_markers_in_c_headers_and_helper_suffixes(self):
         cases = {
             ".c": "direct marked C bindings are unsupported in initial V2",
-            ".h": "C++ header must mark a supported V2 class",
-            ".hh": "C++ header must mark a supported V2 class",
-            ".hpp": "C++ header must mark a supported V2 class",
-            ".hxx": "C++ header must mark a supported V2 class",
+            ".h": "class marker stack must be followed by a complete class",
+            ".hh": "class marker stack must be followed by a complete class",
+            ".hpp": "class marker stack must be followed by a complete class",
+            ".hxx": "class marker stack must be followed by a complete class",
             ".inl": "allowed only in .cc, .cpp, or .cxx",
             ".inc": "allowed only in .cc, .cpp, or .cxx",
             ".ipp": "allowed only in .cc, .cpp, or .cxx",
@@ -334,7 +643,10 @@ class BindingCodegenScannerTests(unittest.TestCase):
                     binding_codegen.CodegenError,
                     re.escape(diagnostic),
                 ):
-                    binding_codegen.scan_cpp_source_model(module)
+                    if suffix in {".h", ".hh", ".hpp", ".hxx"}:
+                        binding_codegen.scan_cpp_class_source_model(module)
+                    else:
+                        binding_codegen.scan_cpp_source_model(module)
 
     def test_jni_reserved_names_do_not_apply_to_jsi(self):
         source = (
@@ -993,7 +1305,7 @@ public:
             )
             with self.assertRaisesRegex(
                 binding_codegen.CodegenError,
-                re.escape("C++ header must mark a supported V2 class"),
+                re.escape("class marker stack must be followed by a class"),
             ):
                 binding_codegen.scan_bindings(module)
 
