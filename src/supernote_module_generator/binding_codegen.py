@@ -3951,32 +3951,44 @@ void supernote_reject_new_promise(
 }'''
 
 
-def _jsi_async_registration(
-    module_name: str,
-    export: Export,
+def _jsi_async_host_function(
+    *,
+    js_name: str,
+    diagnostic: str,
+    parameters: tuple[Parameter, ...],
+    return_type: str,
+    call: str,
+    outer_captures: tuple[str, ...] = ("feature_session",),
+    prelude: str = "",
+    executor_captures: tuple[str, ...] = (),
+    worker_captures_extra: tuple[str, ...] = (),
 ) -> str:
     expected_parameters = ", ".join(
         _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
-        for parameter in export.parameters
+        for parameter in parameters
     )
     expected_description = (
-        f"{len(export.parameters)} argument"
-        f"{'' if len(export.parameters) == 1 else 's'}"
+        f"{len(parameters)} argument"
+        f"{'' if len(parameters) == 1 else 's'}"
         f" ({expected_parameters})"
     )
-    diagnostic = f"{module_name}.{export.js_name}"
     validations = [
-        f"          if (argument_count != {len(export.parameters)}) {{",
+        f"          if (argument_count != {len(parameters)}) {{",
         "            supernote_throw_type_error(",
         f"                runtime, std::string({json.dumps(diagnostic + ': expected ' + expected_description + '; received ')}) +",
         "                std::to_string(argument_count));",
         "          }",
     ]
     inputs = []
-    captures = ["feature_session"]
-    worker_captures = ["operation", "operation_id", "weak_feature"]
+    captures = ["feature_session", *executor_captures]
+    worker_captures = [
+        "operation",
+        "operation_id",
+        "weak_feature",
+        *worker_captures_extra,
+    ]
     calls = []
-    for index, parameter in enumerate(export.parameters):
+    for index, parameter in enumerate(parameters):
         validations.extend(
             [
                 f"          if ({_jsi_type_check(parameter, index)}) {{",
@@ -3998,15 +4010,20 @@ def _jsi_async_registration(
         captures.append(f"{name} = std::move({name})")
         worker_captures.append(f"{name} = std::move({name})")
         calls.append(name)
-    call = f"{export.cpp_name}({', '.join(calls)})"
-    if export.return_type == "void":
+    call_expression = call.replace(
+        "__SUPERNOTE_ARGUMENTS__", ", ".join(calls)
+    )
+    if return_type == "void":
         state = (
             "          struct AsyncState {\n"
             "            bool success{false};\n"
             "            std::string error;\n"
             "          };"
         )
-        execution = f"              {call};\n              state->success = true;"
+        execution = (
+            f"              {call_expression};\n"
+            "              state->success = true;"
+        )
         resolution = (
             "                supernote_resolve_operation(\n"
             "                    runtime, operation_id, Value::undefined());"
@@ -4015,27 +4032,30 @@ def _jsi_async_registration(
         state = (
             "          struct AsyncState {\n"
             "            bool success{false};\n"
-            f"            std::optional<{export.return_type}> value;\n"
+            f"            std::optional<{return_type}> value;\n"
             "            std::string error;\n"
             "          };"
         )
-        execution = f"              state->value = {call};\n              state->success = true;"
-        value = _jsi_async_result_value(export.return_type)
+        execution = (
+            f"              state->value = {call_expression};\n"
+            "              state->success = true;"
+        )
+        value = _jsi_async_result_value(return_type)
         resolution = (
             f"                auto value = {value};\n"
             "                supernote_resolve_operation(\n"
             "                    runtime, operation_id, std::move(value));"
         )
-    return f'''  {{
-    auto function = Function::createFromHostFunction(
+    prelude_block = f"{prelude}\n" if prelude else ""
+    return f'''Function::createFromHostFunction(
         runtime,
-        PropNameID::forAscii(runtime, {json.dumps(export.js_name)}),
-        {len(export.parameters)},
-        [feature_session](facebook::jsi::Runtime &runtime,
+        PropNameID::forAscii(runtime, {json.dumps(js_name)}),
+        {len(parameters)},
+        [{', '.join(outer_captures)}](facebook::jsi::Runtime &runtime,
            const Value &,
            const Value *arguments,
            std::size_t argument_count) -> Value {{
-{chr(10).join(validations)}
+{prelude_block}{chr(10).join(validations)}
 {chr(10).join(inputs)}
 {state}
           auto state = std::make_shared<AsyncState>();
@@ -4133,9 +4153,27 @@ def _jsi_async_registration(
           const Value executor_argument(std::move(executor));
           return promise.callAsConstructor(
               runtime, &executor_argument, static_cast<std::size_t>(1));
-        }});
-    exports.setProperty(runtime, {json.dumps(export.js_name)}, std::move(function));
-  }}'''
+        }})'''
+
+
+def _jsi_async_registration(
+    module_name: str,
+    export: Export,
+) -> str:
+    function = _jsi_async_host_function(
+        js_name=export.js_name,
+        diagnostic=f"{module_name}.{export.js_name}",
+        parameters=export.parameters,
+        return_type=export.return_type,
+        call=f"{export.cpp_name}(__SUPERNOTE_ARGUMENTS__)",
+    )
+    return (
+        "  {\n"
+        f"    auto function = {function};\n"
+        f"    exports.setProperty(runtime, {json.dumps(export.js_name)}, "
+        "std::move(function));\n"
+        "  }"
+    )
 
 
 def _jsi_async_result_value(return_type: str) -> str:
@@ -4160,6 +4198,7 @@ def _jsi_object_callable_body(
     call: str,
     return_type: str,
     indent: str,
+    pre_call: tuple[str, ...] = (),
 ) -> str:
     expected_parameters = ", ".join(
         _jsi_expected_type(parameter.cpp_type)
@@ -4203,6 +4242,7 @@ def _jsi_object_callable_body(
                 indent=indent,
             )
         )
+    lines.extend(f"{indent}{line}" for line in pre_call)
     result = _jsi_result_lines(call, return_type, f"{indent}  ")
     lines.extend([f"{indent}try {{", *result])
     lines.extend(
@@ -4233,10 +4273,45 @@ def _jsi_object_wrapper(
     module_name: str,
     item: ObjectExport,
     index: int,
+    *,
+    session_aware: bool,
 ) -> str:
     class_name = f"GeneratedObject{index}HostObject"
     method_branches: list[str] = []
     for method in item.methods:
+        if method.async_:
+            function = _jsi_async_host_function(
+                js_name=method.js_name,
+                diagnostic=(
+                    f"{module_name}.{item.js_name}.{method.js_name}"
+                ),
+                parameters=method.parameters,
+                return_type=method.return_type,
+                call=(
+                    "operation_receiver->"
+                    f"{method.cpp_name}(__SUPERNOTE_ARGUMENTS__)"
+                ),
+                outer_captures=("native_instance", "weak_feature"),
+                prelude=(
+                    "          auto feature_session = weak_feature.lock();\n"
+                    "          auto operation_receiver = native_instance;"
+                ),
+                executor_captures=(
+                    "operation_receiver = std::move(operation_receiver)",
+                ),
+                worker_captures_extra=(
+                    "operation_receiver = std::move(operation_receiver)",
+                ),
+            )
+            method_branches.append(
+                f"    if (property_name == {json.dumps(method.js_name)}) {{\n"
+                f"      std::shared_ptr<{item.cpp_name}> native_instance = instance_;\n"
+                "      std::weak_ptr<supernote::runtime::FeatureSession> "
+                "weak_feature = feature_session_;\n"
+                f"      return {function};\n"
+                "    }"
+            )
+            continue
         arguments = ", ".join(
             _jsi_argument(parameter, number)
             for number, parameter in enumerate(method.parameters)
@@ -4278,10 +4353,24 @@ def _jsi_object_wrapper(
     )
     if not property_names:
         property_names = "    (void)runtime;"
+    if session_aware:
+        constructor = f"""  explicit {class_name}(
+      std::shared_ptr<{item.cpp_name}> instance,
+      std::weak_ptr<supernote::runtime::FeatureSession> feature_session)
+      : instance_(std::move(instance)),
+        feature_session_(std::move(feature_session)) {{}}"""
+        feature_member = (
+            "\n  std::weak_ptr<supernote::runtime::FeatureSession> "
+            "feature_session_;"
+        )
+    else:
+        constructor = f"""  explicit {class_name}(
+      std::shared_ptr<{item.cpp_name}> instance)
+      : instance_(std::move(instance)) {{}}"""
+        feature_member = ""
     return f"""class {class_name} final : public facebook::jsi::HostObject {{
  public:
-  explicit {class_name}(std::shared_ptr<{item.cpp_name}> instance)
-      : instance_(std::move(instance)) {{}}
+{constructor}
 
   facebook::jsi::Value get(
       facebook::jsi::Runtime &runtime,
@@ -4304,7 +4393,7 @@ def _jsi_object_wrapper(
   }}
 
  private:
-  std::shared_ptr<{item.cpp_name}> instance_;
+  std::shared_ptr<{item.cpp_name}> instance_;{feature_member}
 }};"""
 
 
@@ -4312,6 +4401,8 @@ def _jsi_object_registration(
     module_name: str,
     item: ObjectExport,
     index: int,
+    *,
+    session_aware: bool,
 ) -> str:
     arguments = ", ".join(
         _jsi_argument(parameter, number)
@@ -4324,6 +4415,18 @@ def _jsi_object_registration(
         call=native_call,
         return_type="__object_factory__",
         indent="          ",
+        pre_call=(
+            (
+                "auto feature_session = weak_feature.lock();",
+                "if (!feature_session ||",
+                "    feature_session->state() != supernote::runtime::FeatureState::ACTIVE) {",
+                "  supernote_throw_error(",
+                '      runtime, "FEATURE_CLOSED", "feature is closed");',
+                "}",
+            )
+            if session_aware
+            else ()
+        ),
     )
     arguments_parameter = (
         "const Value *arguments"
@@ -4337,7 +4440,15 @@ def _jsi_object_registration(
         "            return Value(Object::createFromHostObject(\n"
         "                runtime,\n"
         f"                std::make_shared<GeneratedObject{index}HostObject>(\n"
-        "                    std::move(native_instance))));",
+        "                    std::move(native_instance)"
+        + (", feature_session" if session_aware else "")
+        + ")));",
+    )
+    factory_capture = (
+        "[weak_feature = std::weak_ptr<supernote::runtime::FeatureSession>(\n"
+        "             feature_session)]"
+        if session_aware
+        else "[]"
     )
     return (
         "  {\n"
@@ -4346,7 +4457,7 @@ def _jsi_object_registration(
         "        runtime,\n"
         "        PropNameID::forAscii(runtime, \"create\"),\n"
         f"        {len(item.constructor.parameters)},\n"
-        "        [](facebook::jsi::Runtime &runtime,\n"
+        f"        {factory_capture}(facebook::jsi::Runtime &runtime,\n"
         "           const Value &,\n"
         f"           {arguments_parameter},\n"
         "           std::size_t argument_count) -> Value {\n"
@@ -4383,7 +4494,12 @@ def _jsi_binding(
     )
     object_include_block = f"{object_includes}\n\n" if object_includes else ""
     object_wrappers = "\n\n".join(
-        _jsi_object_wrapper(module_name, item, index)
+        _jsi_object_wrapper(
+            module_name,
+            item,
+            index,
+            session_aware=feature_id is not None,
+        )
         for index, item in enumerate(objects)
     )
     object_wrapper_block = f"{object_wrappers}\n\n" if object_wrappers else ""
@@ -4480,24 +4596,21 @@ def _jsi_binding(
             "  }"
         )
     registrations.extend(
-        _jsi_object_registration(module_name, item, index)
+        _jsi_object_registration(
+            module_name,
+            item,
+            index,
+            session_aware=feature_id is not None,
+        )
         for index, item in enumerate(objects)
     )
-    async_methods = [
-        method
-        for item in objects
-        for method in item.methods
-        if method.async_
-    ]
-    if async_methods:
-        first = async_methods[0]
-        raise CodegenError(
-            f"{module_name}.{first.js_name}: async C++ object-method lowering "
-            "is recognized but not implemented yet"
-        )
+    has_async_methods = any(
+        method.async_ for item in objects for method in item.methods
+    )
     async_helper_block = (
         _jsi_async_helpers() + "\n\n"
-        if feature_id is not None and any(item.async_ for item in exports)
+        if feature_id is not None
+        and (any(item.async_ for item in exports) or has_async_methods)
         else ""
     )
     namespace_open = (

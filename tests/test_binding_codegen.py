@@ -303,6 +303,43 @@ class BindingCodegenScannerTests(unittest.TestCase):
             self.assertIn("static_cast<std::size_t>(1)", source)
             self.assertNotIn("jsi::Runtime *runtime", source)
 
+    def test_v2_async_object_method_retains_receiver_for_physical_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                """#include <cstddef>
+#include <cstdint>
+#include <vector>
+// @SupernoteExport
+class Document {
+public:
+  Document();
+  // @SupernoteExport
+  // @SupernoteAsync
+  std::vector<std::byte> load(std::int32_t page);
+};
+""",
+            )
+
+            source = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="Files",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
+
+            self.assertIn('getPropertyAsFunction(runtime, "Promise")', source)
+            self.assertIn("auto operation_receiver = native_instance", source)
+            self.assertIn(
+                "operation_receiver = std::move(operation_receiver)", source
+            )
+            self.assertIn("operation_receiver->load(supernote_input_0)", source)
+            self.assertIn("weak_feature = feature_session_", source)
+            self.assertIn("feature_session->accept_factory", source)
+            self.assertNotIn(
+                "async C++ object-method lowering is recognized", source
+            )
+
     def test_cpp_class_source_and_semantic_models_use_explicit_member_intent(self):
         source = """// @SupernoteExport
 class Document {
