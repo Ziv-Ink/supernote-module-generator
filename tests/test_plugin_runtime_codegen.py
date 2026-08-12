@@ -87,6 +87,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "nativeRunJsTask" in bootstrap
     assert "RegisterNatives" in bootstrap
     assert "register_coroutine_bridge(env, class_loader)" in bootstrap
+    assert "configure_worker_threads" in bootstrap
+    assert "AttachCurrentThread" in bootstrap
+    assert "DetachCurrentThread" in bootstrap
     assert "RegisterNatives" not in bootstrap[bootstrap.index("JNI_OnLoad") :]
     assert "JNI_OnLoad" in bootstrap
     assert "install_plugin_bindings" in bootstrap
@@ -222,6 +225,12 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   dropped->winner() != OperationWinner::CANCELLED_BY_RUNTIME) return 6;
 
               BoundedExecutor executor(1, 2);
+              std::atomic<int> worker_initialized{0};
+              std::atomic<int> worker_cleaned{0};
+              executor.set_thread_initializer([&] {
+                ++worker_initialized;
+                return [&] { ++worker_cleaned; };
+              });
               std::mutex mutex;
               std::condition_variable ready;
               bool started = false;
@@ -247,6 +256,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               ready.notify_one();
               executor.shutdown();
               if (second_ran || !second.token().is_cancelled()) return 8;
+              if (worker_initialized != 1 || worker_cleaned != 1) return 20;
 
               std::atomic<int> jvm_completions{0};
               auto completion_id = process_services().register_jvm_async_completion(

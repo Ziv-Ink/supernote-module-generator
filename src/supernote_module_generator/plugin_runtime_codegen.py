@@ -321,6 +321,8 @@ class CancellationSource {
 class BoundedExecutor {
  public:
   using Task = std::function<void(CancellationToken)>;
+  using ThreadInitializer =
+      std::function<std::function<void()>()>;
 
   class WorkHandle {
    public:
@@ -342,6 +344,7 @@ class BoundedExecutor {
   BoundedExecutor &operator=(const BoundedExecutor &) = delete;
 
   WorkHandle submit(Task task);
+  void set_thread_initializer(ThreadInitializer initializer);
   void shutdown() noexcept;
 
  private:
@@ -629,6 +632,8 @@ class ProcessServices {
   ProcessServices &operator=(const ProcessServices &) = delete;
 
   BoundedExecutor &workers() noexcept;
+  void configure_worker_threads(
+      BoundedExecutor::ThreadInitializer initializer);
   std::shared_ptr<DeferredDestruction> cleanup() const noexcept;
   void set_java_vm(void *java_vm) noexcept;
   void *java_vm() const noexcept;
@@ -782,6 +787,7 @@ struct BoundedExecutor::State {
   std::vector<std::thread> workers;
   std::size_t capacity;
   std::uint64_t next_id = 1;
+  ThreadInitializer thread_initializer;
   bool stopped = false;
 };
 
@@ -810,6 +816,8 @@ BoundedExecutor::BoundedExecutor(std::size_t worker_count,
   }
   for (std::size_t index = 0; index < worker_count; ++index) {
     state_->workers.emplace_back([state = state_] {
+      bool thread_initialized = false;
+      std::function<void()> thread_cleanup;
       while (true) {
         State::Item item;
         {
@@ -818,11 +826,27 @@ BoundedExecutor::BoundedExecutor(std::size_t worker_count,
             return state->stopped || !state->queue.empty();
           });
           if (state->queue.empty()) {
-            if (state->stopped) return;
+            if (state->stopped) break;
             continue;
           }
           item = std::move(state->queue.front());
           state->queue.pop_front();
+        }
+        if (!thread_initialized) {
+          ThreadInitializer initializer;
+          {
+            std::lock_guard lock(state->mutex);
+            initializer = state->thread_initializer;
+          }
+          if (initializer) {
+            try {
+              thread_cleanup = initializer();
+              thread_initialized = true;
+            } catch (...) {
+              // A later task may retry initialization. The current task still
+              // owns its normal error/completion path.
+            }
+          }
         }
         if (item.cancellation.token().is_cancelled()) continue;
         try {
@@ -831,6 +855,9 @@ BoundedExecutor::BoundedExecutor(std::size_t worker_count,
           // Generated completion paths translate failures. An escaping task
           // must never terminate the shared executor.
         }
+      }
+      if (thread_cleanup) {
+        try { thread_cleanup(); } catch (...) {}
       }
     });
   }
@@ -866,6 +893,19 @@ BoundedExecutor::WorkHandle BoundedExecutor::submit(Task task) {
   };
   state->ready.notify_one();
   return WorkHandle(std::move(control));
+}
+
+void BoundedExecutor::set_thread_initializer(
+    ThreadInitializer initializer) {
+  if (!initializer) {
+    throw std::invalid_argument("worker thread initializer is required");
+  }
+  auto state = state_;
+  std::lock_guard lock(state->mutex);
+  if (state->stopped) {
+    throw std::runtime_error("executor is stopped");
+  }
+  state->thread_initializer = std::move(initializer);
 }
 
 void BoundedExecutor::shutdown() noexcept {
@@ -1263,6 +1303,11 @@ ProcessServices::~ProcessServices() {
 
 BoundedExecutor &ProcessServices::workers() noexcept { return workers_; }
 
+void ProcessServices::configure_worker_threads(
+    BoundedExecutor::ThreadInitializer initializer) {
+  workers_.set_thread_initializer(std::move(initializer));
+}
+
 std::shared_ptr<DeferredDestruction> ProcessServices::cleanup() const noexcept {
   return cleanup_;
 }
@@ -1505,6 +1550,23 @@ Java_supernote_generated_runtime_SupernoteV2Module_nativeInstall(
     JavaVM *vm = nullptr;
     if (env->GetJavaVM(&vm) != JNI_OK || vm == nullptr) return 0;
     supernote::runtime::process_services().set_java_vm(vm);
+    supernote::runtime::process_services().configure_worker_threads([vm] {{
+      JNIEnv *worker_env = nullptr;
+      bool attached = false;
+      const auto status = vm->GetEnv(
+          reinterpret_cast<void **>(&worker_env), JNI_VERSION_1_6);
+      if (status == JNI_EDETACHED) {{
+        if (vm->AttachCurrentThread(&worker_env, nullptr) != JNI_OK) {{
+          throw std::runtime_error("cannot attach Supernote worker to JavaVM");
+        }}
+        attached = true;
+      }} else if (status != JNI_OK) {{
+        throw std::runtime_error("cannot inspect Supernote worker JVM state");
+      }}
+      return [vm, attached] {{
+        if (attached) vm->DetachCurrentThread();
+      }};
+    }});
     register_coroutine_bridge(env, class_loader);
     auto module_ref = global_ref(env, module);
     auto loader_ref = global_ref(env, class_loader);
