@@ -262,6 +262,7 @@ class Export:
     parameters: tuple[Parameter, ...]
     noexcept: bool = False
     definition_offset: int = -1
+    async_: bool = False
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -300,6 +301,7 @@ class ObjectMethod:
     parameters: tuple[Parameter, ...]
     const: bool = False
     noexcept: bool = False
+    async_: bool = False
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -2686,6 +2688,7 @@ def _lower_sync_export(
     *,
     backend: str,
     module_name: str,
+    allow_async: bool = False,
 ) -> Export:
     path = module_root / source.provenance.path
     name = source.cpp_name
@@ -2699,7 +2702,7 @@ def _lower_sync_export(
             "SupernoteInternal was recognized, but its generated C++ caller "
             "route is not implemented yet",
         )
-    if source.intent.execution is ExecutionMode.ASYNC:
+    if source.intent.execution is ExecutionMode.ASYNC and not allow_async:
         raise _source_error(
             module_root,
             path,
@@ -2791,6 +2794,7 @@ def _lower_sync_export(
         parameters=parameters,
         noexcept=source.noexcept,
         definition_offset=source.definition_offset,
+        async_=source.intent.execution is ExecutionMode.ASYNC,
     )
 
 
@@ -2830,6 +2834,7 @@ def _lower_sync_object(
     source: CppClassSource,
     *,
     module_name: str,
+    allow_async: bool = False,
 ) -> ObjectExport:
     try:
         semantic = project_cpp_api((), (source,)).classes[0]
@@ -2881,7 +2886,7 @@ def _lower_sync_object(
                 "SupernoteInternal object methods were recognized, but their "
                 "receiver-aware internal route is not implemented yet",
             )
-        if method.intent.execution is ExecutionMode.ASYNC:
+        if method.intent.execution is ExecutionMode.ASYNC and not allow_async:
             raise _source_error(
                 module_root,
                 path,
@@ -2919,6 +2924,7 @@ def _lower_sync_object(
                 ),
                 const=method.const,
                 noexcept=method.noexcept,
+                async_=method.intent.execution is ExecutionMode.ASYNC,
             )
         )
     return ObjectExport(
@@ -3080,6 +3086,52 @@ def scan_bindings(
                 "or class in source"
             )
     _validate_typescript_names(objects, resolved_name)
+    return ScannedBindings(tuple(exports), tuple(objects))
+
+
+def scan_v2_bindings(
+    module_root: Path,
+    *,
+    module_name: str,
+) -> ScannedBindings:
+    """Lower the implemented V2 routes without changing the V1 facade."""
+
+    function_sources = scan_cpp_source_model(
+        module_root, module_name=module_name
+    )
+    exports = [
+        _lower_sync_export(
+            module_root,
+            source,
+            backend="jsi",
+            module_name=module_name,
+            allow_async=True,
+        )
+        for source in function_sources
+    ]
+    class_sources = scan_cpp_class_source_model(
+        module_root, module_name=module_name
+    )
+    objects = [
+        _lower_sync_object(
+            module_root,
+            source,
+            module_name=module_name,
+            allow_async=True,
+        )
+        for source in class_sources
+    ]
+    free_names = {export.js_name: export for export in exports}
+    for item in objects:
+        if item.js_name in free_names:
+            first = free_names[item.js_name]
+            raise CodegenError(
+                f"{item.source}:{item.line}: module {module_name!r}, export "
+                f"{item.js_name!r}: JavaScript name collides with free-function "
+                f"export at {first.source}:{first.line}; rename the function "
+                "or class in source"
+            )
+    _validate_typescript_names(objects, module_name)
     return ScannedBindings(tuple(exports), tuple(objects))
 
 
@@ -3808,6 +3860,299 @@ facebook::jsi::Value supernote_make_uint8_array(
 }'''
 
 
+def _jsi_async_helpers() -> str:
+    return r'''constexpr char kPromiseContinuationsGlobal[] =
+    "__supernoteV2PromiseContinuations_a7db36cf3b5e";
+
+facebook::jsi::Object supernote_error_object(
+    facebook::jsi::Runtime &runtime,
+    const char *code,
+    const std::string &message) {
+  auto registry = runtime.global().getPropertyAsObject(
+      runtime, kFeatureRegistryGlobal);
+  auto exports = registry.getPropertyAsObject(runtime, kFeatureId);
+  auto constructor = exports.getPropertyAsFunction(
+      runtime, "__supernoteErrorConstructor");
+  const facebook::jsi::Value arguments[] = {
+      facebook::jsi::String::createFromAscii(runtime, code),
+      facebook::jsi::String::createFromUtf8(runtime, message),
+  };
+  auto error = constructor.callAsConstructor(
+      runtime, arguments, static_cast<std::size_t>(2));
+  return error.getObject(runtime);
+}
+
+facebook::jsi::Object supernote_promise_continuations(
+    facebook::jsi::Runtime &runtime) {
+  auto value = runtime.global().getProperty(
+      runtime, kPromiseContinuationsGlobal);
+  if (value.isObject()) return value.getObject(runtime);
+  facebook::jsi::Object continuations(runtime);
+  runtime.global().setProperty(
+      runtime, kPromiseContinuationsGlobal, continuations);
+  return continuations;
+}
+
+void supernote_register_continuation(
+    facebook::jsi::Runtime &runtime,
+    std::uint64_t operation_id,
+    const facebook::jsi::Value &resolve,
+    const facebook::jsi::Value &reject) {
+  facebook::jsi::Object continuation(runtime);
+  continuation.setProperty(runtime, "resolve", resolve);
+  continuation.setProperty(runtime, "reject", reject);
+  auto continuations = supernote_promise_continuations(runtime);
+  const auto key = std::to_string(operation_id);
+  continuations.setProperty(runtime, key.c_str(), std::move(continuation));
+}
+
+facebook::jsi::Object supernote_take_continuation(
+    facebook::jsi::Runtime &runtime,
+    std::uint64_t operation_id) {
+  auto continuations = supernote_promise_continuations(runtime);
+  const auto key = std::to_string(operation_id);
+  auto value = continuations.getProperty(runtime, key.c_str());
+  if (!value.isObject()) {
+    throw facebook::jsi::JSError(
+        runtime, "Supernote async continuation is unavailable");
+  }
+  auto continuation = value.getObject(runtime);
+  continuations.setProperty(
+      runtime, key.c_str(), facebook::jsi::Value::undefined());
+  return continuation;
+}
+
+void supernote_resolve_operation(
+    facebook::jsi::Runtime &runtime,
+    std::uint64_t operation_id,
+    facebook::jsi::Value value) {
+  auto continuation = supernote_take_continuation(runtime, operation_id);
+  auto resolve = continuation.getPropertyAsFunction(runtime, "resolve");
+  resolve.call(runtime, std::move(value));
+}
+
+void supernote_reject_operation(
+    facebook::jsi::Runtime &runtime,
+    std::uint64_t operation_id,
+    const char *code,
+    const std::string &message) {
+  auto continuation = supernote_take_continuation(runtime, operation_id);
+  auto reject = continuation.getPropertyAsFunction(runtime, "reject");
+  reject.call(runtime, supernote_error_object(runtime, code, message));
+}
+
+void supernote_reject_new_promise(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Value &reject_value,
+    const char *code,
+    const std::string &message) {
+  auto reject = reject_value.getObject(runtime).asFunction(runtime);
+  reject.call(runtime, supernote_error_object(runtime, code, message));
+}'''
+
+
+def _jsi_async_registration(
+    module_name: str,
+    export: Export,
+) -> str:
+    expected_parameters = ", ".join(
+        _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
+        for parameter in export.parameters
+    )
+    expected_description = (
+        f"{len(export.parameters)} argument"
+        f"{'' if len(export.parameters) == 1 else 's'}"
+        f" ({expected_parameters})"
+    )
+    diagnostic = f"{module_name}.{export.js_name}"
+    validations = [
+        f"          if (argument_count != {len(export.parameters)}) {{",
+        "            supernote_throw_type_error(",
+        f"                runtime, std::string({json.dumps(diagnostic + ': expected ' + expected_description + '; received ')}) +",
+        "                std::to_string(argument_count));",
+        "          }",
+    ]
+    inputs = []
+    captures = ["feature_session"]
+    worker_captures = ["operation", "operation_id", "weak_feature"]
+    calls = []
+    for index, parameter in enumerate(export.parameters):
+        validations.extend(
+            [
+                f"          if ({_jsi_type_check(parameter, index)}) {{",
+                "            supernote_throw_type_error(",
+                f"                runtime, {json.dumps(diagnostic + ': argument ' + str(index + 1) + ' (' + parameter.name + ') has the wrong JavaScript type')});",
+                "          }",
+            ]
+        )
+        validations.extend(
+            _jsi_range_validation(
+                parameter,
+                index,
+                diagnostic_name=diagnostic,
+                indent="          ",
+            )
+        )
+        name = f"supernote_input_{index}"
+        inputs.append(f"          auto {name} = {_jsi_argument(parameter, index)};")
+        captures.append(f"{name} = std::move({name})")
+        worker_captures.append(f"{name} = std::move({name})")
+        calls.append(name)
+    call = f"{export.cpp_name}({', '.join(calls)})"
+    if export.return_type == "void":
+        state = (
+            "          struct AsyncState {\n"
+            "            bool success{false};\n"
+            "            std::string error;\n"
+            "          };"
+        )
+        execution = f"              {call};\n              state->success = true;"
+        resolution = (
+            "                supernote_resolve_operation(\n"
+            "                    runtime, operation_id, Value::undefined());"
+        )
+    else:
+        state = (
+            "          struct AsyncState {\n"
+            "            bool success{false};\n"
+            f"            std::optional<{export.return_type}> value;\n"
+            "            std::string error;\n"
+            "          };"
+        )
+        execution = f"              state->value = {call};\n              state->success = true;"
+        value = _jsi_async_result_value(export.return_type)
+        resolution = (
+            f"                auto value = {value};\n"
+            "                supernote_resolve_operation(\n"
+            "                    runtime, operation_id, std::move(value));"
+        )
+    return f'''  {{
+    auto function = Function::createFromHostFunction(
+        runtime,
+        PropNameID::forAscii(runtime, {json.dumps(export.js_name)}),
+        {len(export.parameters)},
+        [feature_session](facebook::jsi::Runtime &runtime,
+           const Value &,
+           const Value *arguments,
+           std::size_t argument_count) -> Value {{
+{chr(10).join(validations)}
+{chr(10).join(inputs)}
+{state}
+          auto state = std::make_shared<AsyncState>();
+          auto executor = Function::createFromHostFunction(
+              runtime,
+              PropNameID::forAscii(runtime, "SupernoteAsyncExecutor"),
+              2,
+              [{', '.join(captures)}, state](
+                  facebook::jsi::Runtime &runtime,
+                  const Value &,
+                  const Value *continuation_arguments,
+                  std::size_t continuation_count) mutable -> Value {{
+                if (continuation_count != 2 ||
+                    !continuation_arguments[0].isObject() ||
+                    !continuation_arguments[1].isObject()) {{
+                  throw facebook::jsi::JSError(
+                      runtime, "Promise supplied invalid continuation functions");
+                }}
+                auto operation = feature_session
+                    ? feature_session->accept_factory(
+                          [](supernote::runtime::SessionId operation_id) {{
+                            return [operation_id](void *runtime_pointer) {{
+                              auto &runtime = *static_cast<facebook::jsi::Runtime *>(
+                                  runtime_pointer);
+                              supernote_reject_operation(
+                                  runtime, operation_id, "FEATURE_CLOSED",
+                                  "feature closed before async completion");
+                            }};
+                          }})
+                    : nullptr;
+                if (!operation) {{
+                  supernote_reject_new_promise(
+                      runtime, continuation_arguments[1], "FEATURE_CLOSED",
+                      "feature is closed");
+                  return Value::undefined();
+                }}
+                const auto operation_id = operation->id();
+                supernote_register_continuation(
+                    runtime, operation_id, continuation_arguments[0],
+                    continuation_arguments[1]);
+                std::weak_ptr<supernote::runtime::FeatureSession> weak_feature =
+                    feature_session;
+                auto work = supernote::runtime::process_services().workers().submit(
+                    [{', '.join(worker_captures)}, state](
+                        supernote::runtime::CancellationToken executor_cancel) mutable {{
+                      if (executor_cancel.is_cancelled() ||
+                          operation->cancellation_token().is_cancelled()) return;
+                      try {{
+{execution}
+                      }} catch (const std::exception &error) {{
+                        state->error = error.what();
+                      }} catch (...) {{
+                        state->error = "unknown C++ implementation failure";
+                      }}
+                      if (executor_cancel.is_cancelled() ||
+                          operation->cancellation_token().is_cancelled()) return;
+                      auto feature = weak_feature.lock();
+                      if (!feature) return;
+                      feature->schedule_completion(
+                          operation,
+                          [state, operation_id](void *runtime_pointer) {{
+                            auto &runtime = *static_cast<facebook::jsi::Runtime *>(
+                                runtime_pointer);
+                            if (!state->success) {{
+                              supernote_reject_operation(
+                                  runtime, operation_id, "IMPLEMENTATION_ERROR",
+                                  state->error.empty()
+                                      ? "C++ implementation failed"
+                                      : state->error);
+                              return;
+                            }}
+                            try {{
+{resolution}
+                            }} catch (const std::exception &error) {{
+                              supernote_reject_operation(
+                                  runtime, operation_id, "INTERNAL", error.what());
+                            }}
+                          }});
+                    }});
+                operation->set_work(work);
+                if (!work.accepted()) {{
+                  feature_session->schedule_completion(
+                      operation,
+                      [operation_id](void *runtime_pointer) {{
+                        auto &runtime = *static_cast<facebook::jsi::Runtime *>(
+                            runtime_pointer);
+                        supernote_reject_operation(
+                            runtime, operation_id, "RESOURCE_EXHAUSTED",
+                            "Supernote worker queue is full");
+                      }});
+                }}
+                return Value::undefined();
+              }});
+          auto promise = runtime.global().getPropertyAsFunction(runtime, "Promise");
+          const Value executor_argument(std::move(executor));
+          return promise.callAsConstructor(
+              runtime, &executor_argument, static_cast<std::size_t>(1));
+        }});
+    exports.setProperty(runtime, {json.dumps(export.js_name)}, std::move(function));
+  }}'''
+
+
+def _jsi_async_result_value(return_type: str) -> str:
+    if return_type == "std::string":
+        return "Value(String::createFromUtf8(runtime, *state->value))"
+    if return_type in {"int64_t", "std::int64_t"}:
+        return (
+            "Value(facebook::jsi::BigInt::fromInt64("
+            "runtime, static_cast<std::int64_t>(*state->value)))"
+        )
+    if return_type == "std::vector<std::byte>":
+        return "supernote_make_uint8_array(runtime, *state->value)"
+    if return_type == "bool":
+        return "Value(*state->value)"
+    return "Value(static_cast<double>(*state->value))"
+
+
 def _jsi_object_callable_body(
     *,
     parameters: tuple[Parameter, ...],
@@ -4044,6 +4389,13 @@ def _jsi_binding(
     object_wrapper_block = f"{object_wrappers}\n\n" if object_wrappers else ""
     registrations: list[str] = []
     for export in exports:
+        if export.async_:
+            if feature_id is None:
+                raise CodegenError(
+                    "V2 async bindings require plugin-level feature lowering"
+                )
+            registrations.append(_jsi_async_registration(module_name, export))
+            continue
         expected_parameters = ", ".join(
             _jsi_expected_type(parameter.cpp_type)
             + f" {parameter.name}"
@@ -4130,6 +4482,23 @@ def _jsi_binding(
     registrations.extend(
         _jsi_object_registration(module_name, item, index)
         for index, item in enumerate(objects)
+    )
+    async_methods = [
+        method
+        for item in objects
+        for method in item.methods
+        if method.async_
+    ]
+    if async_methods:
+        first = async_methods[0]
+        raise CodegenError(
+            f"{module_name}.{first.js_name}: async C++ object-method lowering "
+            "is recognized but not implemented yet"
+        )
+    async_helper_block = (
+        _jsi_async_helpers() + "\n\n"
+        if feature_id is not None and any(item.async_ for item in exports)
+        else ""
     )
     namespace_open = (
         f"namespace supernote::generated::feature_{feature_suffix} {{"
@@ -4283,6 +4652,7 @@ void clear_pending_exception(JNIEnv *env, const char *operation) {
 #include <exception>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4294,6 +4664,8 @@ constexpr char kLogTag[] = "SupernoteJsi{class_prefix}";
 {bootstrap_constants}
 
 {value_helpers}
+
+{async_helper_block}
 
 {object_wrapper_block}{exception_helper}
 void {install_name}(
@@ -4321,11 +4693,7 @@ def render_v2_feature_jsi(
     """Render one feature registration unit without owning plugin bootstrap."""
 
     if (module_root / "android/src/main/cpp").is_dir():
-        bindings = scan_bindings(
-            module_root,
-            backend="jsi",
-            module_name=module_name,
-        )
+        bindings = scan_v2_bindings(module_root, module_name=module_name)
     else:
         bindings = ScannedBindings((), ())
     config: dict[str, object] = {

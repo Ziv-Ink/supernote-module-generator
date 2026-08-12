@@ -460,6 +460,7 @@ class PendingOperation {
   SessionId id() const noexcept;
   OperationWinner winner() const noexcept;
   CancellationToken cancellation_token() const noexcept;
+  void set_work(BoundedExecutor::WorkHandle work) noexcept;
 
  private:
   PendingOperation(SessionId id, TeardownRejection rejection);
@@ -470,6 +471,7 @@ class PendingOperation {
   std::atomic<OperationWinner> winner_{OperationWinner::PENDING};
   CancellationSource cancellation_;
   std::mutex mutex_;
+  BoundedExecutor::WorkHandle work_;
   TeardownRejection rejection_;
   friend class FeatureSession;
 };
@@ -485,6 +487,8 @@ class FeatureSession : public std::enable_shared_from_this<FeatureSession> {
   std::shared_ptr<RuntimeSession> runtime() const noexcept;
   std::shared_ptr<PendingOperation> accept(
       PendingOperation::TeardownRejection rejection);
+  std::shared_ptr<PendingOperation> accept_factory(
+      std::function<PendingOperation::TeardownRejection(SessionId)> factory);
   bool schedule_completion(
       const std::shared_ptr<PendingOperation> &operation,
       RuntimeSession::JsTask completion) noexcept;
@@ -932,6 +936,12 @@ CancellationToken PendingOperation::cancellation_token() const noexcept {
   return cancellation_.token();
 }
 
+void PendingOperation::set_work(BoundedExecutor::WorkHandle work) noexcept {
+  std::lock_guard lock(mutex_);
+  work_ = std::move(work);
+  if (winner() != OperationWinner::PENDING) work_.cancel();
+}
+
 bool PendingOperation::claim(OperationWinner winner) noexcept {
   auto expected = OperationWinner::PENDING;
   if (!winner_.compare_exchange_strong(expected, winner,
@@ -941,6 +951,8 @@ bool PendingOperation::claim(OperationWinner winner) noexcept {
   if (winner == OperationWinner::CANCELLED_BY_FEATURE ||
       winner == OperationWinner::CANCELLED_BY_RUNTIME) {
     cancellation_.request_cancel();
+    std::lock_guard lock(mutex_);
+    work_.cancel();
   }
   return true;
 }
@@ -987,6 +999,21 @@ std::shared_ptr<PendingOperation> FeatureSession::accept(
   }
   auto operation = std::shared_ptr<PendingOperation>(
       new PendingOperation(allocate_session_id(), std::move(rejection)));
+  pending_.emplace(operation->id(), operation);
+  return operation;
+}
+
+std::shared_ptr<PendingOperation> FeatureSession::accept_factory(
+    std::function<PendingOperation::TeardownRejection(SessionId)> factory) {
+  std::lock_guard lock(mutex_);
+  auto runtime = runtime_.lock();
+  if (!factory || state() != FeatureState::ACTIVE || !runtime ||
+      !runtime->active()) {
+    return {};
+  }
+  const auto id = allocate_session_id();
+  auto operation = std::shared_ptr<PendingOperation>(
+      new PendingOperation(id, factory(id)));
   pending_.emplace(operation->id(), operation);
   return operation;
 }

@@ -276,6 +276,33 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 ):
                     binding_codegen.scan_sources(module)
 
+    def test_v2_async_free_function_uses_promise_and_shared_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(
+                Path(directory),
+                backend="jsi",
+                source=(
+                    "// @SupernoteExport\n"
+                    "// @SupernoteAsync\n"
+                    "std::int64_t load(std::string path) { return 42; }\n"
+                ),
+            )
+            source = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="Files",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
+
+            self.assertIn('getPropertyAsFunction(runtime, "Promise")', source)
+            self.assertIn("process_services().workers().submit", source)
+            self.assertIn("accept_factory", source)
+            self.assertIn("schedule_completion", source)
+            self.assertIn('"RESOURCE_EXHAUSTED"', source)
+            self.assertIn("BigInt::fromInt64", source)
+            self.assertIn("operation, operation_id, weak_feature", source)
+            self.assertIn("static_cast<std::size_t>(1)", source)
+            self.assertNotIn("jsi::Runtime *runtime", source)
+
     def test_cpp_class_source_and_semantic_models_use_explicit_member_intent(self):
         source = """// @SupernoteExport
 class Document {
