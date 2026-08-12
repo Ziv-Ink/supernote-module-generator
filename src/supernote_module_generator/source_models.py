@@ -290,6 +290,7 @@ class JvmOwnerSource:
     intent: SourceIntent
     constructors: Tuple[JvmConstructorSource, ...]
     declarations: Tuple[JvmDeclarationSource, ...]
+    visibility: str = "public"
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.CLASS:
