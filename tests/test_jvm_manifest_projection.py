@@ -198,6 +198,27 @@ def test_projection_maps_kotlin_suspend_to_common_semantics_without_losing_route
     assert owner.declarations[0].jvm_descriptor == "(I)[B"
 
 
+def test_kotlin_suspend_route_uses_coroutine_job_and_common_completion():
+    owner = ordinary_kotlin_owner()
+    source = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
+        project_jvm_owners((owner,)),
+        feature_id=FEATURE_ID,
+        module_name="Document",
+    )
+
+    assert "Lkotlinx/coroutines/Job;" in source
+    assert '"SupernoteSuspendExecutor"' in source
+    assert "register_jvm_async_completion" in source
+    assert "discard_jvm_async_completion" in source
+    assert "operation->set_cancel_hook" in source
+    assert '"cancel"' in source
+    assert "CallStaticObjectMethodA" in source
+    assert "process_services().workers().submit" in source
+    assert "schedule_completion" in source
+    assert "runtime_pointer" in source
+
+
 def test_sync_jvm_route_targets_ksp_adapter_and_feature_scoped_owner():
     owner = synchronous_kotlin_owner()
     manifest = JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,))

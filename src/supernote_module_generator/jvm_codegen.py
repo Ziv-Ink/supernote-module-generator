@@ -6,8 +6,10 @@ from typing import Iterable
 
 from .binding_codegen import (
     Parameter,
+    _jsi_argument,
     _jsi_async_helpers,
     _jsi_async_host_function,
+    _jsi_async_result_value,
     _jsi_expected_type,
     _jsi_range_validation,
     _jsi_type_check,
@@ -109,15 +111,17 @@ def render_jvm_feature_jsi(
                 raise _error(declaration, "internal JVM routing is not implemented yet")
             if binding.execution is ExecutionMode.ASYNC:
                 if declaration.is_suspend:
-                    raise _error(
-                        declaration,
-                        "Kotlin suspend routing is recognized but not implemented yet",
+                    registrations.append(
+                        _render_suspend_function(
+                            owner, declaration, binding, module_name
+                        )
                     )
-                registrations.append(
-                    _render_async_function(
-                        owner, declaration, binding, module_name
+                else:
+                    registrations.append(
+                        _render_async_function(
+                            owner, declaration, binding, module_name
+                        )
                     )
-                )
                 has_async = True
                 continue
             if declaration.is_suspend:
@@ -242,9 +246,11 @@ struct JvmRoute {{
 
 class LazyJvmRoute {{
  public:
-  LazyJvmRoute(std::string adapter_class, std::string descriptor)
+  LazyJvmRoute(std::string adapter_class, std::string descriptor,
+               std::string method_name = "invoke")
       : adapter_class_(std::move(adapter_class)),
-        descriptor_(std::move(descriptor)) {{}}
+        descriptor_(std::move(descriptor)),
+        method_name_(std::move(method_name)) {{}}
 
   std::shared_ptr<JvmRoute> get(
       const std::shared_ptr<supernote::runtime::FeatureSession> &feature) {{
@@ -275,7 +281,8 @@ class LazyJvmRoute {{
       throw std::runtime_error("cannot resolve generated JVM adapter class");
     }}
     auto method = env->GetStaticMethodID(
-        static_cast<jclass>(local_class), "invoke", descriptor_.c_str());
+        static_cast<jclass>(local_class), method_name_.c_str(),
+        descriptor_.c_str());
     if (env->ExceptionCheck() || method == nullptr) {{
       clear_exception(env);
       throw std::runtime_error("cannot resolve generated JVM adapter method");
@@ -289,6 +296,7 @@ class LazyJvmRoute {{
   std::mutex mutex_;
   std::string adapter_class_;
   std::string descriptor_;
+  std::string method_name_;
   std::shared_ptr<JvmRoute> route_;
 }};
 
@@ -525,6 +533,287 @@ def _render_async_function(
         + "std::move(function));\n"
         + "  }"
     )
+
+
+def _render_suspend_function(
+    owner: JvmOwnerSource,
+    source: JvmDeclarationSource,
+    binding: SemanticBinding,
+    module_name: str,
+) -> str:
+    takes_owner = owner.form is JvmOwnerForm.CLASS
+    setup = [
+        "    auto route = std::make_shared<LazyJvmRoute>(\n"
+        f"        {json.dumps(_adapter_class(source.adapter_identity))}, "
+        f"{json.dumps(_suspend_adapter_descriptor(binding, owner if takes_owner else None))});",
+        "    auto cancel_route = std::make_shared<LazyJvmRoute>(\n"
+        '        "supernote.generated.runtime.SupernoteCoroutineBridge",\n'
+        '        "(Lkotlinx/coroutines/Job;)V", "cancel");',
+    ]
+    route_captures = ["route", "cancel_route", "feature_session"]
+    owner_setup = ""
+    if takes_owner:
+        constructor = _owner_constructor(owner)
+        setup.append(
+            "    auto owner_route = std::make_shared<LazyJvmRoute>(\n"
+            f"        {json.dumps(_adapter_class(constructor.adapter_identity))}, "
+            f"{json.dumps(_constructor_descriptor(owner))});"
+        )
+        route_captures.append("owner_route")
+        owner_setup = _render_owner_setup(owner).replace(
+            "feature_session", "implementation_feature"
+        )
+    parameters = tuple(
+        Parameter(_CPP_TYPES[item.type], item.name)
+        for item in binding.parameters
+    )
+    validations = _validations(binding, f"{module_name}.{binding.name}")
+    input_names = [f"supernote_input_{index}" for index in range(len(parameters))]
+    inputs = "\n".join(
+        f"          auto {name} = {_jsi_argument(parameter, index)};"
+        for index, (name, parameter) in enumerate(zip(input_names, parameters))
+    )
+    executor_captures = [*route_captures, "state"]
+    executor_captures.extend(
+        f"{name} = std::move({name})" for name in input_names
+    )
+    worker_captures = [
+        "operation",
+        "weak_feature",
+        "route",
+        "cancel_route",
+        "completion_id",
+    ]
+    if takes_owner:
+        worker_captures.append("owner_route")
+    worker_captures.extend(
+        f"{name} = std::move({name})" for name in input_names
+    )
+    result_type = (
+        None
+        if binding.result is SemanticType.VOID
+        else _CPP_TYPES[binding.result]
+    )
+    state_value = (
+        ""
+        if result_type is None
+        else f"            std::optional<{result_type}> value;\n"
+    )
+    result_read = _suspend_result_read(binding.result)
+    if binding.result is SemanticType.VOID:
+        resolution = (
+            "                supernote_resolve_operation(\n"
+            "                    runtime, operation_id, Value::undefined());"
+        )
+    else:
+        resolution = (
+            f"                auto value = {_jsi_async_result_value(result_type)};\n"
+            "                supernote_resolve_operation(\n"
+            "                    runtime, operation_id, std::move(value));"
+        )
+    offset = 1 if takes_owner else 0
+    argument_count = len(binding.parameters) + offset + 1
+    jvm_arguments = []
+    if takes_owner:
+        jvm_arguments.append(
+            "              jvm_arguments[0].l = "
+            "static_cast<jobject>(owner->value.get());"
+        )
+    jvm_arguments.extend(
+        _owned_argument_lines(
+            binding.parameters,
+            offset,
+            "              ",
+            names=input_names,
+        )
+    )
+    jvm_arguments.append(
+        f"              jvm_arguments[{argument_count - 1}].j = "
+        "static_cast<jlong>(completion_id);"
+    )
+    return f'''  {{
+{chr(10).join(setup)}
+    auto function = Function::createFromHostFunction(
+        runtime,
+        PropNameID::forAscii(runtime, {json.dumps(binding.name)}),
+        {len(binding.parameters)},
+        [{', '.join(route_captures)}](facebook::jsi::Runtime &runtime,
+           const Value &,
+           const Value *arguments,
+           std::size_t argument_count) -> Value {{
+{validations}
+{inputs}
+          struct SuspendState {{
+            bool success{{false}};
+{state_value}            std::string code;
+            std::string error;
+          }};
+          auto state = std::make_shared<SuspendState>();
+          auto executor = Function::createFromHostFunction(
+              runtime,
+              PropNameID::forAscii(runtime, "SupernoteSuspendExecutor"),
+              2,
+              [{', '.join(executor_captures)}](
+                  facebook::jsi::Runtime &runtime,
+                  const Value &,
+                  const Value *continuation_arguments,
+                  std::size_t continuation_count) mutable -> Value {{
+                if (continuation_count != 2 ||
+                    !continuation_arguments[0].isObject() ||
+                    !continuation_arguments[1].isObject()) {{
+                  throw facebook::jsi::JSError(
+                      runtime, "Promise supplied invalid continuation functions");
+                }}
+                auto operation = feature_session
+                    ? feature_session->accept_factory(
+                          [](supernote::runtime::SessionId operation_id) {{
+                            return [operation_id](void *runtime_pointer) {{
+                              auto &runtime = *static_cast<facebook::jsi::Runtime *>(
+                                  runtime_pointer);
+                              supernote_reject_operation(
+                                  runtime, operation_id, "FEATURE_CLOSED",
+                                  "feature closed before async completion");
+                            }};
+                          }})
+                    : nullptr;
+                if (!operation) {{
+                  supernote_reject_new_promise(
+                      runtime, continuation_arguments[1], "FEATURE_CLOSED",
+                      "feature is closed");
+                  return Value::undefined();
+                }}
+                const auto operation_id = operation->id();
+                supernote_register_continuation(
+                    runtime, operation_id, continuation_arguments[0],
+                    continuation_arguments[1]);
+                std::weak_ptr<supernote::runtime::FeatureSession> weak_feature =
+                    feature_session;
+                const auto completion_id =
+                    supernote::runtime::process_services()
+                        .register_jvm_async_completion(
+                            [operation, operation_id, weak_feature, state](
+                                void *environment, void *result,
+                                std::string error_code,
+                                std::string error_message) {{
+                              if (operation->cancellation_token().is_cancelled()) return;
+                              if (!error_code.empty()) {{
+                                state->code = std::move(error_code);
+                                state->error = std::move(error_message);
+                              }} else {{
+                                try {{
+{result_read}
+                                  state->success = true;
+                                }} catch (const std::exception &error) {{
+                                  state->code = "INTERNAL";
+                                  state->error = error.what();
+                                }} catch (...) {{
+                                  state->code = "INTERNAL";
+                                  state->error = "cannot decode Kotlin coroutine result";
+                                }}
+                              }}
+                              if (operation->cancellation_token().is_cancelled()) return;
+                              auto feature = weak_feature.lock();
+                              if (!feature) return;
+                              feature->schedule_completion(
+                                  operation,
+                                  [state, operation_id](void *runtime_pointer) {{
+                                    auto &runtime = *static_cast<facebook::jsi::Runtime *>(
+                                        runtime_pointer);
+                                    if (!state->success) {{
+                                      supernote_reject_operation(
+                                          runtime, operation_id,
+                                          state->code.empty()
+                                              ? "INTERNAL"
+                                              : state->code.c_str(),
+                                          state->error.empty()
+                                              ? "Kotlin coroutine failed"
+                                              : state->error);
+                                      return;
+                                    }}
+                                    try {{
+{resolution}
+                                    }} catch (const std::exception &error) {{
+                                      supernote_reject_operation(
+                                          runtime, operation_id, "INTERNAL", error.what());
+                                    }}
+                                  }});
+                            }});
+                operation->set_cancel_hook([completion_id] {{
+                  supernote::runtime::process_services()
+                      .discard_jvm_async_completion(completion_id);
+                }});
+                auto work = supernote::runtime::process_services().workers().submit(
+                    [{', '.join(worker_captures)}](
+                        supernote::runtime::CancellationToken executor_cancel) mutable {{
+                      if (executor_cancel.is_cancelled() ||
+                          operation->cancellation_token().is_cancelled()) return;
+                      auto implementation_feature = weak_feature.lock();
+                      if (!implementation_feature ||
+                          implementation_feature->state() !=
+                              supernote::runtime::FeatureState::ACTIVE) return;
+                      try {{
+{owner_setup}              auto resolved = route->get(implementation_feature);
+                        auto cancel_resolved = cancel_route->get(
+                            implementation_feature);
+                        AttachedEnv attached;
+                        auto *env = attached.get();
+                        if (env == nullptr) {{
+                          throw std::runtime_error("cannot attach to JavaVM");
+                        }}
+                        LocalFrame frame(env);
+                        jvalue jvm_arguments[{max(1, argument_count)}]{{}};
+{chr(10).join(jvm_arguments)}
+                        auto local_job = env->CallStaticObjectMethodA(
+                            static_cast<jclass>(resolved->adapter_class.get()),
+                            resolved->method, jvm_arguments);
+                        if (env->ExceptionCheck() || local_job == nullptr) {{
+                          clear_exception(env);
+                          throw std::runtime_error(
+                              "cannot launch generated Kotlin coroutine adapter");
+                        }}
+                        auto job = retain_global(env, local_job);
+                        operation->set_cancel_hook(
+                            [completion_id, job, cancel_resolved] {{
+                              supernote::runtime::process_services()
+                                  .discard_jvm_async_completion(completion_id);
+                              try {{
+                                AttachedEnv attached;
+                                auto *env = attached.get();
+                                if (env == nullptr) return;
+                                LocalFrame frame(env);
+                                jvalue arguments[1]{{}};
+                                arguments[0].l = static_cast<jobject>(job.get());
+                                env->CallStaticVoidMethodA(
+                                    static_cast<jclass>(
+                                        cancel_resolved->adapter_class.get()),
+                                    cancel_resolved->method, arguments);
+                                clear_exception(env);
+                              }} catch (...) {{}}
+                            }});
+                      }} catch (const std::exception &error) {{
+                        supernote::runtime::process_services().complete_jvm_async(
+                            completion_id, nullptr, nullptr, "INTERNAL", error.what());
+                      }} catch (...) {{
+                        supernote::runtime::process_services().complete_jvm_async(
+                            completion_id, nullptr, nullptr, "INTERNAL",
+                            "cannot launch Kotlin coroutine adapter");
+                      }}
+                    }});
+                operation->set_work(work);
+                if (!work.accepted()) {{
+                  supernote::runtime::process_services().complete_jvm_async(
+                      completion_id, nullptr, nullptr, "RESOURCE_EXHAUSTED",
+                      "Supernote worker queue is full");
+                }}
+                return Value::undefined();
+              }});
+          auto promise = runtime.global().getPropertyAsFunction(runtime, "Promise");
+          const Value executor_argument(std::move(executor));
+          return promise.callAsConstructor(
+              runtime, &executor_argument, static_cast<std::size_t>(1));
+        }});
+    exports.setProperty(runtime, {json.dumps(binding.name)}, std::move(function));
+  }}'''
 
 
 def _render_async_object_method(
@@ -985,12 +1274,100 @@ def _worker_invocation(
     return "\n".join(lines)
 
 
-def _owned_argument_lines(parameters, offset: int, indent: str) -> list[str]:
+def _suspend_result_read(result: SemanticType) -> str:
+    indent = " " * 34
+    if result is SemanticType.VOID:
+        return (
+            f"{indent}(void)environment;\n"
+            f"{indent}(void)result;"
+        )
+    lines = [
+        f"{indent}auto *env = static_cast<JNIEnv *>(environment);",
+        f"{indent}auto object = static_cast<jobject>(result);",
+        f"{indent}if (env == nullptr || object == nullptr) {{",
+        f'{indent}  throw std::runtime_error("Kotlin coroutine returned null");',
+        f"{indent}}}",
+        f"{indent}LocalFrame frame(env);",
+    ]
+    if result in {SemanticType.STRING, SemanticType.BYTES}:
+        lines.append(
+            f"{indent}const auto bytes = read_byte_array("
+            "env, static_cast<jbyteArray>(object));"
+        )
+        if result is SemanticType.STRING:
+            lines.append(
+                f"{indent}state->value = std::string("
+                "reinterpret_cast<const char *>(bytes.data()), bytes.size());"
+            )
+        else:
+            lines.append(f"{indent}state->value = bytes;")
+        return "\n".join(lines)
+    method, descriptor, call, conversion = {
+        SemanticType.BOOL: (
+            "booleanValue",
+            "()Z",
+            "CallBooleanMethod",
+            "value == JNI_TRUE",
+        ),
+        SemanticType.INT32: (
+            "intValue",
+            "()I",
+            "CallIntMethod",
+            "static_cast<std::int32_t>(value)",
+        ),
+        SemanticType.INT64: (
+            "longValue",
+            "()J",
+            "CallLongMethod",
+            "static_cast<std::int64_t>(value)",
+        ),
+        SemanticType.FLOAT32: (
+            "floatValue",
+            "()F",
+            "CallFloatMethod",
+            "static_cast<float>(value)",
+        ),
+        SemanticType.FLOAT64: (
+            "doubleValue",
+            "()D",
+            "CallDoubleMethod",
+            "static_cast<double>(value)",
+        ),
+    }[result]
+    lines.extend(
+        [
+            f"{indent}auto value_class = env->GetObjectClass(object);",
+            f"{indent}auto unbox = value_class == nullptr",
+            f"{indent}    ? nullptr",
+            f"{indent}    : env->GetMethodID(value_class, {json.dumps(method)},",
+            f"{indent}                       {json.dumps(descriptor)});",
+            f"{indent}if (unbox == nullptr) {{",
+            f"{indent}  clear_exception(env);",
+            f'{indent}  throw std::runtime_error("cannot unbox Kotlin coroutine result");',
+            f"{indent}}}",
+            f"{indent}auto value = env->{call}(object, unbox);",
+            f"{indent}if (env->ExceptionCheck()) {{",
+            f"{indent}  clear_exception(env);",
+            f'{indent}  throw std::runtime_error("cannot read Kotlin coroutine result");',
+            f"{indent}}}",
+            f"{indent}state->value = {conversion};",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _owned_argument_lines(
+    parameters,
+    offset: int,
+    indent: str,
+    *,
+    names: list[str] | None = None,
+) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(parameters):
         target = index + offset
         field = _JNI_FIELDS[item.type]
-        name = item.name
+        name = names[index] if names is not None else item.name
         if item.type is SemanticType.BOOL:
             value = f"{name} ? JNI_TRUE : JNI_FALSE"
         elif item.type is SemanticType.INT32:
@@ -1109,6 +1486,19 @@ def _adapter_descriptor(
         parameters += f"L{owner.owner_class.replace('.', '/')};"
     parameters += "".join(_JNI_DESCRIPTOR[item.type] for item in binding.parameters)
     return f"({parameters}){_JNI_DESCRIPTOR[binding.result]}"
+
+
+def _suspend_adapter_descriptor(
+    binding: SemanticBinding, owner: JvmOwnerSource | None
+) -> str:
+    parameters = ""
+    if owner is not None:
+        parameters += f"L{owner.owner_class.replace('.', '/')};"
+    parameters += "".join(
+        _JNI_DESCRIPTOR[item.type] for item in binding.parameters
+    )
+    parameters += "J"
+    return f"({parameters})Lkotlinx/coroutines/Job;"
 
 
 def _constructor_descriptor(owner: JvmOwnerSource) -> str:

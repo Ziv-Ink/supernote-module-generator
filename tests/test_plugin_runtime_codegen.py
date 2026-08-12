@@ -78,7 +78,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "nativeInstall" in bootstrap
     assert "nativeInvalidate" in bootstrap
     assert "nativeRunJsTask" in bootstrap
-    assert "RegisterNatives" not in bootstrap
+    assert "RegisterNatives" in bootstrap
+    assert "register_coroutine_bridge(env, class_loader)" in bootstrap
+    assert "RegisterNatives" not in bootstrap[bootstrap.index("JNI_OnLoad") :]
     assert "JNI_OnLoad" in bootstrap
     assert "install_plugin_bindings" in bootstrap
     assert "runOnJSQueueThread" in module
@@ -174,9 +176,11 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               auto feature = FeatureSession::create(runtime, cleanup);
               std::atomic<int> resolved{0};
               std::atomic<int> rejected{0};
+              std::atomic<int> cancelled{0};
               auto operation = feature->accept(
                   [&](void *) { ++rejected; });
               if (!operation || operation->cancellation_token().is_cancelled()) return 1;
+              operation->set_cancel_hook([&] { ++cancelled; });
               if (!feature->schedule_completion(
                       operation, [&](void *) { ++resolved; })) return 2;
               feature->close_feature();
@@ -184,7 +188,8 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               for (auto &task : js_queue) task(&fake_runtime);
               if (resolved != 0 || rejected != 1) return 3;
               if (operation->winner() != OperationWinner::CANCELLED_BY_FEATURE ||
-                  !operation->cancellation_token().is_cancelled()) return 4;
+                  !operation->cancellation_token().is_cancelled() ||
+                  cancelled != 1) return 4;
 
               js_queue.clear();
               auto replacement = RuntimeSession::create(
@@ -225,6 +230,29 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               ready.notify_one();
               executor.shutdown();
               if (second_ran || !second.token().is_cancelled()) return 8;
+
+              std::atomic<int> jvm_completions{0};
+              auto completion_id = process_services().register_jvm_async_completion(
+                  [&](void *, void *, std::string code, std::string message) {
+                    if (code == "IMPLEMENTATION_ERROR" && message == "failed") {
+                      ++jvm_completions;
+                    }
+                  });
+              process_services().complete_jvm_async(
+                  completion_id, nullptr, nullptr,
+                  "IMPLEMENTATION_ERROR", "failed");
+              process_services().complete_jvm_async(
+                  completion_id, nullptr, nullptr,
+                  "IMPLEMENTATION_ERROR", "again");
+              if (jvm_completions != 1) return 12;
+              auto discarded = process_services().register_jvm_async_completion(
+                  [&](void *, void *, std::string, std::string) {
+                    ++jvm_completions;
+                  });
+              if (!process_services().discard_jvm_async_completion(discarded)) return 13;
+              process_services().complete_jvm_async(
+                  discarded, nullptr, nullptr, "", "");
+              if (jvm_completions != 1) return 14;
 
               std::promise<std::thread::id> destroyed;
               auto destroyed_future = destroyed.get_future();

@@ -433,6 +433,7 @@ private fun adapterSource(owners: List<OwnerFact>): String = buildString {
   appendLine("package supernote.generated.adapters")
   appendLine()
   appendLine("import com.facebook.react.bridge.ReactApplicationContext")
+  appendLine("import supernote.generated.runtime.SupernoteCoroutineBridge")
   appendLine()
   owners.forEach { owner ->
     owner.constructors.filter { it.visibility == "public" }.forEach { constructor ->
@@ -455,7 +456,7 @@ private fun adapterSource(owners: List<OwnerFact>): String = buildString {
       appendLine("}")
       appendLine()
     }
-    owner.declarations.filterNot { it.suspend }.forEach { declaration ->
+    owner.declarations.forEach { declaration ->
       appendLine("object ${adapterClass(declaration.adapterIdentity)} {")
       val takesOwner = owner.form == "class"
       val parameters = mutableListOf<String>()
@@ -463,8 +464,14 @@ private fun adapterSource(owners: List<OwnerFact>): String = buildString {
       parameters += declaration.parameters.mapIndexed { index, parameter ->
         "arg$index: ${adapterType(parameter.jvmType)}"
       }
+      if (declaration.suspend) parameters += "completionToken: Long"
       appendLine("  @JvmStatic")
-      append("  fun invoke(${parameters.joinToString(", ")}): ${adapterType(declaration.result)} ")
+      val adapterResult = if (declaration.suspend) {
+        "kotlinx.coroutines.Job"
+      } else {
+        adapterType(declaration.result)
+      }
+      append("  fun invoke(${parameters.joinToString(", ")}): $adapterResult ")
       val arguments = declaration.parameters.mapIndexed { index, parameter ->
         adapterInput(parameter.jvmType, "arg$index")
       }.joinToString(", ")
@@ -480,10 +487,21 @@ private fun adapterSource(owners: List<OwnerFact>): String = buildString {
         else -> error("Unsupported JVM owner form ${owner.form}")
       }
       val call = "$target($arguments)"
-      when (declaration.result) {
-        "kotlin.Unit", "void" -> appendLine("{ $call }")
-        "kotlin.String", "java.lang.String" -> appendLine("= $call.encodeToByteArray()")
-        else -> appendLine("= $call")
+      if (declaration.suspend) {
+        appendLine("= SupernoteCoroutineBridge.launch(completionToken) {")
+        when (declaration.result) {
+          "kotlin.Unit", "void" -> appendLine("    $call; null")
+          "kotlin.String", "java.lang.String" ->
+            appendLine("    $call.encodeToByteArray()")
+          else -> appendLine("    $call")
+        }
+        appendLine("  }")
+      } else {
+        when (declaration.result) {
+          "kotlin.Unit", "void" -> appendLine("{ $call }")
+          "kotlin.String", "java.lang.String" -> appendLine("= $call.encodeToByteArray()")
+          else -> appendLine("= $call")
+        }
       }
       appendLine("}")
       appendLine()

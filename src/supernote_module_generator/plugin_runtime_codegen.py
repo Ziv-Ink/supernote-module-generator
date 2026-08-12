@@ -156,6 +156,7 @@ android {{
 
 dependencies {{
     implementation('com.facebook.react:react-android')
+    implementation('org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1')
     compileOnly project(':supernote-v2-annotations')
     ksp project(':supernote-v2-processor')
 }}
@@ -461,6 +462,7 @@ class PendingOperation {
   OperationWinner winner() const noexcept;
   CancellationToken cancellation_token() const noexcept;
   void set_work(BoundedExecutor::WorkHandle work) noexcept;
+  void set_cancel_hook(std::function<void()> hook) noexcept;
 
  private:
   PendingOperation(SessionId id, TeardownRejection rejection);
@@ -472,6 +474,7 @@ class PendingOperation {
   CancellationSource cancellation_;
   std::mutex mutex_;
   BoundedExecutor::WorkHandle work_;
+  std::function<void()> cancel_hook_;
   TeardownRejection rejection_;
   friend class FeatureSession;
 };
@@ -599,6 +602,10 @@ class FeatureSession : public std::enable_shared_from_this<FeatureSession> {
 
 class ProcessServices {
  public:
+  using JvmAsyncCompletion =
+      std::function<void(void *environment, void *result,
+                         std::string error_code, std::string failure)>;
+
   ProcessServices();
   ~ProcessServices();
   ProcessServices(const ProcessServices &) = delete;
@@ -608,11 +615,18 @@ class ProcessServices {
   std::shared_ptr<DeferredDestruction> cleanup() const noexcept;
   void set_java_vm(void *java_vm) noexcept;
   void *java_vm() const noexcept;
+  SessionId register_jvm_async_completion(JvmAsyncCompletion completion);
+  bool discard_jvm_async_completion(SessionId completion_id) noexcept;
+  void complete_jvm_async(SessionId completion_id, void *environment,
+                          void *result, std::string error_code,
+                          std::string failure) noexcept;
 
  private:
   BoundedExecutor workers_;
   std::shared_ptr<DeferredDestruction> cleanup_;
   std::atomic<void *> java_vm_{nullptr};
+  std::mutex jvm_async_mutex_;
+  std::unordered_map<SessionId, JvmAsyncCompletion> jvm_async_completions_;
 };
 
 ProcessServices &process_services() noexcept;
@@ -942,6 +956,24 @@ void PendingOperation::set_work(BoundedExecutor::WorkHandle work) noexcept {
   if (winner() != OperationWinner::PENDING) work_.cancel();
 }
 
+void PendingOperation::set_cancel_hook(std::function<void()> hook) noexcept {
+  if (!hook) return;
+  bool run_now = false;
+  {
+    std::lock_guard lock(mutex_);
+    const auto current = winner();
+    if (current == OperationWinner::PENDING) {
+      cancel_hook_ = std::move(hook);
+      return;
+    }
+    run_now = current == OperationWinner::CANCELLED_BY_FEATURE ||
+        current == OperationWinner::CANCELLED_BY_RUNTIME;
+  }
+  if (run_now) {
+    try { hook(); } catch (...) {}
+  }
+}
+
 bool PendingOperation::claim(OperationWinner winner) noexcept {
   auto expected = OperationWinner::PENDING;
   if (!winner_.compare_exchange_strong(expected, winner,
@@ -951,8 +983,18 @@ bool PendingOperation::claim(OperationWinner winner) noexcept {
   if (winner == OperationWinner::CANCELLED_BY_FEATURE ||
       winner == OperationWinner::CANCELLED_BY_RUNTIME) {
     cancellation_.request_cancel();
+    std::function<void()> hook;
+    {
+      std::lock_guard lock(mutex_);
+      work_.cancel();
+      hook = std::move(cancel_hook_);
+    }
+    if (hook) {
+      try { hook(); } catch (...) {}
+    }
+  } else if (winner == OperationWinner::COMPLETING) {
     std::lock_guard lock(mutex_);
-    work_.cancel();
+    cancel_hook_ = {};
   }
   return true;
 }
@@ -1113,6 +1155,44 @@ void *ProcessServices::java_vm() const noexcept {
   return java_vm_.load(std::memory_order_acquire);
 }
 
+SessionId ProcessServices::register_jvm_async_completion(
+    JvmAsyncCompletion completion) {
+  if (!completion) {
+    throw std::invalid_argument("JVM async completion is required");
+  }
+  const auto id = allocate_session_id();
+  std::lock_guard lock(jvm_async_mutex_);
+  jvm_async_completions_.emplace(id, std::move(completion));
+  return id;
+}
+
+bool ProcessServices::discard_jvm_async_completion(
+    SessionId completion_id) noexcept {
+  std::lock_guard lock(jvm_async_mutex_);
+  return jvm_async_completions_.erase(completion_id) != 0;
+}
+
+void ProcessServices::complete_jvm_async(
+    SessionId completion_id,
+    void *environment,
+    void *result,
+    std::string error_code,
+    std::string failure) noexcept {
+  JvmAsyncCompletion completion;
+  {
+    std::lock_guard lock(jvm_async_mutex_);
+    auto found = jvm_async_completions_.find(completion_id);
+    if (found == jvm_async_completions_.end()) return;
+    completion = std::move(found->second);
+    jvm_async_completions_.erase(found);
+  }
+  try {
+    completion(environment, result, std::move(error_code), std::move(failure));
+  } catch (...) {
+    // Native-async completion must never unwind through JNI/coroutine code.
+  }
+}
+
 ProcessServices &process_services() noexcept {
   static ProcessServices services;
   return services;
@@ -1189,6 +1269,57 @@ void clear_exception(JNIEnv *env, const char *operation) {{
   env->ExceptionClear();
 }}
 
+std::string java_string(JNIEnv *env, jstring value) {{
+  if (env == nullptr || value == nullptr) return {{}};
+  const char *characters = env->GetStringUTFChars(value, nullptr);
+  if (characters == nullptr) {{
+    clear_exception(env, "read coroutine failure");
+    return "Kotlin coroutine implementation failed";
+  }}
+  std::string result(characters);
+  env->ReleaseStringUTFChars(value, characters);
+  return result;
+}}
+
+void native_coroutine_complete(
+    JNIEnv *env, jclass, jlong completion_id, jobject result,
+    jstring failure, jboolean cancelled) {{
+  supernote::runtime::process_services().complete_jvm_async(
+      static_cast<supernote::runtime::SessionId>(completion_id), env, result,
+      cancelled == JNI_TRUE
+          ? "CANCELLED"
+          : (failure == nullptr ? "" : "IMPLEMENTATION_ERROR"),
+      java_string(env, failure));
+}}
+
+void register_coroutine_bridge(JNIEnv *env, jobject class_loader) {{
+  auto loader_class = env->GetObjectClass(class_loader);
+  auto load_class = loader_class == nullptr
+      ? nullptr
+      : env->GetMethodID(
+            loader_class, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+  auto name = env->NewStringUTF(
+      "supernote.generated.runtime.SupernoteCoroutineBridge");
+  auto bridge = load_class == nullptr || name == nullptr
+      ? nullptr
+      : env->CallObjectMethod(class_loader, load_class, name);
+  if (env->ExceptionCheck() || bridge == nullptr) {{
+    clear_exception(env, "load coroutine bridge");
+    throw std::runtime_error("generated coroutine bridge is unavailable");
+  }}
+  JNINativeMethod methods[] = {{
+      {{const_cast<char *>("nativeComplete"),
+        const_cast<char *>("(JLjava/lang/Object;Ljava/lang/String;Z)V"),
+        reinterpret_cast<void *>(&native_coroutine_complete)}},
+  }};
+  if (env->RegisterNatives(
+          static_cast<jclass>(bridge), methods,
+          static_cast<jint>(sizeof(methods) / sizeof(methods[0]))) != JNI_OK) {{
+    clear_exception(env, "register coroutine bridge");
+    throw std::runtime_error("cannot register coroutine bridge natives");
+  }}
+}}
+
 std::shared_ptr<void> global_ref(JNIEnv *env, jobject value) {{
   if (env == nullptr || value == nullptr) return {{}};
   auto *global = env->NewGlobalRef(value);
@@ -1254,6 +1385,7 @@ Java_supernote_generated_runtime_SupernoteV2Module_nativeInstall(
     JavaVM *vm = nullptr;
     if (env->GetJavaVM(&vm) != JNI_OK || vm == nullptr) return 0;
     supernote::runtime::process_services().set_java_vm(vm);
+    register_coroutine_bridge(env, class_loader);
     auto module_ref = global_ref(env, module);
     auto loader_ref = global_ref(env, class_loader);
     auto context_ref = global_ref(env, platform_context);
@@ -1364,6 +1496,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             "feature-registry.json",
             "ownership.json",
             "src/main/java/supernote/generated/runtime/SupernoteV2Module.kt",
+            "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt",
             "src/feature_registry.cpp",
             "src/feature_registry.hpp",
             "src/runtime_services.cpp",
@@ -1403,6 +1536,9 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         "src/main/java/supernote/generated/runtime/SupernoteV2Module.kt": render(
             "v2.SupernoteV2Module.kt.tmpl",
             {"NATIVE_LIBRARY_NAME": component},
+        ),
+        "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt": render(
+            "v2.SupernoteCoroutineBridge.kt.tmpl", {}
         ),
         "src/feature_registry.cpp": registry_source,
         "src/feature_registry.hpp": header,
