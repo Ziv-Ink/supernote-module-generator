@@ -81,10 +81,10 @@ class DoctorService:
             checks.extend(self._javascript_checks(root, valid_root))
         with self.progress.phase("Checking Android tools", "Checked Android tools"):
             checks.extend(self._android_checks(root, valid_root))
-        if scope in {"all", "jni", "jsi"}:
+        if scope == "plugin":
             with self.progress.phase("Checking native tools", "Checked native tools"):
                 checks.extend(self._native_checks())
-        if scope in {"all", "jsi"}:
+        if scope == "plugin":
             with self.progress.phase("Checking JSI runtime", "Checked JSI runtime"):
                 checks.extend(self._jsi_runtime_checks())
 

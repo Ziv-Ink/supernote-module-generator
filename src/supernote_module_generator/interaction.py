@@ -228,6 +228,125 @@ class Interaction:
             return self._plain_menu(label, items, default, collapse_label)
         return self._cursor_menu(label, items, default, footer, collapse_label)
 
+    def multi_menu(
+        self,
+        label: str,
+        items: Sequence[MenuItem],
+        *,
+        defaults: Sequence[str],
+        collapse_label: Optional[str] = None,
+    ) -> List[str]:
+        """Select one or more values without assigning backend semantics."""
+
+        selected = {value for value in defaults}
+        known = {item.value for item in items}
+        if not selected <= known:
+            raise ValueError("multi-menu defaults must be listed items")
+        if self.plain:
+            if label:
+                print(f"{label}:", file=self.terminal)
+            for index, item in enumerate(items, 1):
+                mark = "x" if item.value in selected else " "
+                description = f" - {item.description}" if item.description else ""
+                print(f"  {index}. [{mark}] {item.label}{description}", file=self.terminal)
+            print(
+                'Choose one or more numbers separated by commas. Type ":back" '
+                'for the previous question or ":cancel" to exit.',
+                file=self.terminal,
+            )
+            while True:
+                answer = self._line(f"Choose [1-{len(items)}]: ").strip()
+                if answer == ":back":
+                    raise BackRequested
+                if answer == ":cancel":
+                    raise CancelRequested
+                if not answer and selected:
+                    values = [item.value for item in items if item.value in selected]
+                    break
+                pieces = [piece.strip() for piece in answer.split(",")]
+                if pieces and all(
+                    piece.isdigit() and 1 <= int(piece) <= len(items)
+                    for piece in pieces
+                ):
+                    indexes = {int(piece) - 1 for piece in pieces}
+                    values = [item.value for index, item in enumerate(items) if index in indexes]
+                    if values:
+                        break
+                self.error("Select at least one listed number.")
+        else:
+            cursor = 0
+            drawn = 0
+            notice: Optional[str] = None
+            if label:
+                print(f"{label}:", file=self.terminal)
+
+            def redraw() -> None:
+                nonlocal drawn
+                lines: List[str] = []
+                for index, item in enumerate(items):
+                    active = index == cursor
+                    mark = "x" if item.value in selected else " "
+                    pointer = self.renderer.symbols["active"] if active else " "
+                    row = f"{pointer} [{mark}] {item.label}"
+                    if item.description:
+                        row += f"  {item.description}"
+                    lines.append(self.renderer.style("active", row) if active else row)
+                if notice:
+                    lines.append(self.renderer.style("warning", notice))
+                lines.append("↑/↓ move  Space toggle  Enter continue  Esc back")
+                if drawn:
+                    self.terminal.write(f"\033[{drawn}A")
+                total = max(drawn, len(lines))
+                for row in range(total):
+                    line = lines[row] if row < len(lines) else ""
+                    self.terminal.write("\r\033[2K" + line + "\n")
+                self.terminal.flush()
+                drawn = total
+
+            with self.keys.raw():
+                redraw()
+                while True:
+                    event = self.keys.read()
+                    if event == "cancel":
+                        self._clear_cursor_block(drawn + (1 if label else 0))
+                        raise InterruptRequested
+                    if event == "eof":
+                        self._clear_cursor_block(drawn + (1 if label else 0))
+                        raise InputClosed
+                    if event == "escape":
+                        self._clear_cursor_block(drawn + (1 if label else 0))
+                        raise BackRequested
+                    if event in {"up", "down"}:
+                        cursor = max(
+                            0,
+                            min(
+                                cursor + (-1 if event == "up" else 1),
+                                len(items) - 1,
+                            ),
+                        )
+                        notice = None
+                        redraw()
+                    elif event == "char: ":
+                        value = items[cursor].value
+                        if value in selected:
+                            selected.remove(value)
+                        else:
+                            selected.add(value)
+                        notice = None
+                        redraw()
+                    elif event == "enter":
+                        if not selected:
+                            notice = "! Select at least one starter."
+                            redraw()
+                            continue
+                        values = [item.value for item in items if item.value in selected]
+                        self._clear_cursor_block(drawn + (1 if label else 0))
+                        break
+        shown = ", ".join(item.label for item in items if item.value in values)
+        self.answer(collapse_label or label, shown)
+        print(file=self.terminal)
+        return values
+
     def _plain_menu(
         self,
         label: str,

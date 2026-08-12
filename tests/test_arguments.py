@@ -27,21 +27,21 @@ def test_global_options_are_accepted_before_and_after_subcommand():
     assert before.output_mode == "json"
 
 
-def test_identical_value_repetitions_normalize():
+def test_repeatable_starter_values_allow_both_families():
     parsed = parse_arguments(
-        ["add", "local-math", "--type", "native", "--type=native"]
+        ["add", "local-math", "--starter", "cpp", "--starter=kotlin"]
     )
-    assert parsed.value("type") == "native"
+    assert parsed.values_for("starter") == ("cpp", "kotlin")
 
 
-def test_conflicting_value_repetitions_are_rejected():
-    with pytest.raises(ConfigurationError, match="conflicting values"):
-        parse_arguments(["add", "local-math", "--type", "native", "--type", "jni"])
+def test_duplicate_starter_values_are_rejected():
+    with pytest.raises(ConfigurationError, match="provided more than once"):
+        parse_arguments(["add", "local-math", "--starter", "cpp", "--starter", "cpp"])
 
 
-@pytest.mark.parametrize("legacy", ["kotlin", "cpp"])
-def test_legacy_type_values_are_rejected(legacy: str):
-    with pytest.raises(ConfigurationError, match="invalid module type"):
+@pytest.mark.parametrize("legacy", ["native", "jni", "jsi"])
+def test_v1_type_option_is_rejected(legacy: str):
+    with pytest.raises(ConfigurationError, match='unknown option "--type"'):
         parse_arguments(["add", "local-math", "--type", legacy])
 
 
@@ -54,6 +54,16 @@ def test_legacy_command_forms_and_options_are_rejected(legacy: str):
 def test_all_and_module_are_mutually_exclusive():
     with pytest.raises(ConfigurationError, match="--all cannot"):
         parse_arguments(["validate", "local-math", "--all"])
+
+
+def test_remove_build_cleanup_requires_its_explicit_option():
+    default = parse_arguments(["remove", "local-math", "--yes"])
+    cleanup = parse_arguments(
+        ["remove", "local-math", "--delete-build-files", "--yes"]
+    )
+
+    assert not default.has("delete_build_files")
+    assert cleanup.has("delete_build_files")
 
 
 def test_output_modes_are_mutually_exclusive():
@@ -85,9 +95,9 @@ def test_two_command_help_routes_are_byte_identical(tmp_path: Path, command: str
 def test_add_help_preserves_multiline_example(tmp_path: Path):
     _, stdout, _ = invoke(["help", "add"], tmp_path)
     assert (
-        "  supernote-module add @acme/stylus-jsi --type jsi \\\n"
-        "    --javascript-name StylusJsi \\\n"
-        "    --android-namespace com.acme.stylus_jsi \\\n"
+        "  supernote-module add @acme/stylus --starter kotlin \\\n"
+        "    --javascript-name Stylus \\\n"
+        "    --android-namespace com.acme.stylus \\\n"
         "    --package-manager yarn --yes\n"
     ) in stdout
 
@@ -111,7 +121,7 @@ def test_no_command_in_non_tty_is_usage_error(tmp_path: Path):
 
 
 def test_parse_error_in_json_is_one_document_and_empty_stderr(tmp_path: Path):
-    code, stdout, stderr = invoke(["--json", "add", "x", "--type", "cpp"], tmp_path)
+    code, stdout, stderr = invoke(["--json", "add", "x", "--type", "native"], tmp_path)
     assert code == 2
     assert stderr == ""
     result = json.loads(stdout)

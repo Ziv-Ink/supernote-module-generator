@@ -21,7 +21,7 @@ GLOBAL_BOOLEANS = {
 }
 COMMAND_VALUE_OPTIONS: Dict[str, Dict[str, str]] = {
     "add": {
-        "--type": "type",
+        "--starter": "starter",
         "--description": "description",
         "--javascript-name": "javascript_name",
         "--android-namespace": "android_namespace",
@@ -31,7 +31,7 @@ COMMAND_VALUE_OPTIONS: Dict[str, Dict[str, str]] = {
     "update": {"--package-manager": "package_manager"},
     "validate": {},
     "remove": {"--package-manager": "package_manager"},
-    "doctor": {"--type": "type"},
+    "doctor": {},
     "help": {},
 }
 COMMAND_BOOLEAN_OPTIONS: Dict[str, Dict[str, str]] = {
@@ -50,6 +50,7 @@ COMMAND_BOOLEAN_OPTIONS: Dict[str, Dict[str, str]] = {
     "validate": {"--all": "all", "--build": "build"},
     "remove": {
         "--all": "all",
+        "--delete-build-files": "delete_build_files",
         "--skip-install": "skip_install",
         "--yes": "yes",
         "-y": "yes",
@@ -64,6 +65,7 @@ class ParsedArguments:
     command: Optional[str]
     positional: Optional[str] = None
     values: Dict[str, str] = field(default_factory=dict)
+    repeated_values: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     provided: Set[str] = field(default_factory=set)
     booleans: Set[str] = field(default_factory=set)
     output_mode: str = "human"
@@ -78,6 +80,9 @@ class ParsedArguments:
 
     def has(self, name: str) -> bool:
         return name in self.booleans or name in self.provided
+
+    def values_for(self, name: str) -> Tuple[str, ...]:
+        return self.repeated_values.get(name, ())
 
 
 def _split_option(token: str) -> Tuple[str, Optional[str]]:
@@ -120,6 +125,7 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
         raise ConfigurationError(f'unknown command "{candidate}"')
     command = candidate
     values: Dict[str, str] = {}
+    repeated_values: Dict[str, List[str]] = {}
     provided: Set[str] = set()
     booleans: Set[str] = set()
     globals_seen: Set[str] = set()
@@ -149,7 +155,17 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
                 if index >= len(arguments):
                     raise ConfigurationError(f"{option} requires a value")
                 value = arguments[index]
-            _set_value(values, provided, value_options[option], option, value)
+            name = value_options[option]
+            if name == "starter":
+                selected = repeated_values.setdefault(name, [])
+                if value in selected:
+                    raise ConfigurationError(
+                        f'{option} "{value}" was provided more than once'
+                    )
+                selected.append(value)
+                provided.add(name)
+            else:
+                _set_value(values, provided, name, option, value)
             index += 1
             continue
         if option in boolean_options:
@@ -179,10 +195,13 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
     if len(output_flags) > 1:
         raise ConfigurationError("--quiet, --verbose, and --json cannot be combined")
     output_mode = output_flags[0] if output_flags else "human"
-    if command == "add" and "type" in provided and values["type"] not in {"native", "jni", "jsi"}:
-        raise ConfigurationError(f'invalid module type "{values["type"]}"')
-    if command == "doctor" and "type" in provided and values["type"] not in {"all", "native", "jni", "jsi"}:
-        raise ConfigurationError(f'invalid module type "{values["type"]}"')
+    invalid_starters = [
+        value
+        for value in repeated_values.get("starter", [])
+        if value not in {"cpp", "kotlin"}
+    ]
+    if invalid_starters:
+        raise ConfigurationError(f'invalid starter family "{invalid_starters[0]}"')
     if "package_manager" in provided and values["package_manager"] not in {"npm", "yarn"}:
         raise ConfigurationError(
             f'invalid package manager "{values["package_manager"]}"'
@@ -192,6 +211,9 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
         command=command,
         positional=positional,
         values=values,
+        repeated_values={
+            name: tuple(items) for name, items in repeated_values.items()
+        },
         provided=provided,
         booleans=booleans,
         output_mode=output_mode,

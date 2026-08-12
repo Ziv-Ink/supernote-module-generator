@@ -77,7 +77,7 @@ def test_doctor_executes_required_probes_and_keeps_selinux_advisory(
         lambda name: f"/tools/{name}",
     )
 
-    result = DoctorService(root, renderer(), run=successful_run).execute("all")
+    result = DoctorService(root, renderer(), run=successful_run).execute("plugin")
 
     assert result.exit_code == 0
     assert result.doctor is not None
@@ -87,7 +87,7 @@ def test_doctor_executes_required_probes_and_keeps_selinux_advisory(
     assert result.doctor.advisory_count >= 1
 
 
-def test_native_doctor_does_not_probe_deployment_or_jsi_runtime(
+def test_plugin_doctor_reports_jsi_policy_without_probing_deployment(
     tmp_path: Path, monkeypatch
 ):
     root = plugin(tmp_path)
@@ -97,13 +97,11 @@ def test_native_doctor_does_not_probe_deployment_or_jsi_runtime(
         lambda name: f"/tools/{name}",
     )
 
-    result = DoctorService(root, renderer(), run=successful_run).execute("native")
+    result = DoctorService(root, renderer(), run=successful_run).execute("plugin")
 
     assert result.doctor is not None
-    assert not any(
-        check.id in {"adb", "adb_device", "selinux_policy"}
-        for check in result.doctor.checks
-    )
+    assert any(check.id == "selinux_policy" for check in result.doctor.checks)
+    assert not any(check.id in {"adb", "adb_device"} for check in result.doctor.checks)
 
 
 def test_both_lockfiles_pass_when_one_manager_is_healthy(tmp_path: Path, monkeypatch):
@@ -114,7 +112,7 @@ def test_both_lockfiles_pass_when_one_manager_is_healthy(tmp_path: Path, monkeyp
         lambda name: None if name == "yarn" else f"/tools/{name}",
     )
 
-    result = DoctorService(root, renderer(), run=successful_run).execute("native")
+    result = DoctorService(root, renderer(), run=successful_run).execute("plugin")
 
     assert result.exit_code == 0
     assert result.doctor is not None
@@ -142,7 +140,7 @@ def test_nonzero_tool_probe_fails_doctor(tmp_path: Path, monkeypatch):
             return subprocess.CompletedProcess(command, 2, "", "broken\n")
         return successful_run(command, **kwargs)
 
-    result = DoctorService(root, renderer(), run=run).execute("jni")
+    result = DoctorService(root, renderer(), run=run).execute("plugin")
 
     assert result.exit_code == 1
     assert result.doctor is not None

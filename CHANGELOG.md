@@ -10,6 +10,13 @@ should also check their installed version with `supernote-module --version`.
 - Preserve `supernote-module-generator` and `supernote-module` as the package
   and command identities while reserving stable `2.0.0` for the completed V2
   release.
+- Replace public Native/JNI/JSI module selection with language-neutral logical
+  features and repeatable C/C++ or Kotlin/Java starter scaffolding.
+- Generate one shared plugin-level V2 runtime/build component with explicit
+  source intent, common semantics, typed JSI/JNI routes, lifecycle safety, and
+  TypeScript declarations.
+- Add opt-in `remove --delete-build-files`; ordinary removal and `--yes`
+  preserve plugin build output.
 
 ## 1.1.0.dev0 - Historical V1 development baseline
 

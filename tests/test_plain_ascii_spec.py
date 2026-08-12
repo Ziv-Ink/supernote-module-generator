@@ -20,7 +20,7 @@ from supernote_module_generator.rendering import (
     TerminalCapabilities,
 )
 from supernote_module_generator.terminal_text import ascii_presentation
-from supernote_module_generator.workflows import TYPE_ITEMS
+from supernote_module_generator.feature_workflows import STARTER_ITEMS
 
 
 class TtyStringIO(io.StringIO):
@@ -29,7 +29,7 @@ class TtyStringIO(io.StringIO):
 
 
 def plugin(tmp_path: Path) -> Path:
-    (tmp_path / "android").mkdir()
+    (tmp_path / "android/app").mkdir(parents=True)
     (tmp_path / "PluginConfig.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / "package.json").write_text(
         json.dumps({"name": "fixture", "dependencies": {}}) + "\n",
@@ -39,6 +39,7 @@ def plugin(tmp_path: Path) -> Path:
         "include ':app'\n",
         encoding="utf-8",
     )
+    (tmp_path / "android/app/build.gradle").write_text("plugins {}\n", encoding="utf-8")
     return tmp_path
 
 
@@ -92,8 +93,8 @@ def test_every_plain_command_route_is_ascii(tmp_path: Path):
             [
                 "add",
                 "local-unicode",
-                "--type",
-                "native",
+                "--starter",
+                "cpp",
                 "--description",
                 "café — 模块 🙂",
                 "--skip-install",
@@ -102,12 +103,12 @@ def test_every_plain_command_route_is_ascii(tmp_path: Path):
         ),
         run_plain(root, ["update", "local-unicode", "--skip-install", "--yes"]),
         run_plain(root, ["validate", "local-unicode"]),
-        run_plain(root, ["doctor", "--type", "native"]),
+        run_plain(root, ["doctor"]),
         run_plain(root, ["validate", "missing-module"]),
         run_plain(root, ["remove", "local-unicode", "--skip-install", "--yes"]),
     ]
 
-    expected_codes = [0, 0, 0, None, 2, 0]
+    expected_codes = [0, 0, 1, None, 2, 0]
     for expected_code, (code, stdout, stderr) in zip(expected_codes, runs):
         if expected_code is not None:
             assert code == expected_code
@@ -119,11 +120,11 @@ def test_plain_interactive_routes_and_dynamic_values_are_ascii(tmp_path: Path):
     code, stdout, stderr = run_plain(
         root,
         ["add", "--skip-install"],
-        "3\nlocal-jsi\ncafé — 模块 🙂\n\n\n\n",
+        "1,2\nlocal-mixed\ncafé — 模块 🙂\n\n\n\n",
     )
 
     assert code == 0
-    assert "Module type:  JSI Module - C/C++" in stderr
+    assert "Starter code:  C/C++ (native), Kotlin/Java (JVM)" in stderr
     assert "\\xe9" in stderr
     assert_ascii(stdout, stderr)
 
@@ -140,18 +141,7 @@ def test_plain_combined_with_json_remains_ascii_and_keeps_duration_ms(tmp_path: 
     assert_ascii(stdout, stderr)
 
 
-@pytest.mark.parametrize(
-    ("choice", "expected"),
-    [
-        ("1", "Native Module - Kotlin/Java"),
-        ("2", "Native JNI Module - C/C++ via JNI"),
-        ("3", "JSI Module - C/C++"),
-    ],
-)
-def test_plain_module_type_labels_use_the_required_ascii_forms(
-    choice: str,
-    expected: str,
-):
+def test_plain_starter_labels_allow_multiple_language_families():
     stdout = io.StringIO()
     stderr = io.StringIO()
     # The mode-level contract wins even if a caller reports full cursor and
@@ -167,16 +157,19 @@ def test_plain_module_type_labels_use_the_required_ascii_forms(
 
     from supernote_module_generator.interaction import Interaction
 
-    selected = Interaction(renderer, line_source=lambda: choice).menu(
-        "Module type",
-        TYPE_ITEMS,
-        default="native",
-        collapse_label="Module type",
+    selected = Interaction(renderer, line_source=lambda: "1,2").multi_menu(
+        "Starter code",
+        STARTER_ITEMS,
+        defaults=("cpp",),
+        collapse_label="Starter code",
     )
 
-    assert selected == TYPE_ITEMS[int(choice) - 1].value
-    assert f"  {choice}. {expected}\n" in stderr.getvalue()
-    assert stderr.getvalue().endswith(f"Module type:  {expected}\n\n")
+    assert selected == ["cpp", "kotlin"]
+    assert "1. [x] C/C++ (native)" in stderr.getvalue()
+    assert "2. [ ] Kotlin/Java (JVM)" in stderr.getvalue()
+    assert stderr.getvalue().endswith(
+        "Starter code:  C/C++ (native), Kotlin/Java (JVM)\n\n"
+    )
     assert_ascii(stdout.getvalue(), stderr.getvalue())
 
 

@@ -58,7 +58,7 @@ def _module_config(tmp_path: Path, backend: str) -> ProjectConfig:
 
 
 def _repository_documents() -> list[Path]:
-    roots = [ROOT / "maintainers", ROOT / "architecture"]
+    roots = [ROOT / "maintainers", ROOT / "architecture", ROOT / "docs"]
     return [
         ROOT / "README.md",
         ROOT / "CHANGELOG.md",
@@ -147,20 +147,24 @@ def test_wiki_links_use_known_task_pages():
             assert page in WIKI_PAGES
 
 
-def test_root_readme_is_a_short_product_entry_point():
+def test_root_readme_explains_the_v2_public_model():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     opening = "\n".join(readme.splitlines()[:12])
     opening_words = " ".join(opening.split())
-    assert "native functionality" in opening
+    assert "typed C/C++ and Kotlin/Java capabilities" in opening
     assert "existing Supernote plugin" in opening_words
-    assert "Android APIs" in opening
+    assert "one user-facing feature" in opening
     assert "## Install" in readme
     assert "pip install supernote-module-generator" in readme
-    assert "supernote-module doctor --type native" in readme
-    assert "write and export native APIs" in readme
-    assert WIKI_ROOT in readme
+    assert "--starter cpp --starter kotlin" in readme
+    assert "--type native" not in readme
+    assert "SupernoteInternal" in readme
+    assert "SupernoteAsync" in readme
+    assert "C23" in readme and "C++23" in readme
+    assert "--delete-build-files" in readme
+    assert "managed non-JS context" in " ".join(readme.split())
     assert "https://docs.supernote.com/" in readme
-    assert len(readme.splitlines()) < 60
+    assert len(readme.splitlines()) < 240
 
 
 @pytest.mark.parametrize(
@@ -262,11 +266,15 @@ def test_native_initial_declaration_uses_the_configured_interface_name(tmp_path:
     assert "$MODULE" not in declarations
 
 
-def test_repository_does_not_duplicate_wiki_user_guides():
-    assert not (ROOT / "docs").exists()
+def test_repository_docs_contain_architectural_history_not_migration_tooling():
+    history = (ROOT / "docs/V1-TO-V2-ARCHITECTURE.md").read_text()
+    assert "architectural history" in history
+    assert "not a converter guide" in history
+    assert "automatic converter" in history
+    assert not (ROOT / "docs/Add-a-Feature.md").exists()
     assert not (ROOT / "UX_REDESIGN_SPECIFICATION.md").exists()
     assert not (ROOT / "PYPI_README.md").exists()
-    assert "recursive-include docs" not in (ROOT / "MANIFEST.in").read_text(
+    assert "recursive-include docs *.md" in (ROOT / "MANIFEST.in").read_text(
         encoding="utf-8"
     )
 

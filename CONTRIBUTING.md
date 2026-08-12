@@ -30,8 +30,10 @@ contract.
 | --- | --- | --- |
 | CLI grammar | `arguments.py` and tests | `helptext.py`, Wiki CLI and Automation page |
 | Exact installed help | `helptext.py` | CLI route tests |
-| Generated paths/ownership | generator and `.supernote-module.json` | generated README and Wiki files/exports pages |
-| Export signatures/types | KSP processor and `binding_codegen.py` | Wiki Export Functions page |
+| Generated paths/ownership | feature/runtime generators and `.supernote-module.json` | generated feature README |
+| Source signatures/types | C++ source projection and KSP JVM manifest frontend | root README examples |
+| Common API meaning | semantic model and its projection tests | generated TypeScript |
+| Runtime routes/lifetime | typed lowering plans and plugin runtime generator | architecture history summary |
 | Tool/device support | Wiki Requirements and Compatibility page with dated evidence | README summary |
 | First generated module | Wiki Add a Module page | concise README example and generated package links |
 | Release procedure | `maintainers/releasing.md` | publish workflow |
@@ -43,14 +45,14 @@ copyability, stream separation, machine output, keyboard safety, or recovery.
 
 ## Test layers and confidence
 
-- Unit tests cover parsing, naming, export scanning/code generation, rendering,
-  transactions, metadata migration, and generated file shape.
+- Unit tests cover parsing, naming, source and semantic projection, typed
+  lowering/code generation, rendering, transactions, and generated file shape.
 - Integration tests cover CLI lifecycle behavior against temporary plugin
   roots, parent wiring, source preservation, rollback, and documentation
   artifacts.
-- The repository currently lacks an external working-plugin fixture that
-  performs real npm/Yarn linking and compiles all three generated backends. Do
-  not describe unit or simulated Gradle tests as that proof.
+- Android fixture tests must compile the single plugin-level V2 runtime with
+  mixed C/C++ and Kotlin/Java feature input. Do not describe Python-only tests
+  or generated-text checks as Android compilation proof.
 - Device tests are relevant only when qualifying generated runtime integration,
   especially JSI. Record firmware, PluginHost, ABI, SELinux mode, commands, and
   logs; distinguish generated, compiled, loaded, and executed outcomes.
@@ -70,10 +72,10 @@ build integration, or device compatibility:
 - [ ] Update the relevant GitHub Wiki page in its separate Wiki repository;
       avoid copying the fact into unrelated pages.
 - [ ] Update generated README templates only for package-specific guidance.
-- [ ] Generate Native, JNI, and JSI samples and scan every generated text file
-      for unresolved template values.
-- [ ] Confirm the documented source path, default import, `await` behavior, and
-      files preserved by Update for all affected types.
+- [ ] Generate C/C++-only, Kotlin/Java-only, and mixed logical features and scan
+      every generated text file for unresolved template values.
+- [ ] Confirm explicit source intent, generated TypeScript, sync/async behavior,
+      and the files preserved by Update.
 - [ ] Run every documented shell/PowerShell command that can be exercised in
       the available environment; label anything not run.
 - [ ] Check repository and Wiki links, page slugs, and stale moved-file
@@ -81,8 +83,8 @@ build integration, or device compatibility:
 - [ ] Update the Wiki Requirements and Compatibility page with evidence and date when a tool,
       host, device, or policy claim changes.
 - [ ] Add a user-visible note to `CHANGELOG.md` when released behavior changes.
-- [ ] Review migration needs for older `.supernote-module.json` schemas,
-      generated ownership, declarations, or loaders.
+- [ ] Confirm that the change does not accidentally add V1 compatibility,
+      conversion, migration-analysis, or source-rewriting behavior.
 
 Generator-specific user guidance belongs in the Wiki. General Supernote plugin
 development belongs in the official Supernote documentation. Generated READMEs
@@ -108,12 +110,11 @@ validation tier completed.
 - `README.md` is a short product entry point; the separate GitHub Wiki contains
   generator-specific user guidance.
 - `CONTRIBUTING.md` is contributor documentation.
-- `architecture/decisions/` contains short, current rationale that affects safe
-  maintenance.
+- `docs/V1-TO-V2-ARCHITECTURE.md` records contributor-facing architectural
+  history without defining a supported migration workflow.
 - `maintainers/` contains release/operation procedures.
-- Git history stores superseded audits, implementation plans, and agent prompts.
-  Do not keep them in the normal documentation tree unless converted into a
-  concise current decision record.
+- The immutable `v1-final` tag and Git history preserve the implementation
+  baseline. They create no V1 maintenance or compatibility contract.
 
 The main repository must not contain a second copy of Wiki user guides. GitHub
 stores Wiki pages in `supernote-module-generator.wiki.git`; update and review

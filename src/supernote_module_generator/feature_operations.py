@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 import shutil
 import uuid
+from dataclasses import dataclass
 
 from . import __version__, binding_codegen
+from .errors import ConfigurationError
 from .feature_generator import FeatureConfig, stage_feature
 from .feature_model import (
     FeatureManifest,
@@ -18,14 +20,36 @@ from .feature_model import (
 )
 from .plugin_runtime_codegen import (
     RUNTIME_RELATIVE_ROOT,
+    generated_runtime_files,
     stage_plugin_runtime,
 )
 from .plugin_build_integration import set_runtime_wiring, verify_runtime_wiring
 from .semantic import SemanticApi
+from .models import ModuleInfo
 
 
-class FeatureOperationError(RuntimeError):
+class FeatureOperationError(ConfigurationError):
     pass
+
+
+@dataclass(frozen=True)
+class FeatureRecord:
+    path: Path
+    manifest: FeatureManifest
+    package_version: str
+    description: str
+
+    def info(self) -> ModuleInfo:
+        return ModuleInfo(
+            package_name=self.manifest.npm_name,
+            javascript_name=self.manifest.public_name,
+            type="feature",
+            type_label="Supernote feature",
+            path=str(self.path.resolve()),
+            implementation_path=str((self.path / "android/src/main").resolve()),
+            android_namespace=self.manifest.android_namespace,
+            package_version=self.package_version,
+        )
 
 
 class FeatureOperationService:
@@ -65,7 +89,7 @@ class FeatureOperationService:
             self._finalize(feature_backup)
             self._finalize(runtime_backup)
             return destination
-        except Exception:
+        except BaseException:
             if feature_activated:
                 self._restore(destination, feature_backup)
             if runtime_activated:
@@ -117,7 +141,7 @@ class FeatureOperationService:
             self._finalize(feature_backup)
             self._finalize(runtime_backup)
             return current
-        except Exception:
+        except BaseException:
             if feature_activated:
                 self._restore(current, feature_backup)
             if runtime_activated:
@@ -161,7 +185,7 @@ class FeatureOperationService:
             verify_runtime_wiring(self.root, enabled=bool(future))
             shutil.rmtree(feature_backup)
             self._finalize(runtime_backup)
-        except Exception:
+        except BaseException:
             if feature_backup.exists() and not current.exists():
                 os.replace(feature_backup, current)
             if runtime_activated:
@@ -190,6 +214,53 @@ class FeatureOperationService:
             if value.get("kind") == "supernote_feature":
                 result.append(metadata.parent)
         return result
+
+    def records(self) -> list[FeatureRecord]:
+        return [read_feature_record(path) for path in self.feature_paths()]
+
+    def find_record(self, npm_name: str) -> FeatureRecord:
+        path = self.find(npm_name)
+        return read_feature_record(path)
+
+    def expected_registry(self) -> PluginRuntimeRegistry:
+        return self._registry(self._entries(extra=(), excluding=()))
+
+    def verify_generated_state(self) -> list[str]:
+        """Return deterministic structural issues without mutating the plugin."""
+
+        records = self.records()
+        issues: list[str] = []
+        try:
+            verify_runtime_wiring(self.root, enabled=bool(records))
+        except Exception as exc:
+            issues.append(str(exc))
+        runtime = self.root / RUNTIME_RELATIVE_ROOT
+        if not records:
+            if runtime.exists():
+                issues.append("shared V2 runtime exists without any features")
+            return issues
+        try:
+            expected = generated_runtime_files(self.expected_registry())
+        except Exception as exc:
+            issues.append(str(exc))
+            return issues
+        for relative, content in expected.items():
+            path = runtime / relative
+            if not path.is_file():
+                issues.append(f"missing generated runtime file: {path}")
+            elif path.read_text(encoding="utf-8") != content:
+                issues.append(f"stale generated runtime file: {path}")
+        for record in records:
+            for relative in (
+                ".supernote-module.json",
+                "package.json",
+                "index.js",
+                "index.d.ts",
+                "README.md",
+            ):
+                if not (record.path / relative).is_file():
+                    issues.append(f"missing generated feature file: {record.path / relative}")
+        return issues
 
     def _entries(
         self,
@@ -279,6 +350,16 @@ def read_feature_manifest(path: Path) -> FeatureManifest:
         roots=ImplementationRoots(str(roots["native"]), str(roots["jvm"])),
         starter_files=tuple(str(item) for item in raw.get("starter_files", ())),
         schema_version=int(raw["schema_version"]),
+    )
+
+
+def read_feature_record(path: Path) -> FeatureRecord:
+    raw = json.loads((path / ".supernote-module.json").read_text(encoding="utf-8"))
+    return FeatureRecord(
+        path.resolve(),
+        read_feature_manifest(path),
+        str(raw["package_version"]),
+        str(raw.get("description", "")),
     )
 
 

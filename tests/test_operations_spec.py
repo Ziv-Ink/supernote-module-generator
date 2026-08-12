@@ -2,32 +2,30 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from supernote_module_generator.arguments import parse_arguments
 from supernote_module_generator.cli import main
-from supernote_module_generator.operations import (
-    AddDecisions,
-    OperationService,
-    RemoveDecisions,
-)
-from supernote_module_generator.rendering import Renderer, TerminalCapabilities
-from supernote_module_generator.workflows import DecisionCollector
+from supernote_module_generator.errors import SubprocessFailure
+from supernote_module_generator.feature_cli_operations import FeatureCliOperationService
+from supernote_module_generator.feature_workflows import FeatureDecisionCollector
 
 
 def plugin(tmp_path: Path, *, npm_lock: bool = False, yarn_lock: bool = False) -> Path:
-    android = tmp_path / "android"
-    android.mkdir()
+    (tmp_path / "android/app").mkdir(parents=True)
     (tmp_path / "PluginConfig.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / "package.json").write_text(
         json.dumps({"name": "fixture", "dependencies": {}}) + "\n",
         encoding="utf-8",
     )
-    (android / "settings.gradle").write_text("include ':app'\n", encoding="utf-8")
+    (tmp_path / "android/settings.gradle").write_text(
+        "include ':app'\n", encoding="utf-8"
+    )
+    (tmp_path / "android/app/build.gradle").write_text(
+        "plugins {}\n", encoding="utf-8"
+    )
     if npm_lock:
         (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
     if yarn_lock:
@@ -42,60 +40,56 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def quiet_renderer() -> Renderer:
-    return Renderer(
-        "quiet",
-        TerminalCapabilities(False, False, False, False, 80, 24),
-        stdout=io.StringIO(),
-        stderr=io.StringIO(),
-    )
-
-
-@pytest.mark.parametrize("module_type", ["native", "jni", "jsi"])
-def test_add_generates_every_public_module_type(tmp_path: Path, module_type: str):
+@pytest.mark.parametrize(
+    ("arguments", "native", "jvm"),
+    [
+        (["--starter", "cpp"], True, False),
+        (["--starter", "kotlin"], False, True),
+        (["--starter", "cpp", "--starter", "kotlin"], True, True),
+    ],
+)
+def test_add_scaffolds_selected_families_without_backend_metadata(
+    tmp_path: Path, arguments: list[str], native: bool, jvm: bool
+):
     root = plugin(tmp_path)
-    package = {"native": "local-basic", "jni": "local-jni", "jsi": "local-jsi"}[module_type]
     code, stdout, stderr = invoke(
-        root,
-        ["add", package, "--type", module_type, "--skip-install", "--yes"],
+        root, ["add", "document", *arguments, "--skip-install", "--yes"]
     )
+
     assert code == 0, stderr
-    module = root / f"local_modules/{package}"
-    metadata = json.loads((module / ".supernote-module.json").read_text())
-    assert metadata["type"] == module_type
-    assert metadata["metadata_schema"] == "1.0"
-    assert ".supernote-module.json" in metadata["generated_files"]
-    if module_type == "native":
-        assert next((module / "android/src/main/java").rglob("Example.kt")).is_file()
-    else:
-        assert (module / "android/src/main/cpp/math.cpp").is_file()
+    assert stdout.startswith('✓ Added feature "document"\n')
+    feature = root / "local_modules/document"
+    metadata = json.loads((feature / ".supernote-module.json").read_text())
+    assert "type" not in metadata
+    assert "backend" not in metadata
+    assert (feature / "android/src/main/cpp/feature.cpp").is_file() is native
+    kotlin = feature / "android/src/main/java/com/example/document/FeatureApi.kt"
+    assert kotlin.is_file() is jvm
+    assert "supernote-v2-runtime" in (root / "android/settings.gradle").read_text()
 
 
 @pytest.mark.parametrize(
-    ("identity", "new_type", "expected"),
+    ("option", "value", "expected"),
     [
-        ("javascript", "native", 'JavaScript name "Existing" is already used'),
-        ("namespace", "native", 'Android namespace "com.example.existing" is already used'),
-        ("native_library", "jni", "Native library name collides"),
-        ("jsi_global", "jsi", "JSI registration name collides"),
-        ("gradle_project", "native", "Generated Gradle registration name collides"),
+        ("--javascript-name", "Existing", 'JavaScript name "Existing" is already used'),
+        (
+            "--android-namespace",
+            "com.example.existing",
+            'Android namespace "com.example.existing" is already used',
+        ),
     ],
 )
-def test_add_rejects_generated_identity_collisions(
-    tmp_path: Path,
-    monkeypatch,
-    identity: str,
-    new_type: str,
-    expected: str,
+def test_add_rejects_feature_identity_collisions_without_mutation(
+    tmp_path: Path, option: str, value: str, expected: str
 ):
     root = plugin(tmp_path)
-    code, _, stderr = invoke(
+    assert invoke(
         root,
         [
             "add",
-            "local-existing",
-            "--type",
-            "jsi",
+            "existing",
+            "--starter",
+            "cpp",
             "--javascript-name",
             "Existing",
             "--android-namespace",
@@ -103,47 +97,18 @@ def test_add_rejects_generated_identity_collisions(
             "--skip-install",
             "--yes",
         ],
-    )
-    assert code == 0, stderr
-    metadata = json.loads(
-        (root / "local_modules/local-existing/.supernote-module.json").read_text(
-            encoding="utf-8"
-        )
-    )
-
-    javascript_name = "Existing" if identity == "javascript" else "Candidate"
-    android_namespace = (
-        "com.example.existing"
-        if identity == "namespace"
-        else "com.example.candidate"
-    )
-    if identity == "native_library":
-        monkeypatch.setattr(
-            "supernote_module_generator.operations.native_library_name",
-            lambda _: metadata["native_library_name"],
-        )
-    elif identity == "jsi_global":
-        monkeypatch.setattr(
-            "supernote_module_generator.operations.jsi_global_name",
-            lambda _: metadata["jsi_global_name"],
-        )
-    elif identity == "gradle_project":
-        monkeypatch.setattr(
-            "supernote_module_generator.operations.gradle_project_name",
-            lambda _: "forced-collision",
-        )
+    )[0] == 0
+    before = (root / "android/settings.gradle").read_bytes()
 
     code, _, stderr = invoke(
         root,
         [
             "add",
-            "local-candidate",
-            "--type",
-            new_type,
-            "--javascript-name",
-            javascript_name,
-            "--android-namespace",
-            android_namespace,
+            "candidate",
+            "--starter",
+            "kotlin",
+            option,
+            value,
             "--skip-install",
             "--yes",
         ],
@@ -151,143 +116,178 @@ def test_add_rejects_generated_identity_collisions(
 
     assert code == 2
     assert expected in stderr
-    assert not (root / "local_modules/local-candidate").exists()
+    assert not (root / "local_modules/candidate").exists()
+    assert (root / "android/settings.gradle").read_bytes() == before
 
 
-def test_update_preserves_user_owned_native_source(tmp_path: Path):
+def test_update_preserves_both_source_roots_and_deleted_starter(tmp_path: Path):
     root = plugin(tmp_path)
-    assert invoke(root, ["add", "local-preserve", "--type", "native", "--skip-install", "--yes"])[0] == 0
-    module = root / "local_modules/local-preserve"
-    source = next((module / "android/src/main/java").rglob("Example.kt"))
-    source.write_text(source.read_text() + "\n// user change\n", encoding="utf-8")
-    link = root / "node_modules/local-preserve"
-    link.parent.mkdir()
-    link.symlink_to(module, target_is_directory=True)
+    assert invoke(
+        root,
+        [
+            "add",
+            "document",
+            "--starter",
+            "cpp",
+            "--starter",
+            "kotlin",
+            "--skip-install",
+            "--yes",
+        ],
+    )[0] == 0
+    feature = root / "local_modules/document"
+    native = feature / "android/src/main/cpp/custom.cpp"
+    native.write_text("int custom() { return 7; }\n")
+    starter = feature / "android/src/main/cpp/feature.cpp"
+    starter.unlink()
+    java = feature / "android/src/main/java/com/example/document/Custom.java"
+    java.write_text("package com.example.document; class Custom {}\n")
 
-    code, stdout, stderr = invoke(
-        root, ["update", "local-preserve", "--yes"]
+    code, _, stderr = invoke(
+        root, ["update", "document", "--skip-install", "--yes"]
     )
+
     assert code == 0, stderr
-    assert "// user change" in source.read_text(encoding="utf-8")
-    assert stdout.startswith('✓ Updated module "local-preserve"')
+    assert native.read_text() == "int custom() { return 7; }\n"
+    assert java.is_file()
+    assert not starter.exists()
 
 
-def test_update_preserves_deleted_jni_starter_file(tmp_path: Path):
-    root = plugin(tmp_path)
-    assert invoke(root, ["add", "local-jni", "--type", "jni", "--skip-install", "--yes"])[0] == 0
-    module = root / "local_modules/local-jni"
-    deleted = module / "android/src/main/cpp/text.cpp"
-    deleted.unlink()
-    link = root / "node_modules/local-jni"
-    link.parent.mkdir()
-    link.symlink_to(module, target_is_directory=True)
-    code, _, stderr = invoke(root, ["update", "local-jni", "--yes"])
-    assert code == 0, stderr
-    assert not deleted.exists()
-
-
-@pytest.mark.parametrize(
-    "option",
-    ["--skip-install", "--package-manager=npm"],
-)
+@pytest.mark.parametrize("option", ["--skip-install", "--package-manager=npm"])
 def test_update_rejects_dependency_options_when_refresh_is_not_required(
     tmp_path: Path, option: str
 ):
     root = plugin(tmp_path)
     assert invoke(
         root,
-        ["add", "local-current", "--type", "native", "--skip-install", "--yes"],
+        ["add", "current", "--starter", "cpp", "--skip-install", "--yes"],
     )[0] == 0
-    module = root / "local_modules/local-current"
-    link = root / "node_modules/local-current"
+    feature = root / "local_modules/current"
+    link = root / "node_modules/current"
     link.parent.mkdir()
-    link.symlink_to(module, target_is_directory=True)
+    link.symlink_to(feature, target_is_directory=True)
 
-    code, _, stderr = invoke(root, ["update", "local-current", option, "--yes"])
+    code, _, stderr = invoke(root, ["update", "current", option, "--yes"])
 
     assert code == 2
     assert "does not affect this update" in stderr
 
 
-def test_add_postcondition_failure_rolls_back_all_plugin_files(tmp_path: Path, monkeypatch):
+def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
+    tmp_path: Path, monkeypatch
+):
     root = plugin(tmp_path)
-    original_package = (root / "package.json").read_bytes()
-    original_settings = (root / "android/settings.gradle").read_bytes()
-
-    monkeypatch.setattr("supernote_module_generator.operations.shutil.which", lambda name: f"/fake/{name}")
-
-    def successful_run(command, **kwargs):
-        return subprocess.CompletedProcess(command, 0, "1.0\n", "")
-
-    service = OperationService(root, quiet_renderer(), run=successful_run)
-    result = service.add(
-        AddDecisions(
-            "local-unlinked",
-            "native",
-            "",
-            "Unlinked",
-            "com.example.unlinked",
-            "0.1.0",
-            True,
-            "npm",
-            False,
+    originals = {
+        path: path.read_bytes()
+        for path in (
+            root / "package.json",
+            root / "android/settings.gradle",
+            root / "android/app/build.gradle",
         )
+    }
+    monkeypatch.setattr(
+        "supernote_module_generator.feature_operations.FeatureOperationService.verify_generated_state",
+        lambda self: ["forced structural failure"],
     )
-    assert result.exit_code == 1
-    assert result.rollback.status == "completed"
-    assert not (root / "local_modules/local-unlinked").exists()
-    assert (root / "package.json").read_bytes() == original_package
-    assert (root / "android/settings.gradle").read_bytes() == original_settings
 
-
-def test_remove_dependency_failure_restores_source_and_parent(tmp_path: Path, monkeypatch):
-    root = plugin(tmp_path)
-    assert invoke(root, ["add", "local-safe", "--type", "native", "--skip-install", "--yes"])[0] == 0
-    module = root / "local_modules/local-safe"
-    source = next((module / "android/src/main/java").rglob("Example.kt"))
-    source.write_text(source.read_text() + "\n// retained\n", encoding="utf-8")
-    monkeypatch.setattr("supernote_module_generator.operations.shutil.which", lambda name: f"/fake/{name}")
-    installs = 0
-
-    def run(command, **kwargs):
-        nonlocal installs
-        if command == ["npm", "install"]:
-            installs += 1
-            return subprocess.CompletedProcess(
-                command,
-                1 if installs == 1 else 0,
-                "",
-                "npm error simulated" if installs == 1 else "",
-            )
-        return subprocess.CompletedProcess(command, 0, "1.0\n", "")
-
-    service = OperationService(root, quiet_renderer(), run=run)
-    result = service.remove(RemoveDecisions(["local-safe"], False, "npm", False))
-    assert result.exit_code == 1
-    assert result.rollback.status == "completed"
-    assert source.is_file()
-    assert "// retained" in source.read_text()
-    package = json.loads((root / "package.json").read_text())
-    assert package["dependencies"]["local-safe"] == "file:./local_modules/local-safe"
-
-
-def test_remove_recovery_failure_is_partial_and_keeps_journal(tmp_path: Path, monkeypatch):
-    root = plugin(tmp_path)
-    assert invoke(root, ["add", "local-partial", "--type", "native", "--skip-install", "--yes"])[0] == 0
-    monkeypatch.setattr("supernote_module_generator.operations.shutil.which", lambda name: f"/fake/{name}")
-
-    def run(command, **kwargs):
-        if command == ["npm", "install"]:
-            return subprocess.CompletedProcess(command, 1, "", "npm error")
-        return subprocess.CompletedProcess(command, 0, "1.0\n", "")
-
-    result = OperationService(root, quiet_renderer(), run=run).remove(
-        RemoveDecisions(["local-partial"], False, "npm", False)
+    code, _, stderr = invoke(
+        root,
+        ["add", "broken", "--starter", "cpp", "--skip-install", "--yes"],
     )
-    assert result.exit_code == 3
-    assert result.status == "partial"
-    assert result.rollback.status == "partial"
-    assert (root / ".supernote-module-transaction.json").is_file()
+
+    assert code == 1
+    assert "structural postconditions" in stderr
+    assert not (root / "local_modules/broken").exists()
+    assert not (root / "android/.supernote-module/v2-runtime").exists()
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_remove_dependency_failure_restores_feature_runtime_and_parent(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path, npm_lock=True)
+    assert invoke(
+        root,
+        ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/safe"
+    runtime_before = (root / "android/.supernote-module/v2-runtime/feature-registry.json").read_bytes()
+
+    attempts = 0
+
+    def fail_once(self, command, *, phase):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SubprocessFailure("forced install failure", phase=phase)
+        return None
+
+    monkeypatch.setattr(FeatureCliOperationService, "_run", fail_once)
+    code, _, stderr = invoke(root, ["remove", "safe", "--yes"])
+
+    assert code == 1
+    assert "forced install failure" in stderr
+    assert feature.is_dir()
+    assert (
+        root / "android/.supernote-module/v2-runtime/feature-registry.json"
+    ).read_bytes() == runtime_before
+    assert json.loads((root / "package.json").read_text())["dependencies"]["safe"]
+
+
+def test_remove_preserves_build_outputs_unless_cleanup_is_explicit(tmp_path: Path):
+    root = plugin(tmp_path)
+    for name in ("preserve", "cleanup"):
+        assert invoke(
+            root,
+            ["add", name, "--starter", "cpp", "--skip-install", "--yes"],
+        )[0] == 0
+    build_paths = (
+        root / "build",
+        root / "android/build",
+        root / "android/app/build",
+    )
+    for index, path in enumerate(build_paths):
+        path.mkdir(parents=True)
+        (path / "proof.txt").write_text(str(index), encoding="utf-8")
+
+    assert invoke(
+        root, ["remove", "preserve", "--skip-install", "--yes"]
+    )[0] == 0
+    assert all(path.is_dir() for path in build_paths)
+
+    code, _, stderr = invoke(
+        root,
+        [
+            "remove",
+            "cleanup",
+            "--delete-build-files",
+            "--skip-install",
+            "--yes",
+        ],
+    )
+
+    assert code == 0, stderr
+    assert all(not path.exists() for path in build_paths)
+
+
+def test_remove_all_is_explicit_and_removes_every_feature(tmp_path: Path):
+    root = plugin(tmp_path)
+    for name in ("one", "two"):
+        assert invoke(
+            root,
+            ["add", name, "--starter", "cpp", "--skip-install", "--yes"],
+        )[0] == 0
+
+    code, stdout, stderr = invoke(
+        root, ["remove", "--all", "--skip-install", "--yes"]
+    )
+
+    assert code == 0, stderr
+    assert "2 features" in stdout
+    assert not (root / "local_modules/one").exists()
+    assert not (root / "local_modules/two").exists()
+    assert not (root / "android/.supernote-module/v2-runtime").exists()
 
 
 def test_package_manager_precedence_for_noninteractive_add(tmp_path: Path):
@@ -295,9 +295,9 @@ def test_package_manager_precedence_for_noninteractive_add(tmp_path: Path):
     parsed = parse_arguments(
         [
             "add",
-            "local-math",
-            "--type",
-            "native",
+            "math",
+            "--starter",
+            "cpp",
             "--description",
             "",
             "--javascript-name",
@@ -308,31 +308,40 @@ def test_package_manager_precedence_for_noninteractive_add(tmp_path: Path):
             "0.1.0",
         ]
     )
-    collector = DecisionCollector(root, parsed, None)
-    assert collector.add().package_manager == "yarn"
+    decisions = FeatureDecisionCollector(root, parsed, None).add()
+    assert decisions.package_manager == "yarn"
 
 
 def test_conflicting_lockfiles_still_require_manager_with_yes(tmp_path: Path):
     root = plugin(tmp_path, npm_lock=True, yarn_lock=True)
-    code, _, stderr = invoke(root, ["add", "local-math", "--yes"])
+    code, _, stderr = invoke(root, ["add", "math", "--yes"])
     assert code == 2
     assert "package manager is ambiguous" in stderr
 
 
 def test_skip_install_bypasses_conflicting_lockfiles(tmp_path: Path):
     root = plugin(tmp_path, npm_lock=True, yarn_lock=True)
-    code, stdout, stderr = invoke(root, ["add", "local-math", "--skip-install", "--yes"])
+    code, stdout, stderr = invoke(root, ["add", "math", "--skip-install", "--yes"])
     assert code == 0, stderr
-    assert "Choose npm or Yarn, then install dependencies" in stdout
+    assert 'Added feature "math"' in stdout
 
 
 def test_quiet_success_is_exactly_one_line(tmp_path: Path):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(
-        root, ["add", "local-quiet", "--type", "native", "--skip-install", "--yes", "--quiet"]
+        root,
+        [
+            "add",
+            "quiet",
+            "--starter",
+            "cpp",
+            "--skip-install",
+            "--yes",
+            "--quiet",
+        ],
     )
     assert code == 0, stderr
-    assert stdout == 'Added module "local-quiet"\n'
+    assert stdout == 'Added feature "quiet"\n'
 
 
 def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
@@ -340,19 +349,18 @@ def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
 ):
     root = plugin(tmp_path)
     gradle = root / "android/gradlew"
-    # This is command-routing coverage, not proof that generated Android code
-    # compiles. A real template build belongs in the integration tier.
     gradle.write_text(
-        '#!/bin/sh\ncase "$1" in\n  --version|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
-        encoding="utf-8",
+        '#!/bin/sh\ncase "$1" in\n  --version|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n'
     )
     gradle.chmod(0o755)
+
     code, stdout, stderr = invoke(
         root,
-        ["add", "local-built", "--type", "native", "--skip-install", "--build", "--yes"],
+        ["add", "built", "--starter", "cpp", "--skip-install", "--build", "--yes"],
     )
+
     assert code == 0, stderr
-    assert stdout.startswith('✓ Added and built module "local-built"\n')
+    assert 'Added and built feature "built"' in stdout
 
 
 def test_add_rejects_local_modules_symlink_that_escapes_plugin_root(tmp_path: Path):
@@ -365,9 +373,9 @@ def test_add_rejects_local_modules_symlink_that_escapes_plugin_root(tmp_path: Pa
 
     code, _, stderr = invoke(
         root,
-        ["add", "local-escape", "--type", "native", "--skip-install", "--yes"],
+        ["add", "escape", "--starter", "cpp", "--skip-install", "--yes"],
     )
 
     assert code == 2
     assert "target resolves outside the Supernote plugin" in stderr
-    assert not (outside / "local-escape").exists()
+    assert not (outside / "escape").exists()

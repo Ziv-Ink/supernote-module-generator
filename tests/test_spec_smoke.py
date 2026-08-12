@@ -9,13 +9,14 @@ from supernote_module_generator.cli import main
 
 def plugin(tmp_path: Path) -> Path:
     android = tmp_path / "android"
-    android.mkdir()
+    (android / "app").mkdir(parents=True)
     (tmp_path / "PluginConfig.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / "package.json").write_text(
         json.dumps({"name": "fixture", "dependencies": {}}) + "\n",
         encoding="utf-8",
     )
     (android / "settings.gradle").write_text("include ':app'\n", encoding="utf-8")
+    (android / "app/build.gradle").write_text("plugins {}\n", encoding="utf-8")
     return tmp_path
 
 
@@ -30,10 +31,10 @@ def test_add_validate_remove_smoke(tmp_path: Path):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(
         root,
-        ["add", "local-math", "--type", "native", "--skip-install", "--yes"],
+        ["add", "local-math", "--starter", "cpp", "--skip-install", "--yes"],
     )
     assert code == 0, stderr
-    assert stdout.startswith('✓ Added module "local-math"\n')
+    assert stdout.startswith('✓ Added feature "local-math"\n')
     module = root / "local_modules/local-math"
     assert (module / ".supernote-module.json").is_file()
     assert json.loads((module / "package.json").read_text())["name"] == "local-math"
@@ -44,13 +45,13 @@ def test_add_validate_remove_smoke(tmp_path: Path):
     link.symlink_to(module, target_is_directory=True)
     code, stdout, stderr = invoke(root, ["validate", "local-math"])
     assert code == 0, stderr
-    assert stdout == '✓ Module "local-math" is valid\n'
+    assert stdout == '✓ Feature "local-math" is valid\n'
 
     code, stdout, stderr = invoke(
         root, ["remove", "local-math", "--skip-install", "--yes"]
     )
     assert code == 0, stderr
-    assert stdout.startswith('✓ Removed module "local-math"\n')
+    assert stdout.startswith('✓ Removed feature "local-math"\n')
     assert not module.exists()
 
 
@@ -62,8 +63,8 @@ def test_json_add_has_stable_envelope_and_empty_stderr(tmp_path: Path):
             "--json",
             "add",
             "local-json",
-            "--type",
-            "jni",
+            "--starter",
+            "kotlin",
             "--skip-install",
             "--yes",
         ],
@@ -89,7 +90,7 @@ def test_json_add_has_stable_envelope_and_empty_stderr(tmp_path: Path):
         "recovery",
         "error",
     ]
-    assert value["module"]["type"] == "jni"
+    assert value["module"]["type"] == "feature"
     assert value["rollback"] == {
         "attempted": False,
         "status": "not_needed",
@@ -102,7 +103,7 @@ def test_noninteractive_add_without_yes_lists_all_missing_decisions(tmp_path: Pa
     code, stdout, stderr = invoke(root, ["add", "local-math"])
     assert code == 2
     assert stdout == ""
-    assert "--type <native|jni|jsi>" in stderr
+    assert "--starter <cpp|kotlin>" in stderr
     assert '--description <TEXT> or --description ""' in stderr
     assert "--javascript-name <NAME>" in stderr
     assert "--android-namespace <NAMESPACE>" in stderr

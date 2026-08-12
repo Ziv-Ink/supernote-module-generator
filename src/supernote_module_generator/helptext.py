@@ -6,27 +6,26 @@ from typing import Dict
 
 ROOT_HELP = """Supernote Module Generator
 
-Generate and manage Native, JNI, and JSI modules in an existing Supernote plugin.
+Generate and manage language-neutral V2 features in an existing Supernote plugin.
 
 Usage:
   supernote-module
   supernote-module <command> [options]
 
 Commands:
-  add        Create and link a local module.
-  update     Refresh generated parts of one module.
-  validate   Check module structure, integration, and optionally its build.
-  remove     Permanently delete one or all modules.
+  add        Create and link a local feature.
+  update     Refresh generated parts of one feature.
+  validate   Check feature structure, integration, and optionally its build.
+  remove     Permanently delete one or all features.
   doctor     Verify the development environment.
   help       Show help for a command.
 
-Module types:
-  Native Module
-    For Kotlin/Java code and Android APIs through the React Native bridge.
-  Native JNI Module
-    For C/C++ behind an asynchronous Kotlin/Java React Native bridge.
-  JSI Module
-    Synchronous C++; requires target PluginHost support.
+Starter code families:
+  C/C++ (native)
+    Creates a C++ starter. C23 files can be added to the same native root.
+  Kotlin/Java (JVM)
+    Creates a Kotlin starter. Java files can be added to the same JVM root.
+  Starter selection controls only initial files; one feature can use both.
 
 Global options:
   -h, --help      Show help.
@@ -40,27 +39,28 @@ Global options:
 
 Examples:
   supernote-module
-  supernote-module add local-math --type native
+  supernote-module add local-math --starter cpp
+  supernote-module add document --starter cpp --starter kotlin
   supernote-module validate --all
-  supernote-module doctor --type jsi
+  supernote-module doctor
 
 For command-specific help, run a command such as `supernote-module help add`.
 """
 
 ADD_HELP = """Supernote Module Generator
 
-Create and link a local module.
+Create and link a language-neutral local feature.
 
 Usage:
   supernote-module add [PACKAGE] [options]
 
 Arguments:
-  PACKAGE                         npm or Yarn package name and module folder.
+  PACKAGE                         npm or Yarn package name and feature folder.
 
 Options:
-      --type <native|jni|jsi>     Module type.
+      --starter <cpp|kotlin>      Starter code family; repeat to scaffold both.
       --description <TEXT>        Package description; use "" to omit.
-      --javascript-name <NAME>    React Native or JSI name.
+      --javascript-name <NAME>    JavaScript feature name.
       --android-namespace <NAME>  Java-style Android namespace.
       --package-version <VERSION> Initial semantic version [default: 0.1.0].
       --package-manager <npm|yarn>
@@ -84,9 +84,10 @@ Interactive behavior:
   the final valid answer without a confirmation. Installation defaults to Yes.
 
 Non-interactive behavior:
-  Input is never requested. PACKAGE is always required. Without --yes, --type
-  and every other output-affecting decision are required. With --yes, type is
-  native, the description is omitted, the version is 0.1.0, names are derived
+  Input is never requested. PACKAGE is always required. Without --yes,
+  --starter and every other output-affecting decision are required. Repeat
+  --starter to select both families. With --yes, the C/C++ starter is selected,
+  the description is omitted, the version is 0.1.0, names are derived
   when valid, and installation is enabled. Conflicting lockfiles require
   --package-manager.
 
@@ -99,12 +100,12 @@ Name inference:
 
 Examples:
   supernote-module add
-  supernote-module add local-math --type native
-  supernote-module add local-math --type native --yes
-  supernote-module add native-search --type jni --build
-  supernote-module add @acme/stylus-jsi --type jsi \\
-    --javascript-name StylusJsi \\
-    --android-namespace com.acme.stylus_jsi \\
+  supernote-module add local-math --starter cpp
+  supernote-module add local-math --starter cpp --yes
+  supernote-module add document --starter cpp --starter kotlin --build
+  supernote-module add @acme/stylus --starter kotlin \\
+    --javascript-name Stylus \\
+    --android-namespace com.acme.stylus \\
     --package-manager yarn --yes
 
 Exit:
@@ -117,13 +118,13 @@ Exit:
 
 UPDATE_HELP = """Supernote Module Generator
 
-Refresh generated parts of one module while preserving implementation source.
+Refresh generated parts of one feature while preserving implementation source.
 
 Usage:
   supernote-module update [MODULE] [options]
 
 Arguments:
-  MODULE                         Managed package name.
+  MODULE                         Managed feature package name.
 
 Options:
       --package-manager <npm|yarn>
@@ -144,7 +145,7 @@ Output options:
 Behavior:
   Update shows what will be replaced, preserved, and changed in the parent
   plugin. Confirmation defaults to Yes. Dependencies are refreshed only when
-  package metadata or the local link changes. Update always targets one module.
+  package metadata or the local link changes. Update always targets one feature.
 
 Examples:
   supernote-module update
@@ -162,17 +163,17 @@ Exit:
 
 VALIDATE_HELP = """Supernote Module Generator
 
-Check module structure, parent integration, and optionally the Android build.
+Check feature structure, shared-runtime integration, and optionally the Android build.
 
 Usage:
   supernote-module validate [MODULE] [options]
   supernote-module validate --all [options]
 
 Arguments:
-  MODULE       Managed package name.
+  MODULE       Managed feature package name.
 
 Options:
-      --all    Validate every managed module.
+      --all    Validate every managed feature.
       --build  Run the applicable Android build.
   -h, --help   Show help.
 
@@ -187,7 +188,7 @@ Output options:
 Behavior:
   Structural validation is the default and does not run a full build.
   Interactive use asks whether to add the Android build; the default is No.
-  --all reports every module failure before exiting.
+  --all reports every feature failure before exiting.
 
 Examples:
   supernote-module validate
@@ -204,17 +205,19 @@ Exit:
 
 REMOVE_HELP = """Supernote Module Generator
 
-Permanently delete one or all managed modules and detach parent integration.
+Permanently delete one or all managed features and update the shared runtime.
 
 Usage:
   supernote-module remove [MODULE] [options]
   supernote-module remove --all [options]
 
 Arguments:
-  MODULE                         Managed package name.
+  MODULE                         Managed feature package name.
 
 Options:
-      --all                      Remove every managed module.
+      --all                      Remove every managed feature.
+      --delete-build-files       Also remove build/, android/build/, and
+                                 android/app/build/.
       --package-manager <npm|yarn>
                                      Package manager for dependency refresh.
       --skip-install             Skip dependency refresh.
@@ -232,6 +235,8 @@ Output options:
 Confirmation:
   Interactive removal always requires the exact package name. Removing all
   requires REMOVE ALL. --yes is accepted only with an unambiguous target.
+  Build output is preserved by default. --yes never enables its deletion;
+  pass --delete-build-files explicitly when that cleanup is intended.
 
 Recovery:
   Implementation source is retained until parent changes, dependency refresh,
@@ -242,6 +247,7 @@ Examples:
   supernote-module remove
   supernote-module remove local-math
   supernote-module remove local-math --yes
+  supernote-module remove local-math --delete-build-files --yes
   supernote-module remove --all --yes --json
 
 Exit:
@@ -254,14 +260,12 @@ Exit:
 
 DOCTOR_HELP = """Supernote Module Generator
 
-Verify the development environment for a known module scope.
+Verify the development environment required by this V2 plugin.
 
 Usage:
   supernote-module doctor [options]
 
 Options:
-      --type <all|native|jni|jsi>
-               Scope to check [default: all].
   -h, --help   Show help.
 
 Output options:
@@ -273,14 +277,13 @@ Output options:
       --debug     Include internal diagnostics and tracebacks.
 
 Behavior:
-  All strictly checks build requirements for every module type. Native, JNI,
-  and JSI check only their applicable generation/build requirements. JSI also
-  reports an advisory runtime-policy boundary that cannot be proven locally.
+  Doctor checks the JavaScript, Android, Kotlin/KSP, C23/C++23, NDK, CMake,
+  Gradle, and JSI requirements used by the plugin-level V2 runtime. It also
+  reports the target-device runtime boundary that cannot be proven locally.
 
 Examples:
   supernote-module doctor
-  supernote-module doctor --type native
-  supernote-module doctor --type jsi --json
+  supernote-module doctor --json
 
 Exit:
   0 required checks passed

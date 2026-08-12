@@ -157,35 +157,41 @@ class Renderer:
         command = result.command
         module = result.module
         built = bool(result.metadata.get("built"))
+        feature = bool(
+            (module is not None and module.type == "feature")
+            or (result.modules and all(item.type == "feature" for item in result.modules))
+        )
+        noun = "feature" if feature else "module"
+        title = noun.capitalize()
         if command == "add" and module:
             return (
-                f'Added and built module "{module.package_name}"'
+                f'Added and built {noun} "{module.package_name}"'
                 if built
-                else f'Added module "{module.package_name}"'
+                else f'Added {noun} "{module.package_name}"'
             )
         if command == "update" and module:
             return (
-                f'Updated and built module "{module.package_name}"'
+                f'Updated and built {noun} "{module.package_name}"'
                 if built
-                else f'Updated module "{module.package_name}"'
+                else f'Updated {noun} "{module.package_name}"'
             )
         if command == "validate":
             if module:
                 return (
-                    f'Module "{module.package_name}" is valid and builds successfully'
+                    f'{title} "{module.package_name}" is valid and builds successfully'
                     if built
-                    else f'Module "{module.package_name}" is valid'
+                    else f'{title} "{module.package_name}" is valid'
                 )
             count = len(result.modules)
             return (
-                f"All {count} modules are valid and build successfully"
+                f"All {count} {noun}s are valid and build successfully"
                 if built
-                else f"All {count} modules are valid"
+                else f"All {count} {noun}s are valid"
             )
         if command == "remove":
             if module:
-                return f'Removed module "{module.package_name}"'
-            return f"Removed {result.metadata.get('removed_count', len(result.modules))} modules"
+                return f'Removed {noun} "{module.package_name}"'
+            return f"Removed {result.metadata.get('removed_count', len(result.modules))} {noun}s"
         if command == "doctor":
             return "Doctor found no required issues"
         return str(result.metadata.get("success_message", "Success"))
@@ -290,6 +296,11 @@ class Renderer:
         error: ErrorInfo,
     ) -> None:
         if result.modules:
+            noun = (
+                "features"
+                if all(module.type == "feature" for module in result.modules)
+                else "modules"
+            )
             failed = [
                 module
                 for module in result.modules
@@ -305,7 +316,7 @@ class Renderer:
             print(
                 self.style(
                     "error",
-                    f"{self.symbols['failure']} Validation failed for {len(failed)} of {len(result.modules)} modules",
+                    f"{self.symbols['failure']} Validation failed for {len(failed)} of {len(result.modules)} {noun}",
                 ),
                 file=self.stderr,
             )
@@ -320,13 +331,15 @@ class Renderer:
                 )
                 print(f"\n  {module.package_name:<{width}}  {message}", file=self.stderr)
         else:
-            module_name = result.module.package_name if result.module is not None else "module"
+            feature = result.module is not None and result.module.type == "feature"
+            module_name = result.module.package_name if result.module is not None else "feature"
             issues = result.validation.issues
             kinds = {str(issue.get("kind")) for issue in issues}
             missing: list[str] = []
             if result.validation.build == "failed" and not (kinds - {"build"}):
                 label = "Building Android"
-                message = f'Gradle could not build module "{module_name}".'
+                noun = "feature" if feature else "module"
+                message = f'Gradle could not build {noun} "{module_name}".'
             elif kinds and kinds <= {
                 "parent_dependency",
                 "gradle_integration",
@@ -389,6 +402,7 @@ class Renderer:
             return
         scope = {
             "all": "All",
+            "plugin": "Plugin",
             "native": "Native Module",
             "jni": "Native JNI Module",
             "jsi": "JSI Module",

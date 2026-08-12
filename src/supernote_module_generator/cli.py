@@ -11,6 +11,8 @@ from typing import IO, List, Optional
 from . import __version__
 from .arguments import ParsedArguments, parse_arguments
 from .doctor import DoctorService
+from .feature_cli_operations import FeatureCliOperationService
+from .feature_workflows import FeatureDecisionCollector
 from .errors import ConfigurationError, GeneratorError, OperationCancelled, PartialFailure
 from .helptext import help_for
 from .interaction import (
@@ -29,36 +31,28 @@ from .models import (
     SubprocessError,
 )
 from .naming import infer_android_namespace, infer_javascript_name
-from .operations import OperationService
 from .project import managed_modules, resolve_plugin_root
 from .rendering import Renderer, TerminalCapabilities
 from .transaction import recover_pending
-from .workflows import DecisionCollector, ReturnToMenu
+from .workflows import ReturnToMenu
 
-# Stable labels retained as importable constants for integrations and tests.
-BACKEND_CHOICES = [
+# Public starter choices describe source developers write, not backends.
+STARTER_CHOICES = [
     (
-        "native",
-        "Native Module — For Kotlin/Java code and Android APIs through the "
-        "React Native bridge.",
+        "cpp",
+        "C/C++ (native) — Create a C++ starter in the native implementation root.",
     ),
     (
-        "jni",
-        "Native JNI Module — For C/C++ behind an asynchronous Kotlin/Java "
-        "React Native bridge.",
-    ),
-    (
-        "jsi",
-        "JSI Module — Synchronous C++; requires target PluginHost "
-        "support.",
+        "kotlin",
+        "Kotlin/Java (JVM) — Create a Kotlin starter in the JVM implementation root.",
     ),
 ]
-BACKEND_UI_CHOICES = BACKEND_CHOICES
+STARTER_UI_CHOICES = STARTER_CHOICES
 MAIN_ACTION_CHOICES = [
-    ("add", "Add module"),
-    ("update", "Update module"),
-    ("validate", "Validate module"),
-    ("remove", "Remove module"),
+    ("add", "Add feature"),
+    ("update", "Update feature"),
+    ("validate", "Validate feature"),
+    ("remove", "Remove feature"),
     ("doctor", "Doctor"),
     ("help", "Help"),
     ("exit", "Exit"),
@@ -139,17 +133,17 @@ def _usage_recovery(command: str, message: str) -> str:
     if message.startswith("unknown option"):
         target = f" {command}" if command in {"add", "update", "validate", "remove", "doctor"} else ""
         return f"Run `supernote-module{target} --help` for valid options."
-    if message == "--type is required without --yes in non-interactive mode":
+    if message == "--starter is required without --yes in non-interactive mode":
         return (
-            "Provide one of: --type native, --type jni, --type jsi; or use --yes to accept\n"
-            "Native Module."
+            "Provide --starter cpp, --starter kotlin, or both; or use --yes to accept\n"
+            "the C/C++ starter."
         )
     if message == "--all cannot be used with a module name":
         return "Choose one target or use --all."
     if message == "--quiet, --verbose, and --json cannot be combined":
         return "Choose one output mode."
-    if message.startswith("invalid module type"):
-        return "Choose one of: native, jni, jsi."
+    if message.startswith("invalid starter family"):
+        return "Choose cpp or kotlin. Repeat --starter to scaffold both."
     if message.startswith("invalid package manager"):
         return "Choose one of: npm, yarn."
     if message.startswith("invalid package name"):
@@ -199,7 +193,7 @@ def _usage_recovery(command: str, message: str) -> str:
     if message == "--yes requires an explicit module or --all":
         return "Provide a module name or --all before using --yes."
     if message.startswith("module ") and message.endswith(" was not found"):
-        return "Run `supernote-module validate --all` to list and check managed modules."
+        return "Run `supernote-module validate --all` to list and check managed features."
     if message.startswith("module ") and message.endswith(" already exists"):
         module = message[len('module "') : -len('" already exists')]
         return f"Use `supernote-module update {module}` to refresh it."
@@ -388,7 +382,7 @@ def _run_command(
             valid_root = None
         if valid_root is not None:
             startup_warnings = _recover(valid_root, command, renderer)
-        collector = DecisionCollector(
+        collector = FeatureDecisionCollector(
             valid_root or cwd.resolve(),
             parsed,
             interaction,
@@ -401,44 +395,47 @@ def _run_command(
 
     root = resolve_plugin_root(cwd)
     startup_warnings = _recover(root, command, renderer)
-    collector = DecisionCollector(
+    collector = FeatureDecisionCollector(
         root,
         parsed,
         interaction,
         launched_from_menu=launched_from_menu,
     )
-    service = OperationService(root, renderer)
+    service = FeatureCliOperationService(root, renderer)
     if command == "add":
         decisions = collector.add()
         result = service.add(decisions)
     elif command == "update":
-        decisions, empty = collector.update()
+        decisions = collector.update()
         if decisions is None:
             if renderer.mode == "json":
                 return CommandResult("update", metadata={"empty": True})
-            if interaction is not None and empty is not None:
+            empty = "No features were found in this plugin.\nAdd one with `supernote-module add`."
+            if interaction is not None:
                 print(f"\n{empty}", file=renderer.stderr)
             elif interaction is None:
                 print(empty, file=renderer.stdout)
             return CommandResult("update", metadata={"empty": True, "already_rendered": True})
         result = service.update(decisions)
     elif command == "validate":
-        decisions, empty = collector.validate()
+        decisions = collector.validate()
         if decisions is None:
             if renderer.mode == "json":
                 return CommandResult("validate", metadata={"empty": True})
-            if interaction is not None and empty is not None:
+            empty = "No features were found in this plugin."
+            if interaction is not None:
                 print(f"\n{empty}", file=renderer.stderr)
             elif interaction is None:
                 print(empty, file=renderer.stdout)
             return CommandResult("validate", metadata={"empty": True, "already_rendered": True})
         result = service.validate(decisions)
     elif command == "remove":
-        decisions, empty = collector.remove()
+        decisions = collector.remove()
         if decisions is None:
             if renderer.mode == "json":
                 return CommandResult("remove", metadata={"empty": True})
-            if interaction is not None and empty is not None:
+            empty = "No features were found in this plugin."
+            if interaction is not None:
                 print(f"\n{empty}", file=renderer.stderr)
             elif interaction is None:
                 print(empty, file=renderer.stdout)
@@ -448,24 +445,24 @@ def _run_command(
         raise ConfigurationError(f'unknown command "{command}"')
     result.warnings = [
         *(warning for warning in startup_warnings if warning is not None),
-        *collector.context.warnings,
+        *collector.warnings,
         *result.warnings,
     ]
     return result
 
 
 MAIN_MENU_ITEMS = [
-    MenuItem("add", "Add module", "Create and link a local module."),
-    MenuItem("update", "Update module", "Refresh generated parts of a module."),
-    MenuItem("validate", "Validate module", "Check module structure and integration."),
-    MenuItem("remove", "Remove module", "Permanently delete a local module."),
+    MenuItem("add", "Add feature", "Create and link a local feature."),
+    MenuItem("update", "Update feature", "Refresh generated parts of a feature."),
+    MenuItem("validate", "Validate feature", "Check feature structure and integration."),
+    MenuItem("remove", "Remove feature", "Permanently delete a local feature."),
     MenuItem("doctor", "Doctor", "Verify your development environment."),
     MenuItem("help", "Help", "Show commands and usage."),
     MenuItem("exit", "Exit", "Close the generator."),
 ]
 
 INVALID_ROOT_ITEMS = [
-    MenuItem("doctor", "Doctor", "Check module-generation tools."),
+    MenuItem("doctor", "Doctor", "Check feature-generation tools."),
     MenuItem("help", "Help", "Show commands and usage."),
     MenuItem("exit", "Exit"),
 ]

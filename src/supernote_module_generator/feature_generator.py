@@ -95,22 +95,19 @@ def stage_feature(
             android_namespace=config.android_namespace,
             starter_files=starter_files,
         )
+        package = {
+            "name": config.npm_name,
+            "version": config.package_version,
+            "main": "index.js",
+            "types": "index.d.ts",
+            "files": ["android/src/main", "index.js", "index.d.ts", "README.md"],
+        }
+        if config.description:
+            package["description"] = config.description
         _write(
             temporary,
             "package.json",
-            json.dumps(
-                {
-                    "name": config.npm_name,
-                    "version": config.package_version,
-                    "description": config.description,
-                    "main": "index.js",
-                    "types": "index.d.ts",
-                    "files": ["android/src/main", "index.js", "index.d.ts"],
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-            + "\n",
+            json.dumps(package, indent=2, ensure_ascii=False) + "\n",
         )
         global_name = "__supernoteV2"
         _write(
@@ -143,6 +140,11 @@ def stage_feature(
             f"declare const feature: {config.public_name}Feature;\n"
             "export default feature;\n",
         )
+        if preserve_sources_from is not None:
+            previous_types = preserve_sources_from / "index.d.ts"
+            if previous_types.is_file():
+                shutil.copy2(previous_types, temporary / "index.d.ts")
+        _write(temporary, "README.md", _feature_readme(config))
         metadata = {
             **feature.manifest(),
             "package_version": config.package_version,
@@ -153,6 +155,7 @@ def stage_feature(
                 "index.d.ts",
                 "index.js",
                 "package.json",
+                "README.md",
             ],
         }
         _write(
@@ -164,6 +167,29 @@ def stage_feature(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _feature_readme(config: FeatureConfig) -> str:
+    return f"""# {config.npm_name}
+
+Generated Supernote V2 feature package. Its logical feature is language-neutral:
+C/C++ and Kotlin/Java source may coexist under `android/src/main/`.
+
+Only declarations with explicit Supernote markers enter generated APIs. Ordinary
+public source remains ordinary implementation code. `SupernoteExport` publishes a
+declaration to JavaScript; `SupernoteInternal` generates hidden cross-language
+routing; `SupernoteAsync` makes an accepted call return a Promise. Marker spelling
+is source-language-specific (`// @SupernoteExport` in C++ and
+`@SupernoteExport` on Kotlin/Java declarations).
+
+The generated TypeScript API is `index.d.ts`. Run the plugin's Android/Gradle
+generation after changing marked declarations. `supernote-module update
+{config.npm_name}` refreshes generator-owned files while preserving user-owned
+C/C++ and Kotlin/Java source.
+
+Generated runtime behavior is shared once by the whole plugin. Do not edit this
+package's generated JavaScript, TypeScript, metadata, or README directly.
+"""
 
 
 def activate_feature(staged: Path, destination: Path) -> Path | None:
