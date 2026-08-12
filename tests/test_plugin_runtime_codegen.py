@@ -77,6 +77,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert '"Alpha"' in source
     assert '"Beta"' in source
     assert gradle.count("com.android.library") == 1
+    assert "jniLibs.excludes" in gradle
+    assert "**/libjsi.so" in gradle
+    assert "**/libreactnative.so" in gradle
     assert "local_modules/@local/alpha/android/src/main/java" in gradle
     assert "local_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteFeatureRoots" in gradle

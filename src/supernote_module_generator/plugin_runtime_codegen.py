@@ -154,6 +154,15 @@ android {{
     sourceSets {{
         main.java.srcDirs(supernoteJvmRoots)
     }}
+    packaging {{
+        jniLibs.excludes += [
+            '**/libc++_shared.so',
+            '**/libfbjni.so',
+            '**/libhermes.so',
+            '**/libjsi.so',
+            '**/libreactnative.so',
+        ]
+    }}
 }}
 
 dependencies {{
