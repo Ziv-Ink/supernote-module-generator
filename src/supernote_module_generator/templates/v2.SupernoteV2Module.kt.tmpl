@@ -32,7 +32,7 @@ class SupernoteV2Module(
         Log.e(TAG, "plugin ClassLoader is unavailable")
         return@runOnJSQueueThread
       }
-      val installed = nativeInstall(runtimePointer, loader)
+      val installed = nativeInstall(runtimePointer, loader, context)
       if (installed == 0L) {
         Log.e(TAG, "V2 runtime installation failed")
       } else {
@@ -88,7 +88,11 @@ class SupernoteV2Module(
     false
   }
 
-  private external fun nativeInstall(runtimePointer: Long, classLoader: ClassLoader): Long
+  private external fun nativeInstall(
+      runtimePointer: Long,
+      classLoader: ClassLoader,
+      platformContext: ReactApplicationContext,
+  ): Long
   private external fun nativeInvalidate(sessionId: Long)
   private external fun nativeRunJsTask(taskId: Long, runtimePointer: Long)
 

@@ -82,7 +82,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "JNI_OnLoad" in bootstrap
     assert "install_plugin_bindings" in bootstrap
     assert "runOnJSQueueThread" in module
-    assert "nativeInstall(runtimePointer, loader)" in module
+    assert "nativeInstall(runtimePointer, loader, context)" in module
     assert "class SupernoteV2Package" in module
     assert (
         generated

@@ -17,6 +17,7 @@ from common_support.binding_codegen import (
 )
 from common_support.jvm_manifest import read_jvm_manifest
 from common_support.jvm_projection import project_jvm_owners
+from common_support.jvm_codegen import JvmCodegenError, render_jvm_feature_jsi
 from common_support.semantic import (
     SemanticApi,
     merge_semantic_apis,
@@ -71,6 +72,7 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
     output_root = runtime_root / "build/generated/supernote" / variant
     semantic_registry = []
     generated_jni: dict[str, str] = {}
+    jvm_feature_ids: list[str] = []
     for feature in features:
         feature_id = feature["feature_id"]
         suffix = feature_id.removeprefix("supernote:feature:")
@@ -98,16 +100,12 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
         if len(manifests) > 1:
             raise RuntimeError(f"multiple JVM manifests were emitted for {feature_id}")
         jvm = SemanticApi()
+        source_manifest = None
         if manifests:
             source_manifest = read_jvm_manifest(
                 manifests[0], expected_feature_id=feature_id
             )
             jvm = project_jvm_owners(source_manifest.owners)
-        if jvm.functions or jvm.classes:
-            raise RuntimeError(
-                f"{feature_id}: JVM declarations were recognized, but the "
-                "typed JSI/JNI route is not implemented yet"
-            )
         semantic = merge_semantic_apis(cpp, jvm)
         semantic_json = semantic.manifest()
         encoded = json.dumps(
@@ -136,8 +134,22 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
             )
         except CodegenError as exc:
             raise RuntimeError(str(exc)) from exc
+        if source_manifest is not None:
+            try:
+                generated_jni[f"jvm_feature_{suffix}.cpp"] = (
+                    render_jvm_feature_jsi(
+                        source_manifest,
+                        jvm,
+                        feature_id=feature_id,
+                        module_name=feature["public_name"],
+                    )
+                )
+            except JvmCodegenError as exc:
+                raise RuntimeError(str(exc)) from exc
+            jvm_feature_ids.append(feature_id)
     generated_jni["plugin_bindings.cpp"] = render_v2_plugin_jsi(
-        [feature["feature_id"] for feature in features]
+        [feature["feature_id"] for feature in features],
+        jvm_feature_ids=jvm_feature_ids,
     )
     jni_root = output_root / "jni"
     for name, source in generated_jni.items():

@@ -112,6 +112,15 @@ class SupernoteV2Processor(
     OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
       writer.write(manifestJson(root, owners.values.sortedBy { it.declarationId }))
     }
+    val adapters = environment.codeGenerator.createNewFile(
+      Dependencies(true, *files),
+      "supernote.generated.adapters",
+      "FeatureAdapters_${hash(root.featureId).take(20)}",
+      "kt",
+    )
+    OutputStreamWriter(adapters, Charsets.UTF_8).use { writer ->
+      writer.write(adapterSource(owners.values.sortedBy { it.declarationId }))
+    }
   }
 
   private fun classOwner(root: FeatureRoot, declaration: KSClassDeclaration): OwnerFact {
@@ -417,6 +426,94 @@ private data class ParameterFact(val jvmType: String, val name: String, val null
 private data class ConstructorFact(val declarationId: String, val descriptor: String, val parameters: MutableList<ParameterFact>, val visibility: String, val markers: List<MarkerFact>, val adapterIdentity: String, val source: SourceFact)
 private data class DeclarationFact(val declarationId: String, val ownerDeclarationId: String, val ownerClass: String, val name: String, val descriptor: String, val parameters: MutableList<ParameterFact>, val result: String, val resultNullable: Boolean, val markers: List<MarkerFact>, val visibility: String, val adapterIdentity: String, val language: String, val suspend: Boolean, val isStatic: Boolean, val source: SourceFact)
 private data class OwnerFact(val declarationId: String, val language: String, val ownerClass: String, val sourceName: String, var form: String, val visibility: String, val markers: List<MarkerFact>, val source: SourceFact, val constructors: MutableList<ConstructorFact>, val declarations: MutableList<DeclarationFact> = mutableListOf())
+
+private fun adapterSource(owners: List<OwnerFact>): String = buildString {
+  appendLine("@file:Suppress(\"unused\")")
+  appendLine("package supernote.generated.adapters")
+  appendLine()
+  appendLine("import com.facebook.react.bridge.ReactApplicationContext")
+  appendLine()
+  owners.forEach { owner ->
+    owner.constructors.filter { it.visibility == "public" }.forEach { constructor ->
+      appendLine("object ${adapterClass(constructor.adapterIdentity)} {")
+      val parameters = mutableListOf("context: ReactApplicationContext")
+      parameters += constructor.parameters.filter { it.injected == null }
+        .mapIndexed { index, parameter -> "arg$index: ${adapterType(parameter.jvmType)}" }
+      appendLine("  @JvmStatic")
+      appendLine("  fun invoke(${parameters.joinToString(", ")}): ${kotlinReference(owner.ownerClass)} =")
+      val arguments = mutableListOf<String>()
+      var valueIndex = 0
+      constructor.parameters.forEach { parameter ->
+        arguments += if (parameter.injected != null) {
+          "context"
+        } else {
+          adapterInput(parameter.jvmType, "arg${valueIndex++}")
+        }
+      }
+      appendLine("      ${kotlinReference(owner.ownerClass)}(${arguments.joinToString(", ")})")
+      appendLine("}")
+      appendLine()
+    }
+    owner.declarations.filterNot { it.suspend }.forEach { declaration ->
+      appendLine("object ${adapterClass(declaration.adapterIdentity)} {")
+      val takesOwner = owner.form == "class"
+      val parameters = mutableListOf<String>()
+      if (takesOwner) parameters += "owner: ${kotlinReference(owner.ownerClass)}"
+      parameters += declaration.parameters.mapIndexed { index, parameter ->
+        "arg$index: ${adapterType(parameter.jvmType)}"
+      }
+      appendLine("  @JvmStatic")
+      append("  fun invoke(${parameters.joinToString(", ")}): ${adapterType(declaration.result)} ")
+      val arguments = declaration.parameters.mapIndexed { index, parameter ->
+        adapterInput(parameter.jvmType, "arg$index")
+      }.joinToString(", ")
+      val target = when (owner.form) {
+        "class" -> "owner.${kotlinIdentifier(declaration.name)}"
+        "kotlin_object", "java_static" ->
+          "${kotlinReference(owner.ownerClass)}.${kotlinIdentifier(declaration.name)}"
+        "kotlin_top_level" -> {
+          val packageName = owner.ownerClass.substringBeforeLast('.', "")
+          listOf(packageName, kotlinIdentifier(declaration.name))
+            .filter { it.isNotEmpty() }.joinToString(".")
+        }
+        else -> error("Unsupported JVM owner form ${owner.form}")
+      }
+      val call = "$target($arguments)"
+      when (declaration.result) {
+        "kotlin.Unit", "void" -> appendLine("{ $call }")
+        "kotlin.String", "java.lang.String" -> appendLine("= $call.encodeToByteArray()")
+        else -> appendLine("= $call")
+      }
+      appendLine("}")
+      appendLine()
+    }
+  }
+}
+
+private fun adapterClass(identity: String): String =
+  "Adapter_" + identity.substringAfterLast('.')
+
+private fun adapterType(type: String): String = when (type) {
+  "kotlin.Unit", "void" -> "Unit"
+  "kotlin.Boolean", "boolean" -> "Boolean"
+  "kotlin.Int", "int" -> "Int"
+  "kotlin.Long", "long" -> "Long"
+  "kotlin.Float", "float" -> "Float"
+  "kotlin.Double", "double" -> "Double"
+  "kotlin.String", "java.lang.String", "kotlin.ByteArray", "byte[]" -> "ByteArray"
+  else -> error("Unsupported adapter type $type")
+}
+
+private fun adapterInput(type: String, name: String): String = when (type) {
+  "kotlin.String", "java.lang.String" -> "$name.decodeToString(throwOnInvalidSequence = true)"
+  else -> name
+}
+
+private fun kotlinReference(qualified: String): String =
+  qualified.split('.').joinToString(".") { kotlinIdentifier(it) }
+
+private fun kotlinIdentifier(value: String): String =
+  "`" + value.replace("`", "") + "`"
 
 private fun manifestJson(root: FeatureRoot, owners: List<OwnerFact>): String = json(
   linkedMapOf(

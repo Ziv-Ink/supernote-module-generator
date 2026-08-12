@@ -18,6 +18,7 @@ from supernote_module_generator.jvm_projection import (
     jvm_type_table,
     project_jvm_owners,
 )
+from supernote_module_generator.jvm_codegen import render_jvm_feature_jsi
 from supernote_module_generator.semantic import (
     DeclarationRole,
     ExecutionMode,
@@ -130,6 +131,39 @@ def ordinary_kotlin_owner() -> JvmOwnerSource:
     )
 
 
+def synchronous_kotlin_owner() -> JvmOwnerSource:
+    owner = "com.example.DocumentApi"
+    context = JvmParameterSource(
+        "android.content.Context",
+        "context",
+        injected=JvmInjectedDependency.CONTEXT,
+    )
+    greet = declaration(
+        owner,
+        JvmLanguage.KOTLIN,
+        "greet",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        (JvmParameterSource("kotlin.String", "name"),),
+        "kotlin.String",
+        SupernoteMarker.EXPORT,
+    )
+    return JvmOwnerSource(
+        provenance(jvm_owner_identity(owner), JvmLanguage.KOTLIN, "Api.kt", 3),
+        JvmLanguage.KOTLIN,
+        owner,
+        "DocumentApi",
+        JvmOwnerForm.CLASS,
+        intent(DeclarationTarget.CLASS),
+        (
+            constructor(
+                owner,
+                JvmLanguage.KOTLIN,
+                "(Landroid/content/Context;)V",
+                (context,),
+            ),
+        ),
+        (greet,),
+    )
 def test_manifest_round_trip_is_deterministic_versioned_and_backend_specific(
     tmp_path: Path,
 ):
@@ -162,6 +196,27 @@ def test_projection_maps_kotlin_suspend_to_common_semantics_without_losing_route
     assert binding.result is SemanticType.BYTES
     assert owner.declarations[0].is_suspend is True
     assert owner.declarations[0].jvm_descriptor == "(I)[B"
+
+
+def test_sync_jvm_route_targets_ksp_adapter_and_feature_scoped_owner():
+    owner = synchronous_kotlin_owner()
+    manifest = JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,))
+    api = project_jvm_owners((owner,))
+    source = render_jvm_feature_jsi(
+        manifest,
+        api,
+        feature_id=FEATURE_ID,
+        module_name="Document",
+    )
+
+    adapter = owner.declarations[0].adapter_identity.rsplit(".", 1)[-1]
+    assert f"supernote.generated.adapters.Adapter_{adapter}" in source
+    assert "(Lcom/example/DocumentApi;[B)[B" in source
+    assert 'feature_session->service<JvmOwner>' in source
+    assert "CallStaticObjectMethodA" in source
+    assert 'exports.setProperty(runtime, "greet"' in source
+    assert "FindClass" not in source
+    assert 'loadClass' in source
 
 
 def test_kotlin_and_java_canonical_type_tables_are_exact():

@@ -4157,7 +4157,8 @@ constexpr char kFeatureId[] = {json.dumps(feature_id)};
     install_name = "register_feature" if feature_id is not None else "install_exports"
     install_parameters = (
         "facebook::jsi::Runtime &runtime,\n"
-        "    facebook::jsi::Object &feature_registry"
+        "    facebook::jsi::Object &feature_registry,\n"
+        "    const std::shared_ptr<supernote::runtime::FeatureSession> &feature_session"
         if feature_id is not None
         else "facebook::jsi::Runtime &runtime"
     )
@@ -4266,8 +4267,12 @@ void clear_pending_exception(JNIEnv *env, const char *operation) {
   env->ExceptionClear();
 }
 """
+    runtime_include = (
+        '#include "runtime_services.hpp"\n' if feature_id is not None else ""
+    )
     return f"""#include <jni.h>
 #include <jsi/jsi.h>
+{runtime_include}
 
 #include <android/log.h>
 
@@ -4337,7 +4342,11 @@ def render_v2_feature_jsi(
     )
 
 
-def render_v2_plugin_jsi(feature_ids: list[str]) -> str:
+def render_v2_plugin_jsi(
+    feature_ids: list[str],
+    *,
+    jvm_feature_ids: list[str] | None = None,
+) -> str:
     """Render the single plugin registry installed by the runtime bootstrap."""
 
     validated: list[tuple[str, str]] = []
@@ -4349,25 +4358,56 @@ def render_v2_plugin_jsi(feature_ids: list[str]) -> str:
         )
     if len({feature_id for feature_id, _ in validated}) != len(validated):
         raise CodegenError("duplicate V2 feature identity in plugin registry")
+    jvm_features = set(jvm_feature_ids or ())
+    unknown_jvm = jvm_features - {feature_id for feature_id, _ in validated}
+    if unknown_jvm:
+        raise CodegenError("JVM routes refer to an unknown V2 feature")
     declarations = "\n".join(
         "namespace supernote::generated::feature_"
         f"{suffix} {{\n"
         "void register_feature(facebook::jsi::Runtime &runtime,\n"
-        "                      facebook::jsi::Object &feature_registry);\n"
+        "                      facebook::jsi::Object &feature_registry,\n"
+        "                      const std::shared_ptr<\n"
+        "                          supernote::runtime::FeatureSession> &feature_session);\n"
         "}"
         for _, suffix in validated
     )
+    jvm_declarations = "\n".join(
+        "namespace supernote::generated::jvm_feature_"
+        f"{suffix} {{\n"
+        "void register_jvm_feature(facebook::jsi::Runtime &runtime,\n"
+        "                          facebook::jsi::Object &feature_registry,\n"
+        "                          const std::shared_ptr<\n"
+        "                              supernote::runtime::FeatureSession> &feature_session);\n"
+        "}"
+        for feature_id, suffix in validated
+        if feature_id in jvm_features
+    )
     registrations = "\n".join(
-        f"  feature_{suffix}::register_feature(runtime, features);"
-        for _, suffix in validated
+        "  {\n"
+        "    auto feature_session = supernote::runtime::FeatureSession::create(\n"
+        "        runtime_session, supernote::runtime::process_services().cleanup());\n"
+        f"    feature_{suffix}::register_feature(\n"
+        "        runtime, features, feature_session);\n"
+        + (
+            f"    jvm_feature_{suffix}::register_jvm_feature(\n"
+            "        runtime, features, feature_session);\n"
+            if feature_id in jvm_features
+            else ""
+        )
+        + "  }"
+        for feature_id, suffix in validated
     )
     return f"""#include <jsi/jsi.h>
+
+#include "runtime_services.hpp"
 
 #include <cstddef>
 #include <string>
 #include <utility>
 
 {declarations}
+{jvm_declarations}
 
 namespace supernote::generated {{
 namespace {{
@@ -4385,7 +4425,9 @@ constexpr char kFeatureRegistryGlobal[] =
 
 }}  // namespace
 
-void install_plugin_bindings(facebook::jsi::Runtime &runtime) {{
+void install_plugin_bindings(
+    facebook::jsi::Runtime &runtime,
+    const std::shared_ptr<supernote::runtime::RuntimeSession> &runtime_session) {{
   using facebook::jsi::Function;
   using facebook::jsi::Object;
   using facebook::jsi::PropNameID;
