@@ -19,6 +19,7 @@ from supernote_module_generator.jvm_projection import (
     project_jvm_owners,
 )
 from supernote_module_generator.jvm_codegen import render_jvm_feature_jsi
+from supernote_module_generator.internal_codegen import render_cpp_internal_facade
 from supernote_module_generator.semantic import (
     DeclarationRole,
     ExecutionMode,
@@ -340,6 +341,16 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
         SupernoteMarker.EXPORT,
         target=DeclarationTarget.METHOD,
     )
+    hidden = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "hiddenCache",
+        "()V",
+        (),
+        "kotlin.Unit",
+        SupernoteMarker.INTERNAL,
+        target=DeclarationTarget.METHOD,
+    )
     owner = JvmOwnerSource(
         provenance(jvm_owner_identity(owner_name), JvmLanguage.KOTLIN, "Document.kt", 2),
         JvmLanguage.KOTLIN,
@@ -348,13 +359,14 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
         JvmOwnerForm.CLASS,
         intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
         (first, selected),
-        (method,),
+        (method, hidden),
     )
     semantic = project_jvm_owners((owner,)).classes[0]
 
     assert semantic.kind is SemanticClassKind.JS_OBJECT
     assert semantic.constructor.parameters[0].type is SemanticType.STRING
-    assert [item.name for item in semantic.methods] == ["pageCount"]
+    assert [item.name for item in semantic.methods] == ["pageCount", "hiddenCache"]
+    assert semantic.methods[1].capabilities.role is DeclarationRole.INTERNAL
     generated = render_jvm_feature_jsi(
         JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
         project_jvm_owners((owner,)),
@@ -364,6 +376,8 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     assert "GeneratedJvmObject0HostObject" in generated
     assert "Object::createFromHostObject" in generated
     assert 'property == "pageCount"' in generated
+    assert 'property == "hiddenCache"' not in generated
+    assert "method_route_1_" not in generated
     assert "std::shared_ptr<JvmOwner> owner_" in generated
 
 
@@ -472,6 +486,112 @@ def test_internal_jvm_class_is_a_hidden_feature_service():
     assert semantic.kind is SemanticClassKind.INTERNAL_SERVICE
     assert semantic.capabilities.javascript_public is False
     assert semantic.methods[0].capabilities.role is DeclarationRole.INTERNAL
+    manifest = JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,))
+    api = project_jvm_owners((owner,))
+    generated = render_jvm_feature_jsi(
+        manifest,
+        api,
+        feature_id=FEATURE_ID,
+        module_name="Documents",
+    )
+    header, _ = render_cpp_internal_facade(
+        Path("/does/not/need/native/sources"),
+        module_name="Documents",
+        feature_id=FEATURE_ID,
+        jvm_manifest=manifest,
+        jvm_semantic=api,
+    )
+
+    assert "struct IndexService final" in header
+    assert "static void rebuild();" in header
+    assert "IndexService::rebuild" in generated
+    assert "feature->service<JvmOwner>" in generated
+    assert 'exports.setProperty(runtime, "rebuild"' not in generated
+
+
+def test_internal_jvm_functions_share_cpp_facade_across_sync_worker_and_suspend():
+    owner_name = "com.example.FeatureApiKt"
+    value = JvmParameterSource("kotlin.Int", "page")
+    sync = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "pageCount",
+        "(I)I",
+        (value,),
+        "kotlin.Int",
+        SupernoteMarker.INTERNAL,
+        static=True,
+    )
+    blocking = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "loadBlocking",
+        "(I)[B",
+        (value,),
+        "kotlin.ByteArray",
+        SupernoteMarker.INTERNAL,
+        SupernoteMarker.ASYNC,
+        static=True,
+    )
+    suspended = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "loadSuspend",
+        "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+        (value,),
+        "kotlin.ByteArray",
+        SupernoteMarker.INTERNAL,
+        SupernoteMarker.ASYNC,
+        suspend=True,
+        static=True,
+    )
+    owner = JvmOwnerSource(
+        provenance(
+            jvm_owner_identity(owner_name),
+            JvmLanguage.KOTLIN,
+            "FeatureApi.kt",
+            2,
+        ),
+        JvmLanguage.KOTLIN,
+        owner_name,
+        "FeatureApiKt",
+        JvmOwnerForm.KOTLIN_TOP_LEVEL,
+        intent(DeclarationTarget.CLASS),
+        (),
+        (sync, blocking, suspended),
+    )
+    manifest = JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,))
+    api = project_jvm_owners((owner,))
+    generated = render_jvm_feature_jsi(
+        manifest,
+        api,
+        feature_id=FEATURE_ID,
+        module_name="Documents",
+    )
+    header, _ = render_cpp_internal_facade(
+        Path("/does/not/need/native/sources"),
+        module_name="Documents",
+        feature_id=FEATURE_ID,
+        jvm_manifest=manifest,
+        jvm_semantic=api,
+    )
+
+    assert "std::int32_t pageCount(std::int32_t page);" in header
+    assert "void loadBlocking(" in header
+    assert "void loadSuspend(" in header
+    assert "supernote::Result<std::vector<std::byte>>" in header
+    assert "namespace supernote::internal::Documents" in generated
+    assert "process_services().workers().submit" in generated
+    assert "register_jvm_async_completion" in generated
+    assert "Lkotlinx/coroutines/Job;" in generated
+    assert "claim_internal_completion" in generated
+    assert "deliver_internal_callback" in generated
+    assert "FeatureCallScope" in generated
+    assert "feature->service<LazyJvmRoute>" in generated
+    assert 'exports.setProperty(runtime, "pageCount"' not in generated
+    assert 'exports.setProperty(runtime, "loadBlocking"' not in generated
+    assert 'exports.setProperty(runtime, "loadSuspend"' not in generated
+    assert "Promise" not in generated[generated.index("namespace supernote::internal") :]
 
 
 @pytest.mark.parametrize(

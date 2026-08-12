@@ -16,6 +16,7 @@ from .binding_codegen import (
     _jsi_value_helpers,
 )
 from .jvm_manifest import JvmSourceManifest
+from .internal_codegen import internal_header_path, internal_namespace
 from .semantic import (
     DeclarationRole,
     ExecutionMode,
@@ -76,6 +77,7 @@ def render_jvm_feature_jsi(
 ) -> str:
     if manifest.feature_id != feature_id:
         raise JvmCodegenError("JVM manifest and feature identity disagree")
+    suffix = _feature_suffix(feature_id)
     by_source = {
         binding.source.declaration_id: binding for binding in semantic.functions
     }
@@ -84,6 +86,8 @@ def render_jvm_feature_jsi(
     }
     object_wrappers: list[str] = []
     object_registrations: list[str] = []
+    internal_helpers: list[str] = []
+    internal_facades: list[str] = []
     for index, item in enumerate(semantic.classes):
         owner = owners_by_source.get(item.source.declaration_id)
         if owner is None:
@@ -91,10 +95,16 @@ def render_jvm_feature_jsi(
                 f"{item.source.path}:{item.source.line}: JVM class source facts are missing"
             )
         if item.kind is SemanticClassKind.INTERNAL_SERVICE:
-            raise JvmCodegenError(
-                f"{item.source.path}:{item.source.line}: internal JVM service "
-                "routing is recognized but not implemented yet"
+            helpers, facades = _render_internal_service(
+                owner,
+                item,
+                module_name=module_name,
+                feature_suffix=suffix,
+                helper_prefix=f"internal_service_{index}",
             )
+            internal_helpers.extend(helpers)
+            internal_facades.extend(facades)
+            continue
         wrapper, registration = _render_object(owner, item, index, module_name)
         object_wrappers.append(wrapper)
         object_registrations.append(registration)
@@ -108,7 +118,17 @@ def render_jvm_feature_jsi(
             if binding is None:
                 continue
             if binding.capabilities.routable and not binding.capabilities.javascript_public:
-                raise _error(declaration, "internal JVM routing is not implemented yet")
+                helper, facade = _render_internal_function(
+                    owner,
+                    declaration,
+                    binding,
+                    module_name=module_name,
+                    feature_suffix=suffix,
+                    helper_name=f"internal_function_{len(internal_helpers)}",
+                )
+                internal_helpers.append(helper)
+                internal_facades.append(facade)
+                continue
             if binding.execution is ExecutionMode.ASYNC:
                 if declaration.is_suspend:
                     registrations.append(
@@ -130,11 +150,11 @@ def render_jvm_feature_jsi(
                 _render_function(owner, declaration, binding, module_name)
             )
     has_async = has_async or any(
-        method.execution is ExecutionMode.ASYNC
+        method.capabilities.javascript_public
+        and method.execution is ExecutionMode.ASYNC
         for item in semantic.classes
         for method in item.methods
     )
-    suffix = _feature_suffix(feature_id)
     helpers = _jsi_value_helpers().replace(
         "auto exports = runtime.global().getPropertyAsObject(runtime, kGlobalName);",
         "auto registry = runtime.global().getPropertyAsObject(\n"
@@ -163,6 +183,7 @@ def render_jvm_feature_jsi(
 #include <vector>
 
 #include "runtime_services.hpp"
+#include <{internal_header_path(feature_id).removeprefix("include/")}>
 
 namespace supernote::generated::jvm_feature_{suffix} {{
 namespace {{
@@ -178,6 +199,21 @@ class JvmImplementationFailure final : public std::runtime_error {{
  public:
   using std::runtime_error::runtime_error;
 }};
+
+template <typename Callback, typename Result>
+void deliver_internal_callback(Callback &callback, Result result) noexcept {{
+  try {{
+    callback(std::move(result));
+  }} catch (const std::exception &error) {{
+    __android_log_print(
+        ANDROID_LOG_ERROR, kLogTag,
+        "internal JVM completion callback threw: %s", error.what());
+  }} catch (...) {{
+    __android_log_print(
+        ANDROID_LOG_ERROR, kLogTag,
+        "internal JVM completion callback threw an unknown exception");
+  }}
+}}
 
 class AttachedEnv {{
  public:
@@ -356,6 +392,8 @@ void require_no_implementation_exception(JNIEnv *env) {{
 
 }}  // namespace
 
+{chr(10).join(internal_helpers)}
+
 void register_jvm_feature(
     facebook::jsi::Runtime &runtime,
     facebook::jsi::Object &feature_registry,
@@ -372,7 +410,603 @@ void register_jvm_feature(
 }}
 
 }}  // namespace supernote::generated::jvm_feature_{suffix}
+
+namespace supernote::internal::{internal_namespace(module_name)} {{
+
+{chr(10).join(internal_facades)}
+
+}}  // namespace supernote::internal::{internal_namespace(module_name)}
 '''
+
+
+def _render_internal_function(
+    owner: JvmOwnerSource,
+    source: JvmDeclarationSource,
+    binding: SemanticBinding,
+    *,
+    module_name: str,
+    feature_suffix: str,
+    helper_name: str,
+) -> tuple[str, str]:
+    if source.is_suspend:
+        return _render_internal_suspend_route(
+            owner,
+            source,
+            binding,
+            feature_suffix=feature_suffix,
+            helper_name=helper_name,
+            facade_name=binding.name,
+        )
+    helper = _render_internal_blocking_helper(
+        owner, source, binding, helper_name=helper_name
+    )
+    if binding.execution is ExecutionMode.ASYNC:
+        facade = _render_internal_blocking_async_facade(
+            binding,
+            feature_suffix=feature_suffix,
+            helper_name=helper_name,
+            facade_name=binding.name,
+        )
+    else:
+        facade = _render_internal_sync_facade(
+            binding,
+            feature_suffix=feature_suffix,
+            helper_name=helper_name,
+            facade_name=binding.name,
+        )
+    return helper, facade
+
+
+def _render_internal_service(
+    owner: JvmOwnerSource,
+    item: SemanticClass,
+    *,
+    module_name: str,
+    feature_suffix: str,
+    helper_prefix: str,
+) -> tuple[list[str], list[str]]:
+    del module_name
+    declarations = {
+        declaration.provenance.declaration_id: declaration
+        for declaration in owner.declarations
+    }
+    helpers = []
+    facades = []
+    for index, binding in enumerate(item.methods):
+        source = declarations.get(binding.source.declaration_id)
+        if source is None:
+            raise JvmCodegenError(
+                f"{binding.source.path}:{binding.source.line}: JVM service "
+                "method source facts are missing"
+            )
+        helper_name = f"{helper_prefix}_method_{index}"
+        facade_name = f"{item.name}::{binding.name}"
+        if source.is_suspend:
+            helper, facade = _render_internal_suspend_route(
+                owner,
+                source,
+                binding,
+                feature_suffix=feature_suffix,
+                helper_name=helper_name,
+                facade_name=facade_name,
+            )
+        else:
+            helper = _render_internal_blocking_helper(
+                owner, source, binding, helper_name=helper_name
+            )
+            if binding.execution is ExecutionMode.ASYNC:
+                facade = _render_internal_blocking_async_facade(
+                    binding,
+                    feature_suffix=feature_suffix,
+                    helper_name=helper_name,
+                    facade_name=facade_name,
+                )
+            else:
+                facade = _render_internal_sync_facade(
+                    binding,
+                    feature_suffix=feature_suffix,
+                    helper_name=helper_name,
+                    facade_name=facade_name,
+                )
+        helpers.append(helper)
+        facades.append(facade)
+    return helpers, facades
+
+
+def _render_internal_blocking_helper(
+    owner: JvmOwnerSource,
+    source: JvmDeclarationSource,
+    binding: SemanticBinding,
+    *,
+    helper_name: str,
+) -> str:
+    takes_owner = owner.form is JvmOwnerForm.CLASS
+    result_type = _internal_cpp_type(binding.result)
+    parameters = _internal_parameters(binding)
+    signature_tail = f", {parameters}" if parameters else ""
+    descriptor = _adapter_descriptor(binding, owner if takes_owner else None)
+    route_key = f"jvm-route:{source.provenance.declaration_id}"
+    owner_setup = _render_internal_owner_setup(owner) if takes_owner else ""
+    invocation = _worker_invocation(binding, takes_owner)
+    return f'''static {result_type} {helper_name}(
+    const std::shared_ptr<supernote::runtime::FeatureSession> &feature{signature_tail}) {{
+  auto route = feature->service<LazyJvmRoute>(
+      {json.dumps(route_key)}, [] {{
+        return std::make_shared<LazyJvmRoute>(
+            {json.dumps(_adapter_class(source.adapter_identity))},
+            {json.dumps(descriptor)});
+      }});
+{owner_setup}  auto resolved = route->get(feature);
+  AttachedEnv attached;
+  auto *env = attached.get();
+  if (env == nullptr) {{
+    throw std::runtime_error("cannot attach to JavaVM");
+  }}
+  LocalFrame frame(env);
+{_indent(invocation, 2)}
+}}'''
+
+
+def _render_internal_owner_setup(owner: JvmOwnerSource) -> str:
+    constructor = _owner_constructor(owner)
+    route_key = f"jvm-constructor-route:{constructor.provenance.declaration_id}"
+    route = f'''  auto owner_route = feature->service<LazyJvmRoute>(
+      {json.dumps(route_key)}, [] {{
+        return std::make_shared<LazyJvmRoute>(
+            {json.dumps(_adapter_class(constructor.adapter_identity))},
+            {json.dumps(_constructor_descriptor(owner))});
+      }});
+'''
+    setup = _render_owner_setup(owner).replace("feature_session", "feature")
+    return route + _indent(setup, 2) + "\n"
+
+
+def _render_internal_sync_facade(
+    binding: SemanticBinding,
+    *,
+    feature_suffix: str,
+    helper_name: str,
+    facade_name: str,
+) -> str:
+    result_type = _internal_cpp_type(binding.result)
+    parameters = _internal_parameters(binding)
+    arguments = ", ".join(item.name for item in binding.parameters)
+    call_tail = f", {arguments}" if arguments else ""
+    invoke = (
+        f"route::{helper_name}(feature{call_tail});\n    return;"
+        if binding.result is SemanticType.VOID
+        else f"return route::{helper_name}(feature{call_tail});"
+    )
+    return f'''{result_type} {facade_name}({parameters}) {{
+  auto feature = supernote::runtime::current_feature_session();
+  if (!feature ||
+      feature->state() != supernote::runtime::FeatureState::ACTIVE) {{
+    throw supernote::Error(
+        supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
+  }}
+  namespace route = supernote::generated::jvm_feature_{feature_suffix};
+  try {{
+    {invoke}
+  }} catch (const route::JvmImplementationFailure &error) {{
+    throw supernote::Error(
+        supernote::ErrorCode::IMPLEMENTATION_ERROR, error.what());
+  }} catch (const supernote::Error &) {{
+    throw;
+  }} catch (const std::exception &error) {{
+    throw supernote::Error(supernote::ErrorCode::INTERNAL, error.what());
+  }} catch (...) {{
+    throw supernote::Error(
+        supernote::ErrorCode::INTERNAL,
+        "unknown generated JVM route failure");
+  }}
+}}'''
+
+
+def _render_internal_blocking_async_facade(
+    binding: SemanticBinding,
+    *,
+    feature_suffix: str,
+    helper_name: str,
+    facade_name: str,
+) -> str:
+    parameters = _internal_parameters(binding)
+    callback = _internal_callback_type(binding.result)
+    signature = f"{parameters}, {callback} completion" if parameters else f"{callback} completion"
+    captures = ", ".join(
+        f"{item.name} = std::move({item.name})" for item in binding.parameters
+    )
+    capture_tail = f", {captures}" if captures else ""
+    arguments = ", ".join(item.name for item in binding.parameters)
+    call_tail = f", {arguments}" if arguments else ""
+    result_type = _internal_result_type(binding.result)
+    if binding.result is SemanticType.VOID:
+        invoke = (
+            f"route::{helper_name}(feature{call_tail});\n"
+            "      outcome = supernote::Result<void>::success();"
+        )
+    else:
+        invoke = (
+            f"outcome = {result_type}::success(\n"
+            f"          route::{helper_name}(feature{call_tail}));"
+        )
+    return f'''void {facade_name}({signature}) {{
+  auto feature = supernote::runtime::current_feature_session();
+  if (!feature ||
+      feature->state() != supernote::runtime::FeatureState::ACTIVE) {{
+    throw supernote::Error(
+        supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
+  }}
+  if (!completion) {{
+    throw supernote::Error(
+        supernote::ErrorCode::INTERNAL, "completion callback is empty");
+  }}
+  auto operation = feature->accept({{}});
+  if (!operation) {{
+    throw supernote::Error(
+        supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
+  }}
+  auto callback = std::make_shared<decltype(completion)>(
+      std::move(completion));
+  std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
+  auto work = supernote::runtime::process_services().workers().submit(
+      [operation, weak_feature, callback{capture_tail}](
+          supernote::runtime::CancellationToken executor_cancel) mutable {{
+        if (executor_cancel.is_cancelled() ||
+            operation->cancellation_token().is_cancelled()) return;
+        auto feature = weak_feature.lock();
+        if (!feature ||
+            feature->state() != supernote::runtime::FeatureState::ACTIVE) return;
+        supernote::runtime::FeatureCallScope scope(feature);
+        namespace route =
+            supernote::generated::jvm_feature_{feature_suffix};
+        {result_type} outcome = {result_type}::failure(supernote::Error(
+            supernote::ErrorCode::INTERNAL, "operation did not complete"));
+        try {{
+      {invoke}
+        }} catch (const route::JvmImplementationFailure &error) {{
+          outcome = {result_type}::failure(supernote::Error(
+              supernote::ErrorCode::IMPLEMENTATION_ERROR, error.what()));
+        }} catch (const std::exception &error) {{
+          outcome = {result_type}::failure(supernote::Error(
+              supernote::ErrorCode::INTERNAL, error.what()));
+        }} catch (...) {{
+          outcome = {result_type}::failure(supernote::Error(
+              supernote::ErrorCode::INTERNAL,
+              "unknown generated JVM route failure"));
+        }}
+        if (operation->cancellation_token().is_cancelled() ||
+            !feature->claim_internal_completion(operation)) return;
+        route::deliver_internal_callback(*callback, std::move(outcome));
+      }});
+  operation->set_work(work);
+  if (!work.accepted() && feature->claim_internal_completion(operation)) {{
+    namespace route = supernote::generated::jvm_feature_{feature_suffix};
+    auto cleanup = supernote::runtime::process_services().cleanup();
+    auto exhausted = [callback]() mutable {{
+      auto result = {result_type}::failure(supernote::Error(
+          supernote::ErrorCode::RESOURCE_EXHAUSTED,
+          "Supernote worker queue is full"));
+      route::deliver_internal_callback(*callback, std::move(result));
+    }};
+    if (!cleanup || !cleanup->submit(std::move(exhausted))) {{
+      throw supernote::Error(
+          supernote::ErrorCode::INTERNAL,
+          "cannot schedule internal completion callback");
+    }}
+  }}
+}}'''
+
+
+def _render_internal_suspend_route(
+    owner: JvmOwnerSource,
+    source: JvmDeclarationSource,
+    binding: SemanticBinding,
+    *,
+    feature_suffix: str,
+    helper_name: str,
+    facade_name: str,
+) -> tuple[str, str]:
+    if binding.execution is not ExecutionMode.ASYNC:
+        raise _error(
+            source,
+            "a Kotlin suspend implementation requires SupernoteAsync intent",
+        )
+    takes_owner = owner.form is JvmOwnerForm.CLASS
+    parameters = _internal_parameters(binding)
+    signature_tail = f", {parameters}" if parameters else ""
+    route_key = f"jvm-route:{source.provenance.declaration_id}"
+    cancel_key = "jvm-route:supernote-coroutine-cancel"
+    owner_setup = _render_internal_owner_setup(owner) if takes_owner else ""
+    offset = 1 if takes_owner else 0
+    argument_count = len(binding.parameters) + offset + 1
+    argument_rows = []
+    if takes_owner:
+        argument_rows.append(
+            "  jvm_arguments[0].l = static_cast<jobject>(owner->value.get());"
+        )
+    argument_rows.extend(
+        _owned_argument_lines(binding.parameters, offset, "  ")
+    )
+    argument_rows.append(
+        f"  jvm_arguments[{argument_count - 1}].j = "
+        "static_cast<jlong>(completion_id);"
+    )
+    helper = f'''static std::pair<std::shared_ptr<void>, std::shared_ptr<JvmRoute>>
+{helper_name}(
+    const std::shared_ptr<supernote::runtime::FeatureSession> &feature,
+    supernote::runtime::SessionId completion_id{signature_tail}) {{
+  auto route = feature->service<LazyJvmRoute>(
+      {json.dumps(route_key)}, [] {{
+        return std::make_shared<LazyJvmRoute>(
+            {json.dumps(_adapter_class(source.adapter_identity))},
+            {json.dumps(_suspend_adapter_descriptor(binding, owner if takes_owner else None))});
+      }});
+  auto cancel_route = feature->service<LazyJvmRoute>(
+      {json.dumps(cancel_key)}, [] {{
+        return std::make_shared<LazyJvmRoute>(
+            "supernote.generated.runtime.SupernoteCoroutineBridge",
+            "(Lkotlinx/coroutines/Job;)V", "cancel");
+      }});
+{owner_setup}  auto resolved = route->get(feature);
+  auto cancel_resolved = cancel_route->get(feature);
+  AttachedEnv attached;
+  auto *env = attached.get();
+  if (env == nullptr) {{
+    throw std::runtime_error("cannot attach to JavaVM");
+  }}
+  LocalFrame frame(env);
+  jvalue jvm_arguments[{max(1, argument_count)}]{{}};
+{chr(10).join(argument_rows)}
+  auto local_job = env->CallStaticObjectMethodA(
+      static_cast<jclass>(resolved->adapter_class.get()),
+      resolved->method, jvm_arguments);
+  if (env->ExceptionCheck() || local_job == nullptr) {{
+    clear_exception(env);
+    throw std::runtime_error(
+        "cannot launch generated Kotlin coroutine adapter");
+  }}
+  return {{retain_global(env, local_job), std::move(cancel_resolved)}};
+}}'''
+    facade = _render_internal_suspend_facade(
+        binding,
+        feature_suffix=feature_suffix,
+        helper_name=helper_name,
+        facade_name=facade_name,
+    )
+    return helper, facade
+
+
+def _render_internal_suspend_facade(
+    binding: SemanticBinding,
+    *,
+    feature_suffix: str,
+    helper_name: str,
+    facade_name: str,
+) -> str:
+    parameters = _internal_parameters(binding)
+    callback_type = _internal_callback_type(binding.result)
+    signature = (
+        f"{parameters}, {callback_type} completion"
+        if parameters
+        else f"{callback_type} completion"
+    )
+    captures = ", ".join(
+        f"{item.name} = std::move({item.name})" for item in binding.parameters
+    )
+    capture_tail = f", {captures}" if captures else ""
+    arguments = ", ".join(item.name for item in binding.parameters)
+    call_tail = f", {arguments}" if arguments else ""
+    result_type = _internal_result_type(binding.result)
+    decode = _internal_suspend_decode(binding.result, result_type)
+    return f'''void {facade_name}({signature}) {{
+  auto feature = supernote::runtime::current_feature_session();
+  if (!feature ||
+      feature->state() != supernote::runtime::FeatureState::ACTIVE) {{
+    throw supernote::Error(
+        supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
+  }}
+  if (!completion) {{
+    throw supernote::Error(
+        supernote::ErrorCode::INTERNAL, "completion callback is empty");
+  }}
+  auto operation = feature->accept({{}});
+  if (!operation) {{
+    throw supernote::Error(
+        supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
+  }}
+  auto callback = std::make_shared<decltype(completion)>(
+      std::move(completion));
+  std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
+  namespace route = supernote::generated::jvm_feature_{feature_suffix};
+  const auto completion_id =
+      supernote::runtime::process_services().register_jvm_async_completion(
+          [operation, weak_feature, callback](
+              void *environment, void *result,
+              std::string error_code, std::string error_message) mutable {{
+            if (operation->cancellation_token().is_cancelled()) return;
+            {result_type} outcome = {result_type}::failure(supernote::Error(
+                supernote::ErrorCode::INTERNAL,
+                "Kotlin coroutine did not complete"));
+            if (!error_code.empty()) {{
+              auto code = supernote::ErrorCode::INTERNAL;
+              if (error_code == "CANCELLED") {{
+                code = supernote::ErrorCode::CANCELLED;
+              }} else if (error_code == "RESOURCE_EXHAUSTED") {{
+                code = supernote::ErrorCode::RESOURCE_EXHAUSTED;
+              }} else if (error_code == "FEATURE_CLOSED") {{
+                code = supernote::ErrorCode::FEATURE_CLOSED;
+              }} else if (error_code == "IMPLEMENTATION_ERROR") {{
+                code = supernote::ErrorCode::IMPLEMENTATION_ERROR;
+              }}
+              outcome = {result_type}::failure(supernote::Error(
+                  code,
+                  error_message.empty()
+                      ? "Kotlin coroutine failed"
+                      : std::move(error_message)));
+            }} else {{
+              try {{
+{decode}
+              }} catch (const std::exception &error) {{
+                outcome = {result_type}::failure(supernote::Error(
+                    supernote::ErrorCode::INTERNAL, error.what()));
+              }} catch (...) {{
+                outcome = {result_type}::failure(supernote::Error(
+                    supernote::ErrorCode::INTERNAL,
+                    "cannot decode Kotlin coroutine result"));
+              }}
+            }}
+            if (operation->cancellation_token().is_cancelled()) return;
+            auto feature = weak_feature.lock();
+            if (!feature || !feature->claim_internal_completion(operation)) return;
+            route::deliver_internal_callback(*callback, std::move(outcome));
+          }});
+  operation->set_cancel_hook([completion_id] {{
+    supernote::runtime::process_services()
+        .discard_jvm_async_completion(completion_id);
+  }});
+  auto work = supernote::runtime::process_services().workers().submit(
+      [operation, weak_feature, completion_id{capture_tail}](
+          supernote::runtime::CancellationToken executor_cancel) mutable {{
+        if (executor_cancel.is_cancelled() ||
+            operation->cancellation_token().is_cancelled()) return;
+        auto feature = weak_feature.lock();
+        if (!feature ||
+            feature->state() != supernote::runtime::FeatureState::ACTIVE) return;
+        supernote::runtime::FeatureCallScope scope(feature);
+        namespace route = supernote::generated::jvm_feature_{feature_suffix};
+        try {{
+          auto launched = route::{helper_name}(
+              feature, completion_id{call_tail});
+          auto job = std::move(launched.first);
+          auto cancel_route = std::move(launched.second);
+          operation->set_cancel_hook(
+              [completion_id, job, cancel_route] {{
+                supernote::runtime::process_services()
+                    .discard_jvm_async_completion(completion_id);
+                try {{
+                  route::AttachedEnv attached;
+                  auto *env = attached.get();
+                  if (env == nullptr) return;
+                  route::LocalFrame frame(env);
+                  jvalue arguments[1]{{}};
+                  arguments[0].l = static_cast<jobject>(job.get());
+                  env->CallStaticVoidMethodA(
+                      static_cast<jclass>(
+                          cancel_route->adapter_class.get()),
+                      cancel_route->method, arguments);
+                  route::clear_exception(env);
+                }} catch (...) {{}}
+              }});
+        }} catch (const route::JvmImplementationFailure &error) {{
+          supernote::runtime::process_services().complete_jvm_async(
+              completion_id, nullptr, nullptr,
+              "IMPLEMENTATION_ERROR", error.what());
+        }} catch (const std::exception &error) {{
+          supernote::runtime::process_services().complete_jvm_async(
+              completion_id, nullptr, nullptr, "INTERNAL", error.what());
+        }} catch (...) {{
+          supernote::runtime::process_services().complete_jvm_async(
+              completion_id, nullptr, nullptr, "INTERNAL",
+              "cannot launch Kotlin coroutine adapter");
+        }}
+      }});
+  operation->set_work(work);
+  if (!work.accepted()) {{
+    supernote::runtime::process_services().complete_jvm_async(
+        completion_id, nullptr, nullptr, "RESOURCE_EXHAUSTED",
+        "Supernote worker queue is full");
+  }}
+}}'''
+
+
+def _internal_suspend_decode(
+    result: SemanticType,
+    result_type: str,
+) -> str:
+    indent = " " * 16
+    if result is SemanticType.VOID:
+        return f"{indent}outcome = {result_type}::success();"
+    lines = [
+        f"{indent}auto *env = static_cast<JNIEnv *>(environment);",
+        f"{indent}auto object = static_cast<jobject>(result);",
+        f"{indent}if (env == nullptr || object == nullptr) {{",
+        f'{indent}  throw std::runtime_error("Kotlin coroutine returned null");',
+        f"{indent}}}",
+        f"{indent}route::LocalFrame frame(env);",
+    ]
+    if result in {SemanticType.STRING, SemanticType.BYTES}:
+        lines.append(
+            f"{indent}const auto bytes = route::read_byte_array("
+            "env, static_cast<jbyteArray>(object));"
+        )
+        value = (
+            "std::string(reinterpret_cast<const char *>(bytes.data()), "
+            "bytes.size())"
+            if result is SemanticType.STRING
+            else "bytes"
+        )
+        lines.append(f"{indent}outcome = {result_type}::success({value});")
+        return "\n".join(lines)
+    method, descriptor, call, conversion = {
+        SemanticType.BOOL: (
+            "booleanValue", "()Z", "CallBooleanMethod", "value == JNI_TRUE"
+        ),
+        SemanticType.INT32: (
+            "intValue", "()I", "CallIntMethod", "static_cast<std::int32_t>(value)"
+        ),
+        SemanticType.INT64: (
+            "longValue", "()J", "CallLongMethod", "static_cast<std::int64_t>(value)"
+        ),
+        SemanticType.FLOAT32: (
+            "floatValue", "()F", "CallFloatMethod", "static_cast<float>(value)"
+        ),
+        SemanticType.FLOAT64: (
+            "doubleValue", "()D", "CallDoubleMethod", "static_cast<double>(value)"
+        ),
+    }[result]
+    lines.extend(
+        [
+            f"{indent}auto value_class = env->GetObjectClass(object);",
+            f"{indent}auto unbox = value_class == nullptr",
+            f"{indent}    ? nullptr",
+            f"{indent}    : env->GetMethodID(",
+            f"{indent}          value_class, {json.dumps(method)}, {json.dumps(descriptor)});",
+            f"{indent}if (unbox == nullptr) {{",
+            f"{indent}  route::clear_exception(env);",
+            f'{indent}  throw std::runtime_error("cannot unbox Kotlin coroutine result");',
+            f"{indent}}}",
+            f"{indent}auto value = env->{call}(object, unbox);",
+            f"{indent}if (env->ExceptionCheck()) {{",
+            f"{indent}  route::clear_exception(env);",
+            f'{indent}  throw std::runtime_error("cannot read Kotlin coroutine result");',
+            f"{indent}}}",
+            f"{indent}outcome = {result_type}::success({conversion});",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _internal_parameters(binding: SemanticBinding) -> str:
+    return ", ".join(
+        f"{_internal_cpp_type(item.type)} {item.name}"
+        for item in binding.parameters
+    )
+
+
+def _internal_cpp_type(value: SemanticType) -> str:
+    return "void" if value is SemanticType.VOID else _CPP_TYPES[value]
+
+
+def _internal_result_type(value: SemanticType) -> str:
+    return (
+        "supernote::Result<void>"
+        if value is SemanticType.VOID
+        else f"supernote::Result<{_CPP_TYPES[value]}>"
+    )
+
+
+def _internal_callback_type(value: SemanticType) -> str:
+    return f"std::function<void({_internal_result_type(value)})>"
 
 
 def _render_function(
@@ -950,7 +1584,11 @@ def _render_object(
                 f"{method.source.path}:{method.source.line}: JVM method facts are missing"
             )
         if not method.capabilities.javascript_public:
-            raise _error(source, "internal JVM object-method routing is not implemented yet")
+            # The method remains routable in the common semantic model, but a
+            # JS-created JVM receiver has no initial handwritten object-handle
+            # API. It therefore stays off the HostObject surface without
+            # inventing receiver lookup or passing semantics.
+            continue
         route_name = f"method_route_{method_index}"
         route_parameters.append(
             f"std::shared_ptr<LazyJvmRoute> {route_name}"
@@ -1038,8 +1676,8 @@ def _render_object(
             "owner_(std::move(owner))",
             "feature_session_(std::move(feature_session))",
             *[
-                f"method_route_{method_index}_(std::move(method_route_{method_index}))"
-                for method_index in range(len(item.methods))
+                f"{route_name}_(std::move({route_name}))"
+                for route_name in route_captures
             ],
         ]
     )
@@ -1071,7 +1709,7 @@ def _render_object(
   std::vector<facebook::jsi::PropNameID> getPropertyNames(
       facebook::jsi::Runtime &runtime) override {{
     std::vector<facebook::jsi::PropNameID> names;
-    names.reserve({len(item.methods)});
+    names.reserve({sum(method.capabilities.javascript_public for method in item.methods)});
 {names}
     return names;
   }}
