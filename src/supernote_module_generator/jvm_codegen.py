@@ -540,19 +540,39 @@ def _render_suspend_function(
     source: JvmDeclarationSource,
     binding: SemanticBinding,
     module_name: str,
+    *,
+    object_item: SemanticClass | None = None,
+    object_route_name: str | None = None,
 ) -> str:
-    takes_owner = owner.form is JvmOwnerForm.CLASS
+    object_method = object_item is not None
+    if object_method and object_route_name is None:
+        raise AssertionError("a JVM object suspend route requires its route member")
+    takes_owner = object_method or owner.form is JvmOwnerForm.CLASS
     setup = [
-        "    auto route = std::make_shared<LazyJvmRoute>(\n"
-        f"        {json.dumps(_adapter_class(source.adapter_identity))}, "
-        f"{json.dumps(_suspend_adapter_descriptor(binding, owner if takes_owner else None))});",
+        (
+            f"      auto route = {object_route_name}_;"
+            if object_method
+            else (
+                "    auto route = std::make_shared<LazyJvmRoute>(\n"
+                f"        {json.dumps(_adapter_class(source.adapter_identity))}, "
+                f"{json.dumps(_suspend_adapter_descriptor(binding, owner if takes_owner else None))});"
+            )
+        ),
         "    auto cancel_route = std::make_shared<LazyJvmRoute>(\n"
         '        "supernote.generated.runtime.SupernoteCoroutineBridge",\n'
         '        "(Lkotlinx/coroutines/Job;)V", "cancel");',
     ]
     route_captures = ["route", "cancel_route", "feature_session"]
     owner_setup = ""
-    if takes_owner:
+    if object_method:
+        setup.extend(
+            [
+                "      auto owner = owner_;",
+                "      auto feature_session = feature_session_;",
+            ]
+        )
+        route_captures.append("owner")
+    elif takes_owner:
         constructor = _owner_constructor(owner)
         setup.append(
             "    auto owner_route = std::make_shared<LazyJvmRoute>(\n"
@@ -567,7 +587,12 @@ def _render_suspend_function(
         Parameter(_CPP_TYPES[item.type], item.name)
         for item in binding.parameters
     )
-    validations = _validations(binding, f"{module_name}.{binding.name}")
+    diagnostic = (
+        f"{module_name}.{object_item.name}.{binding.name}"
+        if object_item is not None
+        else f"{module_name}.{binding.name}"
+    )
+    validations = _validations(binding, diagnostic)
     input_names = [f"supernote_input_{index}" for index in range(len(parameters))]
     inputs = "\n".join(
         f"          auto {name} = {_jsi_argument(parameter, index)};"
@@ -584,7 +609,9 @@ def _render_suspend_function(
         "cancel_route",
         "completion_id",
     ]
-    if takes_owner:
+    if object_method:
+        worker_captures.append("owner")
+    elif takes_owner:
         worker_captures.append("owner_route")
     worker_captures.extend(
         f"{name} = std::move({name})" for name in input_names
@@ -631,7 +658,20 @@ def _render_suspend_function(
         f"              jvm_arguments[{argument_count - 1}].j = "
         "static_cast<jlong>(completion_id);"
     )
-    return f'''  {{
+    opening = (
+        f"    if (property == {json.dumps(binding.name)}) {{"
+        if object_method
+        else "  {"
+    )
+    closing = (
+        "      return Value(std::move(function));\n    }"
+        if object_method
+        else (
+            f"    exports.setProperty(runtime, {json.dumps(binding.name)}, "
+            "std::move(function));\n  }"
+        )
+    )
+    return f'''{opening}
 {chr(10).join(setup)}
     auto function = Function::createFromHostFunction(
         runtime,
@@ -812,8 +852,7 @@ def _render_suspend_function(
           return promise.callAsConstructor(
               runtime, &executor_argument, static_cast<std::size_t>(1));
         }});
-    exports.setProperty(runtime, {json.dumps(binding.name)}, std::move(function));
-  }}'''
+{closing}'''
 
 
 def _render_async_object_method(
@@ -914,11 +953,6 @@ def _render_object(
             )
         if not method.capabilities.javascript_public:
             raise _error(source, "internal JVM object-method routing is not implemented yet")
-        if source.is_suspend:
-            raise _error(
-                source,
-                "Kotlin suspend object-method routing is recognized but not implemented yet",
-            )
         route_name = f"method_route_{method_index}"
         route_parameters.append(
             f"std::shared_ptr<LazyJvmRoute> {route_name}"
@@ -928,9 +962,21 @@ def _render_object(
         route_setup.append(
             f"    auto {route_name} = std::make_shared<LazyJvmRoute>(\n"
             f"        {json.dumps(_adapter_class(source.adapter_identity))},\n"
-            f"        {json.dumps(_adapter_descriptor(method, owner))});"
+            f"        {json.dumps(_suspend_adapter_descriptor(method, owner) if source.is_suspend else _adapter_descriptor(method, owner))});"
         )
         route_captures.append(route_name)
+        if source.is_suspend:
+            method_rows.append(
+                _render_suspend_function(
+                    owner,
+                    source,
+                    method,
+                    module_name,
+                    object_item=item,
+                    object_route_name=route_name,
+                )
+            )
+            continue
         if method.execution is ExecutionMode.ASYNC:
             method_rows.append(
                 _render_async_object_method(

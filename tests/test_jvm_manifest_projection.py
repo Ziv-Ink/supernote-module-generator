@@ -406,6 +406,45 @@ def test_blocking_jvm_async_object_method_retains_global_receiver():
     assert "CallStaticObjectMethodA" in generated
 
 
+def test_suspend_jvm_object_method_retains_receiver_until_job_finishes():
+    owner_name = "com.example.Document"
+    load = declaration(
+        owner_name,
+        JvmLanguage.KOTLIN,
+        "loadPage",
+        "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+        (JvmParameterSource("kotlin.Int", "page"),),
+        "kotlin.ByteArray",
+        SupernoteMarker.EXPORT,
+        SupernoteMarker.ASYNC,
+        target=DeclarationTarget.METHOD,
+        suspend=True,
+    )
+    owner = JvmOwnerSource(
+        provenance(jvm_owner_identity(owner_name), JvmLanguage.KOTLIN, "Document.kt", 2),
+        JvmLanguage.KOTLIN,
+        owner_name,
+        "Document",
+        JvmOwnerForm.CLASS,
+        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        (constructor(owner_name, JvmLanguage.KOTLIN),),
+        (load,),
+    )
+    generated = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,)),
+        project_jvm_owners((owner,)),
+        feature_id=FEATURE_ID,
+        module_name="Documents",
+    )
+
+    assert 'property == "loadPage"' in generated
+    assert "auto owner = owner_;" in generated
+    assert "operation, weak_feature, route, cancel_route, completion_id, owner" in generated
+    assert "owner->value.get()" in generated
+    assert "Lkotlinx/coroutines/Job;" in generated
+    assert "operation->set_cancel_hook" in generated
+
+
 def test_internal_jvm_class_is_a_hidden_feature_service():
     owner_name = "com.example.IndexService"
     method = declaration(
