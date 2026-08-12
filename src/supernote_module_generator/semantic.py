@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import re
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 
 SEMANTIC_MANIFEST_SCHEMA_VERSION = 1
@@ -371,3 +371,235 @@ def _reject_duplicates(values: Iterable[str], label: str) -> None:
         if value in seen:
             raise SemanticModelError(f"duplicate {label} {value!r}")
         seen.add(value)
+
+
+def semantic_api_from_manifest(raw: object) -> SemanticApi:
+    """Read the strict backend-neutral manifest used between build stages."""
+
+    value = _manifest_object(raw, "semantic manifest")
+    _manifest_keys(value, {"schema_version", "functions", "classes"}, "semantic manifest")
+    schema = _manifest_int(value["schema_version"], "schema_version")
+    if schema != SEMANTIC_MANIFEST_SCHEMA_VERSION:
+        raise SemanticModelError(
+            f"incompatible semantic manifest schema {schema}; "
+            f"expected {SEMANTIC_MANIFEST_SCHEMA_VERSION}"
+        )
+    functions = tuple(
+        _binding_from_manifest(item, f"functions[{index}]")
+        for index, item in enumerate(_manifest_list(value["functions"], "functions"))
+    )
+    classes = tuple(
+        _class_from_manifest(item, f"classes[{index}]")
+        for index, item in enumerate(_manifest_list(value["classes"], "classes"))
+    )
+    return SemanticApi(functions, classes)
+
+
+def merge_semantic_apis(*apis: SemanticApi) -> SemanticApi:
+    """Merge language frontends and re-run all common identity/name checks."""
+
+    return SemanticApi(
+        tuple(binding for api in apis for binding in api.functions),
+        tuple(item for api in apis for item in api.classes),
+    )
+
+
+def _binding_from_manifest(raw: object, label: str) -> SemanticBinding:
+    value = _manifest_object(raw, label)
+    required = {
+        "binding_id", "source_declaration_id", "kind", "name", "routable",
+        "javascript_public", "execution", "parameters", "result", "source",
+    }
+    optional = {"owner_id", "owner"}
+    actual = set(value)
+    if not required.issubset(actual) or actual - required - optional:
+        _manifest_keys(value, required | (optional & actual), label)
+    source = _source_from_manifest(value["source"], f"{label}.source")
+    source_id = _manifest_string(
+        value["source_declaration_id"], f"{label}.source_declaration_id"
+    )
+    if source_id != source.declaration_id:
+        raise SemanticModelError(f"{label} source declaration identity disagrees")
+    has_owner_id = "owner_id" in value
+    has_owner = "owner" in value
+    if has_owner_id != has_owner:
+        raise SemanticModelError(f"{label} owner identity and name must appear together")
+    try:
+        return SemanticBinding(
+            binding_id=_manifest_string(value["binding_id"], f"{label}.binding_id"),
+            kind=BindingKind(_manifest_string(value["kind"], f"{label}.kind")),
+            name=_manifest_string(value["name"], f"{label}.name"),
+            capabilities=BindingCapabilities(
+                _manifest_bool(value["routable"], f"{label}.routable"),
+                _manifest_bool(
+                    value["javascript_public"], f"{label}.javascript_public"
+                ),
+            ),
+            execution=ExecutionMode(
+                _manifest_string(value["execution"], f"{label}.execution")
+            ),
+            parameters=tuple(
+                _parameter_from_manifest(item, f"{label}.parameters[{index}]")
+                for index, item in enumerate(
+                    _manifest_list(value["parameters"], f"{label}.parameters")
+                )
+            ),
+            result=SemanticType(
+                _manifest_string(value["result"], f"{label}.result")
+            ),
+            source=source,
+            owner_id=(
+                _manifest_string(value["owner_id"], f"{label}.owner_id")
+                if has_owner_id
+                else None
+            ),
+            owner_name=(
+                _manifest_string(value["owner"], f"{label}.owner")
+                if has_owner
+                else None
+            ),
+        )
+    except ValueError as exc:
+        raise SemanticModelError(f"{label}: {exc}") from exc
+
+
+def _class_from_manifest(raw: object, label: str) -> SemanticClass:
+    value = _manifest_object(raw, label)
+    _manifest_keys(
+        value,
+        {
+            "class_id", "source_declaration_id", "kind", "name", "routable",
+            "javascript_public", "source", "constructor", "methods",
+        },
+        label,
+    )
+    source = _source_from_manifest(value["source"], f"{label}.source")
+    if _manifest_string(
+        value["source_declaration_id"], f"{label}.source_declaration_id"
+    ) != source.declaration_id:
+        raise SemanticModelError(f"{label} source declaration identity disagrees")
+    constructor_value = _manifest_object(
+        value["constructor"], f"{label}.constructor"
+    )
+    _manifest_keys(
+        constructor_value,
+        {"source_declaration_id", "parameters", "source"},
+        f"{label}.constructor",
+    )
+    constructor_source = _source_from_manifest(
+        constructor_value["source"], f"{label}.constructor.source"
+    )
+    if _manifest_string(
+        constructor_value["source_declaration_id"],
+        f"{label}.constructor.source_declaration_id",
+    ) != constructor_source.declaration_id:
+        raise SemanticModelError(f"{label} constructor source identity disagrees")
+    try:
+        return SemanticClass(
+            class_id=_manifest_string(value["class_id"], f"{label}.class_id"),
+            kind=SemanticClassKind(
+                _manifest_string(value["kind"], f"{label}.kind")
+            ),
+            name=_manifest_string(value["name"], f"{label}.name"),
+            capabilities=BindingCapabilities(
+                _manifest_bool(value["routable"], f"{label}.routable"),
+                _manifest_bool(
+                    value["javascript_public"], f"{label}.javascript_public"
+                ),
+            ),
+            source=source,
+            constructor=SemanticConstructor(
+                constructor_source,
+                tuple(
+                    _parameter_from_manifest(
+                        item, f"{label}.constructor.parameters[{index}]"
+                    )
+                    for index, item in enumerate(
+                        _manifest_list(
+                            constructor_value["parameters"],
+                            f"{label}.constructor.parameters",
+                        )
+                    )
+                ),
+            ),
+            methods=tuple(
+                _binding_from_manifest(item, f"{label}.methods[{index}]")
+                for index, item in enumerate(
+                    _manifest_list(value["methods"], f"{label}.methods")
+                )
+            ),
+        )
+    except ValueError as exc:
+        raise SemanticModelError(f"{label}: {exc}") from exc
+
+
+def _parameter_from_manifest(raw: object, label: str) -> SemanticParameter:
+    value = _manifest_object(raw, label)
+    _manifest_keys(value, {"name", "type"}, label)
+    try:
+        return SemanticParameter(
+            _manifest_string(value["name"], f"{label}.name"),
+            SemanticType(_manifest_string(value["type"], f"{label}.type")),
+        )
+    except ValueError as exc:
+        raise SemanticModelError(f"{label}: {exc}") from exc
+
+
+def _source_from_manifest(raw: object, label: str) -> SourceProvenance:
+    value = _manifest_object(raw, label)
+    _manifest_keys(
+        value, {"declaration_id", "language", "path", "line", "column"}, label
+    )
+    try:
+        return SourceProvenance(
+            _manifest_string(value["declaration_id"], f"{label}.declaration_id"),
+            _manifest_string(value["language"], f"{label}.language"),
+            _manifest_string(value["path"], f"{label}.path"),
+            _manifest_int(value["line"], f"{label}.line"),
+            _manifest_int(value["column"], f"{label}.column"),
+        )
+    except ValueError as exc:
+        raise SemanticModelError(f"{label}: {exc}") from exc
+
+
+def _manifest_keys(value: Dict[str, Any], expected: set[str], label: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if extra:
+            details.append("unknown " + ", ".join(extra))
+        raise SemanticModelError(f"{label} has invalid fields: {'; '.join(details)}")
+
+
+def _manifest_object(value: object, label: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise SemanticModelError(f"{label} must be an object")
+    return value
+
+
+def _manifest_list(value: object, label: str) -> list[object]:
+    if not isinstance(value, list):
+        raise SemanticModelError(f"{label} must be an array")
+    return value
+
+
+def _manifest_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise SemanticModelError(f"{label} must be a non-empty string")
+    return value
+
+
+def _manifest_int(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SemanticModelError(f"{label} must be an integer")
+    return value
+
+
+def _manifest_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise SemanticModelError(f"{label} must be a boolean")
+    return value

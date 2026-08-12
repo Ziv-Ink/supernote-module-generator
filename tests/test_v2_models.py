@@ -32,6 +32,8 @@ from supernote_module_generator.semantic import (
     SemanticParameter,
     SemanticType,
     SourceProvenance,
+    merge_semantic_apis,
+    semantic_api_from_manifest,
 )
 from supernote_module_generator.source_models import (
     CppConstructorSource,
@@ -272,6 +274,7 @@ def test_semantic_api_is_backend_neutral_deterministic_and_validated():
     assert manifest["functions"][0]["binding_id"] == "api:function:loadPage"
     assert manifest["functions"][0]["source_declaration_id"] == source.declaration_id
     assert "jniDescriptor" not in manifest["functions"][0]
+    assert semantic_api_from_manifest(manifest).manifest() == manifest
 
     with pytest.raises(SemanticModelError, match="ordinary declarations"):
         SemanticBinding(
@@ -300,6 +303,24 @@ def test_semantic_api_is_backend_neutral_deterministic_and_validated():
             SemanticType.VOID,
             source,
         )
+
+
+def test_semantic_manifest_reader_rejects_versions_fields_and_merge_collisions():
+    binding = project_cpp_function(cpp_function(SupernoteMarker.EXPORT))
+    assert binding is not None
+    api = SemanticApi((binding,))
+    wrong_version = api.manifest()
+    wrong_version["schema_version"] = 99
+    with pytest.raises(SemanticModelError, match="incompatible semantic manifest"):
+        semantic_api_from_manifest(wrong_version)
+
+    unknown = api.manifest()
+    unknown["backend"] = "jni"
+    with pytest.raises(SemanticModelError, match="unknown backend"):
+        semantic_api_from_manifest(unknown)
+
+    with pytest.raises(SemanticModelError, match="semantic identity"):
+        merge_semantic_apis(api, api)
 
 
 def test_js_object_and_internal_service_have_distinct_enforced_semantics():

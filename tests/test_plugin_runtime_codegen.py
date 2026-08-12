@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -252,3 +253,40 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
         [str(executable)], capture_output=True, text=True, check=False, timeout=10
     )
     assert executed.returncode == 0, executed.stderr
+
+
+def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: Path):
+    generated = generate_plugin_runtime(tmp_path, registry("alpha"))
+    feature = tmp_path / "local_modules/@local/alpha"
+    feature.mkdir(parents=True)
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            "python3",
+            str(generated / "common_codegen.py"),
+            "--plugin-root",
+            str(tmp_path),
+            "--runtime-root",
+            str(generated),
+            "--variant",
+            "debug",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (feature / "index.d.ts").is_file()
+    semantic_registry = json.loads(
+        (
+            generated
+            / "build/generated/supernote/debug/semantic-registry.json"
+        ).read_text()
+    )
+    assert semantic_registry["features"][0]["feature_id"] == entry(
+        "alpha"
+    ).feature.feature_id

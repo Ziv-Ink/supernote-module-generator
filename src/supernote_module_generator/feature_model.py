@@ -177,6 +177,7 @@ class FeatureRegistryEntry:
     feature: FeatureManifest
     requirements: FeatureRequirements
     semantic_digest: str
+    source_semantic_api: SemanticApi
 
     @classmethod
     def create(
@@ -189,6 +190,7 @@ class FeatureRegistryEntry:
             feature,
             FeatureRequirements.from_semantic_api(semantic_api),
             hashlib.sha256(encoded).hexdigest(),
+            semantic_api,
         )
 
     def manifest(self) -> Dict[str, object]:
@@ -199,6 +201,7 @@ class FeatureRegistryEntry:
             "android_namespace": self.feature.android_namespace,
             "semantic_digest": self.semantic_digest,
             "requirements": self.requirements.manifest(),
+            "source_semantic_api": self.source_semantic_api.manifest(),
         }
 
 
