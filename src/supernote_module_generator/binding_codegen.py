@@ -239,6 +239,7 @@ SUPPORTED_PARAMETER_TYPES = {
 }
 SUPPORTED_RETURN_TYPES = SUPPORTED_PARAMETER_TYPES | {"void"}
 LEGACY_SYNC_LOWERING_TYPES = {"bool", "double", "std::string", "void"}
+JSI_SYNC_LOWERING_TYPES = SUPPORTED_RETURN_TYPES
 
 
 class CodegenError(RuntimeError):
@@ -2710,7 +2711,12 @@ def _lower_sync_export(
         )
     used_types = {source.return_type_spelling}
     used_types.update(parameter.type_spelling for parameter in source.parameters)
-    unsupported = sorted(used_types - LEGACY_SYNC_LOWERING_TYPES)
+    lowering_types = (
+        JSI_SYNC_LOWERING_TYPES
+        if backend == "jsi"
+        else LEGACY_SYNC_LOWERING_TYPES
+    )
+    unsupported = sorted(used_types - lowering_types)
     if unsupported:
         raise _source_error(
             module_root,
@@ -2718,8 +2724,9 @@ def _lower_sync_export(
             source.provenance.line,
             module_name,
             name,
-            "semantic type was recognized, but synchronous JSI/JNI conversion "
-            f"is not implemented yet for {', '.join(unsupported)}",
+            "semantic type was recognized, but synchronous "
+            f"{backend.upper()} conversion is not implemented yet for "
+            f"{', '.join(unsupported)}",
         )
 
     parameters = tuple(
@@ -2849,7 +2856,7 @@ def _lower_sync_object(
         parameter.type_spelling for parameter in selected.parameters
     }
     unsupported_constructor = sorted(
-        constructor_types - (LEGACY_SYNC_LOWERING_TYPES - {"void"})
+        constructor_types - (JSI_SYNC_LOWERING_TYPES - {"void"})
     )
     if unsupported_constructor:
         raise _source_error(
@@ -2888,7 +2895,7 @@ def _lower_sync_object(
         used_types.update(
             parameter.type_spelling for parameter in method.parameters
         )
-        unsupported = sorted(used_types - LEGACY_SYNC_LOWERING_TYPES)
+        unsupported = sorted(used_types - JSI_SYNC_LOWERING_TYPES)
         if unsupported:
             raise _source_error(
                 module_root,
@@ -3100,8 +3107,14 @@ def _typescript(
     backend = _normalize_backend(config["backend"])
     type_map = {
         "bool": "boolean",
+        "int32_t": "number",
+        "std::int32_t": "number",
+        "int64_t": "bigint",
+        "std::int64_t": "bigint",
+        "float": "number",
         "double": "number",
         "std::string": "string",
+        "std::vector<std::byte>": "Uint8Array",
         "void": "void",
     }
     methods = []
@@ -3526,18 +3539,246 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
 def _jsi_argument(parameter: Parameter, number: int) -> str:
     if parameter.cpp_type == "bool":
         return f"arguments[{number}].getBool()"
+    if parameter.cpp_type in {"int32_t", "std::int32_t"}:
+        return (
+            f"static_cast<{parameter.cpp_type}>("
+            f"arguments[{number}].asNumber())"
+        )
+    if parameter.cpp_type in {"int64_t", "std::int64_t"}:
+        return (
+            f"static_cast<{parameter.cpp_type}>(arguments[{number}]"
+            ".asBigInt(runtime).asInt64(runtime))"
+        )
+    if parameter.cpp_type == "float":
+        return f"static_cast<float>(arguments[{number}].asNumber())"
     if parameter.cpp_type == "double":
         return f"arguments[{number}].asNumber()"
-    return f"arguments[{number}].asString(runtime).utf8(runtime)"
+    if parameter.cpp_type == "std::string":
+        return f"arguments[{number}].asString(runtime).utf8(runtime)"
+    if parameter.cpp_type == "std::vector<std::byte>":
+        return f"supernote_copy_uint8_array(runtime, arguments[{number}])"
+    raise AssertionError(f"unsupported JSI parameter type {parameter.cpp_type!r}")
+
+
+def _jsi_expected_type(cpp_type: str) -> str:
+    return {
+        "bool": "boolean",
+        "int32_t": "number",
+        "std::int32_t": "number",
+        "int64_t": "bigint",
+        "std::int64_t": "bigint",
+        "float": "number",
+        "double": "number",
+        "std::string": "string",
+        "std::vector<std::byte>": "Uint8Array",
+    }[cpp_type]
 
 
 def _jsi_type_check(parameter: Parameter, number: int) -> str:
+    if parameter.cpp_type == "std::vector<std::byte>":
+        return f"!supernote_is_uint8_array(runtime, arguments[{number}])"
     method = {
         "bool": "isBool()",
+        "int32_t": "isNumber()",
+        "std::int32_t": "isNumber()",
+        "int64_t": "isBigInt()",
+        "std::int64_t": "isBigInt()",
+        "float": "isNumber()",
         "double": "isNumber()",
         "std::string": "isString()",
     }[parameter.cpp_type]
     return f"!arguments[{number}].{method}"
+
+
+def _jsi_range_validation(
+    parameter: Parameter,
+    number: int,
+    *,
+    diagnostic_name: str,
+    indent: str,
+) -> list[str]:
+    argument_name = f"supernote_argument_{number}"
+    prefix = (
+        f"{diagnostic_name}: argument {number + 1} ({parameter.name}) "
+    )
+    if parameter.cpp_type in {"int32_t", "std::int32_t"}:
+        return [
+            f"{indent}const double {argument_name} = arguments[{number}].asNumber();",
+            f"{indent}if (!std::isfinite({argument_name}) ||",
+            f"{indent}    std::trunc({argument_name}) != {argument_name} ||",
+            f"{indent}    {argument_name} < static_cast<double>(",
+            f"{indent}        std::numeric_limits<std::int32_t>::min()) ||",
+            f"{indent}    {argument_name} > static_cast<double>(",
+            f"{indent}        std::numeric_limits<std::int32_t>::max())) {{",
+            f"{indent}  supernote_throw_range_error(",
+            f"{indent}      runtime, {json.dumps(prefix + 'must be a signed 32-bit integer')});",
+            f"{indent}}}",
+        ]
+    if parameter.cpp_type in {"int64_t", "std::int64_t"}:
+        return [
+            f"{indent}if (!arguments[{number}].getBigInt(runtime).isInt64(runtime)) {{",
+            f"{indent}  supernote_throw_range_error(",
+            f"{indent}      runtime, {json.dumps(prefix + 'must fit in a signed 64-bit integer')});",
+            f"{indent}}}",
+        ]
+    if parameter.cpp_type == "float":
+        return [
+            f"{indent}const double {argument_name} = arguments[{number}].asNumber();",
+            f"{indent}if (std::isfinite({argument_name}) &&",
+            f"{indent}    ({argument_name} < static_cast<double>(",
+            f"{indent}         std::numeric_limits<float>::lowest()) ||",
+            f"{indent}     {argument_name} > static_cast<double>(",
+            f"{indent}         std::numeric_limits<float>::max()))) {{",
+            f"{indent}  supernote_throw_range_error(",
+            f"{indent}      runtime, {json.dumps(prefix + 'must fit in a 32-bit float')});",
+            f"{indent}}}",
+        ]
+    return []
+
+
+def _jsi_result_lines(call: str, return_type: str, indent: str) -> list[str]:
+    if return_type == "void":
+        return [f"{indent}{call};", f"{indent}return Value::undefined();"]
+    if return_type == "std::string":
+        return [
+            f"{indent}const auto result = {call};",
+            f"{indent}return Value(String::createFromUtf8(runtime, result));",
+        ]
+    if return_type in {"int64_t", "std::int64_t"}:
+        return [
+            f"{indent}return Value(facebook::jsi::BigInt::fromInt64(",
+            f"{indent}    runtime, static_cast<std::int64_t>({call})));",
+        ]
+    if return_type == "std::vector<std::byte>":
+        return [
+            f"{indent}return supernote_make_uint8_array(runtime, {call});",
+        ]
+    if return_type in {
+        "int32_t",
+        "std::int32_t",
+        "float",
+        "double",
+    }:
+        return [f"{indent}return Value(static_cast<double>({call}));"]
+    return [f"{indent}return Value({call});"]
+
+
+def _jsi_value_helpers() -> str:
+    return r'''[[noreturn]] void supernote_throw_builtin_error(
+    facebook::jsi::Runtime &runtime,
+    const char *constructor_name,
+    const std::string &message) {
+  auto constructor =
+      runtime.global().getPropertyAsFunction(runtime, constructor_name);
+  const facebook::jsi::Value argument(
+      facebook::jsi::String::createFromUtf8(runtime, message));
+  auto error = constructor.callAsConstructor(
+      runtime, &argument, static_cast<std::size_t>(1));
+  throw facebook::jsi::JSError(runtime, std::move(error));
+}
+
+[[noreturn]] void supernote_throw_type_error(
+    facebook::jsi::Runtime &runtime,
+    const std::string &message) {
+  supernote_throw_builtin_error(runtime, "TypeError", message);
+}
+
+[[noreturn]] void supernote_throw_range_error(
+    facebook::jsi::Runtime &runtime,
+    const std::string &message) {
+  supernote_throw_builtin_error(runtime, "RangeError", message);
+}
+
+facebook::jsi::Function supernote_uint8_array_constructor(
+    facebook::jsi::Runtime &runtime) {
+  return runtime.global().getPropertyAsFunction(runtime, "Uint8Array");
+}
+
+bool supernote_is_uint8_array(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Value &value) {
+  if (!value.isObject()) {
+    return false;
+  }
+  auto constructor = supernote_uint8_array_constructor(runtime);
+  return value.getObject(runtime).instanceOf(runtime, constructor);
+}
+
+std::size_t supernote_view_index(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Object &view,
+    const char *property) {
+  auto value = view.getProperty(runtime, property);
+  if (!value.isNumber()) {
+    throw facebook::jsi::JSError(
+        runtime, std::string("Uint8Array.") + property + " is not numeric");
+  }
+  const double number = value.asNumber();
+  if (!std::isfinite(number) || std::trunc(number) != number || number < 0 ||
+      number > static_cast<double>(std::numeric_limits<std::size_t>::max())) {
+    throw facebook::jsi::JSError(
+        runtime, std::string("Uint8Array.") + property + " is invalid");
+  }
+  return static_cast<std::size_t>(number);
+}
+
+std::vector<std::byte> supernote_copy_uint8_array(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Value &value) {
+  auto view = value.getObject(runtime);
+  const std::size_t offset =
+      supernote_view_index(runtime, view, "byteOffset");
+  const std::size_t length =
+      supernote_view_index(runtime, view, "byteLength");
+  auto buffer_object = view.getPropertyAsObject(runtime, "buffer");
+  if (!buffer_object.isArrayBuffer(runtime)) {
+    throw facebook::jsi::JSError(
+        runtime, "Uint8Array.buffer is not an ArrayBuffer");
+  }
+  auto buffer = buffer_object.getArrayBuffer(runtime);
+  const std::size_t buffer_size = buffer.size(runtime);
+  if (offset > buffer_size || length > buffer_size - offset) {
+    throw facebook::jsi::JSError(
+        runtime, "Uint8Array view exceeds its ArrayBuffer");
+  }
+  std::vector<std::byte> result(length);
+  if (length != 0) {
+    std::memcpy(result.data(), buffer.data(runtime) + offset, length);
+  }
+  return result;
+}
+
+class SupernoteOwnedBytesBuffer final : public facebook::jsi::MutableBuffer {
+ public:
+  explicit SupernoteOwnedBytesBuffer(const std::vector<std::byte> &value)
+      : bytes_(value.size()) {
+    if (!value.empty()) {
+      std::memcpy(bytes_.data(), value.data(), value.size());
+    }
+  }
+
+  std::size_t size() const override {
+    return bytes_.size();
+  }
+
+  std::uint8_t *data() override {
+    return bytes_.data();
+  }
+
+ private:
+  std::vector<std::uint8_t> bytes_;
+};
+
+facebook::jsi::Value supernote_make_uint8_array(
+    facebook::jsi::Runtime &runtime,
+    const std::vector<std::byte> &value) {
+  auto storage = std::make_shared<SupernoteOwnedBytesBuffer>(value);
+  const facebook::jsi::Value argument(
+      facebook::jsi::ArrayBuffer(runtime, std::move(storage)));
+  auto constructor = supernote_uint8_array_constructor(runtime);
+  return constructor.callAsConstructor(
+      runtime, &argument, static_cast<std::size_t>(1));
+}'''
 
 
 def _jsi_object_callable_body(
@@ -3549,11 +3790,7 @@ def _jsi_object_callable_body(
     indent: str,
 ) -> str:
     expected_parameters = ", ".join(
-        {
-            "bool": "boolean",
-            "double": "number",
-            "std::string": "string",
-        }[parameter.cpp_type]
+        _jsi_expected_type(parameter.cpp_type)
         + f" {parameter.name}"
         for parameter in parameters
     )
@@ -3567,17 +3804,13 @@ def _jsi_object_callable_body(
     )
     lines = [
         f"{indent}if (argument_count != {len(parameters)}) {{",
-        f"{indent}  throw facebook::jsi::JSError(",
+        f"{indent}  supernote_throw_type_error(",
         f"{indent}      runtime, std::string({json.dumps(count_prefix)}) +",
         f"{indent}      std::to_string(argument_count));",
         f"{indent}}}",
     ]
     for number, parameter in enumerate(parameters):
-        js_type = {
-            "bool": "boolean",
-            "double": "number",
-            "std::string": "string",
-        }[parameter.cpp_type]
+        js_type = _jsi_expected_type(parameter.cpp_type)
         type_error = (
             f"{diagnostic_name}: argument {number + 1} ({parameter.name}) "
             f"must be a {js_type}; expected {expected_description}"
@@ -3585,20 +3818,20 @@ def _jsi_object_callable_body(
         lines.extend(
             [
                 f"{indent}if ({_jsi_type_check(parameter, number)}) {{",
-                f"{indent}  throw facebook::jsi::JSError(",
+                f"{indent}  supernote_throw_type_error(",
                 f"{indent}      runtime, {json.dumps(type_error)});",
                 f"{indent}}}",
             ]
         )
-    if return_type == "void":
-        result = [f"{indent}  {call};", f"{indent}  return Value::undefined();"]
-    elif return_type == "std::string":
-        result = [
-            f"{indent}  const auto result = {call};",
-            f"{indent}  return Value(String::createFromUtf8(runtime, result));",
-        ]
-    else:
-        result = [f"{indent}  return Value({call});"]
+        lines.extend(
+            _jsi_range_validation(
+                parameter,
+                number,
+                diagnostic_name=diagnostic_name,
+                indent=indent,
+            )
+        )
+    result = _jsi_result_lines(call, return_type, f"{indent}  ")
     lines.extend([f"{indent}try {{", *result])
     lines.extend(
         [
@@ -3764,8 +3997,6 @@ def _jsi_binding(
         for include in dict.fromkeys(item.include for item in objects)
     )
     object_include_block = f"{object_includes}\n\n" if object_includes else ""
-    object_memory_include = "#include <memory>\n" if objects else ""
-    object_vector_include = "#include <vector>\n" if objects else ""
     object_wrappers = "\n\n".join(
         _jsi_object_wrapper(module_name, item, index)
         for index, item in enumerate(objects)
@@ -3774,11 +4005,7 @@ def _jsi_binding(
     registrations: list[str] = []
     for export in exports:
         expected_parameters = ", ".join(
-            {
-                "bool": "boolean",
-                "double": "number",
-                "std::string": "string",
-            }[parameter.cpp_type]
+            _jsi_expected_type(parameter.cpp_type)
             + f" {parameter.name}"
             for parameter in export.parameters
         )
@@ -3793,11 +4020,7 @@ def _jsi_binding(
         )
         type_checks: list[str] = []
         for number, parameter in enumerate(export.parameters):
-            js_type = {
-                "bool": "boolean",
-                "double": "number",
-                "std::string": "string",
-            }[parameter.cpp_type]
+            js_type = _jsi_expected_type(parameter.cpp_type)
             type_error = (
                 f"{module_name}.{export.js_name}: argument {number + 1} "
                 f"({parameter.name}) must be a {js_type}; expected "
@@ -3805,24 +4028,24 @@ def _jsi_binding(
             )
             type_checks.append(
                 f"          if ({_jsi_type_check(parameter, number)}) {{\n"
-                "            throw facebook::jsi::JSError(\n"
+                "            supernote_throw_type_error(\n"
                 f"                runtime, {json.dumps(type_error)});\n"
                 "          }"
+            )
+            type_checks.extend(
+                _jsi_range_validation(
+                    parameter,
+                    number,
+                    diagnostic_name=f"{module_name}.{export.js_name}",
+                    indent="          ",
+                )
             )
         arguments = ", ".join(
             _jsi_argument(parameter, number)
             for number, parameter in enumerate(export.parameters)
         )
         call = f"{export.cpp_name}({arguments})"
-        if export.return_type == "void":
-            result = f"        {call};\n        return Value::undefined();"
-        elif export.return_type == "std::string":
-            result = (
-                f"        const auto result = {call};\n"
-                "        return Value(String::createFromUtf8(runtime, result));"
-            )
-        else:
-            result = f"        return Value({call});"
+        result = "\n".join(_jsi_result_lines(call, export.return_type, "        "))
         registrations.append(
             "  {\n"
             "    auto function = Function::createFromHostFunction(\n"
@@ -3834,7 +4057,7 @@ def _jsi_binding(
             "           const Value *arguments,\n"
             "           std::size_t argument_count) -> Value {\n"
             f"          if (argument_count != {len(export.parameters)}) {{\n"
-            "            throw facebook::jsi::JSError(\n"
+            "            supernote_throw_type_error(\n"
             f"                runtime, std::string({json.dumps(count_prefix)}) + "
             "std::to_string(argument_count));\n"
             "          }\n"
@@ -3865,11 +4088,16 @@ def _jsi_binding(
 
 #include <android/log.h>
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
-{object_memory_include}#include <string>
+#include <limits>
+#include <memory>
+#include <string>
 #include <utility>
-{object_vector_include}
+#include <vector>
 {object_include_block}{declarations}
 
 namespace {{
@@ -3877,6 +4105,8 @@ namespace {{
 constexpr char kLogTag[] = "SupernoteJsi{class_prefix}";
 constexpr char kInstallerClassName[] = {json.dumps(installer)};
 constexpr char kGlobalName[] = {json.dumps(global_name)};
+
+{_jsi_value_helpers()}
 
 {object_wrapper_block}void clear_pending_exception(JNIEnv *env, const char *operation) {{
   if (!env->ExceptionCheck()) {{

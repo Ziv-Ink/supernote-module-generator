@@ -248,7 +248,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 "recognized-type",
                 "// @SupernoteExport\n"
                 "std::int32_t value() { return 1; }\n",
-                "synchronous JSI/JNI conversion is not implemented yet for "
+                "synchronous JNI conversion is not implemented yet for "
                 "std::int32_t",
             ),
         )
@@ -595,18 +595,6 @@ public:
 """,
                 "async HostObject lowering is not implemented yet",
             ),
-            (
-                "recognized-type",
-                """// @SupernoteExport
-class Page {
-public:
-  Page();
-  // @SupernoteExport
-  std::int32_t count();
-};
-""",
-                "HostObject conversion is not implemented yet for std::int32_t",
-            ),
         )
         for name, source, diagnostic in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -834,6 +822,86 @@ public:
             )
             self.assertIn("add(left: number, right: number): number;", declarations)
             self.assertNotIn("Promise<number>", declarations)
+
+    def test_jsi_initial_numeric_and_bytes_types_generate_checked_conversions(self):
+        source = """#include <cstddef>
+#include <cstdint>
+#include <vector>
+// @SupernoteExport
+std::vector<std::byte> convert(
+    std::int32_t page,
+    std::int64_t offset,
+    float scale,
+    std::vector<std::byte> bytes) {
+  return bytes;
+}
+// @SupernoteExport
+std::int64_t identity(std::int64_t value) { return value; }
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi", source=source)
+            binding_codegen.generate(module)
+            generated = (
+                module
+                / "android/build/generated/supernote/jni/generated_bindings.cpp"
+            ).read_text(encoding="utf-8")
+            declarations = (module / "index.d.ts").read_text(encoding="utf-8")
+
+            self.assertIn(
+                "convert(page: number, offset: bigint, scale: number, "
+                "bytes: Uint8Array): Uint8Array;",
+                declarations,
+            )
+            self.assertIn("identity(value: bigint): bigint;", declarations)
+            self.assertIn("std::trunc(supernote_argument_0)", generated)
+            self.assertIn("numeric_limits<std::int32_t>::min()", generated)
+            self.assertIn("getBigInt(runtime).isInt64(runtime)", generated)
+            self.assertIn("asBigInt(runtime).asInt64(runtime)", generated)
+            self.assertIn("numeric_limits<float>::lowest()", generated)
+            self.assertIn("supernote_is_uint8_array(runtime", generated)
+            self.assertIn("supernote_copy_uint8_array(runtime", generated)
+            self.assertIn('supernote_view_index(runtime, view, "byteOffset")', generated)
+            self.assertIn('supernote_view_index(runtime, view, "byteLength")', generated)
+            self.assertIn("std::memcpy(result.data()", generated)
+            self.assertIn("SupernoteOwnedBytesBuffer", generated)
+            self.assertIn("BigInt::fromInt64", generated)
+            self.assertIn("supernote_throw_type_error", generated)
+            self.assertIn("supernote_throw_range_error", generated)
+
+    def test_jsi_hostobject_uses_initial_numeric_and_bytes_conversions(self):
+        source = """#include <cstddef>
+#include <cstdint>
+#include <vector>
+// @SupernoteExport
+class Page {
+public:
+  Page(std::int64_t handle, std::vector<std::byte> seed);
+  // @SupernoteExport
+  std::vector<std::byte> render(std::int32_t page, float scale);
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(module, source)
+            binding_codegen.generate(module)
+            generated = (
+                module
+                / "android/build/generated/supernote/jni/generated_bindings.cpp"
+            ).read_text(encoding="utf-8")
+            declarations = (module / "index.d.ts").read_text(encoding="utf-8")
+
+            self.assertIn(
+                "create(handle: bigint, seed: Uint8Array): Page;",
+                declarations,
+            )
+            self.assertIn(
+                "render(page: number, scale: number): Uint8Array;",
+                declarations,
+            )
+            self.assertIn("std::make_shared<Page>", generated)
+            self.assertIn("asBigInt(runtime).asInt64(runtime)", generated)
+            self.assertIn("native_instance->render(", generated)
+            self.assertIn("supernote_make_uint8_array(runtime", generated)
 
     def test_generated_errors_include_module_export_and_jsi_argument_details(self):
         source = (
