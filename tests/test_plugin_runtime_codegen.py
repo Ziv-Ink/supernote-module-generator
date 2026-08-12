@@ -42,6 +42,8 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     generated = generate_plugin_runtime(tmp_path, registry("alpha", "beta"))
     cmake = (generated / "CMakeLists.txt").read_text()
     services = (generated / "src/runtime_services.cpp").read_text()
+    services_header = (generated / "src/runtime_services.hpp").read_text()
+    public_header = (generated / "include/supernote/runtime.hpp").read_text()
     source = (generated / "src/feature_registry.cpp").read_text()
     gradle = (generated / "build.gradle").read_text()
     processor = (
@@ -63,6 +65,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "ReactAndroid::jsi" in cmake
     assert "runtime_bootstrap.cpp" in cmake
     assert services.count("static ProcessServices services") == 1
+    assert "class FeatureCallScope" in services_header
+    assert "claim_internal_completion" in services_header
+    assert "thread_local std::shared_ptr<FeatureSession>" in services
+    assert "enum class ErrorCode" in public_header
+    assert "class Result final" in public_header
     assert "supernote:feature:" in source
     assert '"Alpha"' in source
     assert '"Beta"' in source
@@ -198,6 +205,16 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   });
               if (replacement->id() == runtime->id()) return 5;
               auto replacement_feature = FeatureSession::create(replacement, cleanup);
+              if (current_feature_session()) return 15;
+              {
+                FeatureCallScope scope(replacement_feature);
+                if (current_feature_session() != replacement_feature) return 16;
+                auto internal = replacement_feature->accept({});
+                if (!replacement_feature->claim_internal_completion(internal) ||
+                    internal->winner() != OperationWinner::COMPLETING) return 17;
+                if (replacement_feature->claim_internal_completion(internal)) return 18;
+              }
+              if (current_feature_session()) return 19;
               auto dropped = replacement_feature->accept(
                   [&](void *) { ++rejected; });
               replacement->invalidate();
@@ -398,3 +415,79 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     assert "install_plugin_bindings" in bootstrap
     assert "__supernoteV2FeatureRegistry_" in bootstrap
     assert '"__supernoteV2"' in bootstrap
+
+
+def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):
+    feature = FeatureManifest.create(
+        npm_name="@local/documents",
+        public_name="Documents",
+        android_namespace="com.example.documents",
+    )
+    feature_root = tmp_path / "local_modules/@local/documents"
+    cpp = feature_root / feature.roots.native
+    cpp.mkdir(parents=True)
+    (cpp / "documents.hpp").write_text(
+        """#pragma once
+#include <cstdint>
+// @SupernoteInternal
+class IndexService {
+public:
+  IndexService();
+  // @SupernoteInternal
+  std::int32_t rebuild(std::int32_t page);
+};
+"""
+    )
+    (cpp / "documents.cpp").write_text(
+        """#include "documents.hpp"
+// @SupernoteInternal
+std::int32_t pageCount(std::int32_t page) { return page; }
+"""
+    )
+    api = binding_codegen.scan_cpp_semantic_model(
+        feature_root, module_name=feature.public_name
+    )
+    generated = generate_plugin_runtime(
+        tmp_path,
+        PluginRuntimeRegistry.create(
+            plugin_id="com.example.plugin",
+            generator_version="2.0.0.dev0",
+            features=(FeatureRegistryEntry.create(feature, api),),
+        ),
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            "python3",
+            str(generated / "common_codegen.py"),
+            "--plugin-root",
+            str(tmp_path),
+            "--runtime-root",
+            str(generated),
+            "--variant",
+            "debug",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    suffix = feature.feature_id.removeprefix("supernote:feature:")
+    header = (
+        generated / f"include/supernote/{suffix}/internal.hpp"
+    ).read_text()
+    source = (
+        generated
+        / f"build/generated/supernote/debug/jni/internal_{suffix}.cpp"
+    ).read_text()
+    typescript = (feature_root / "index.d.ts").read_text()
+    assert "std::int32_t pageCount(std::int32_t page);" in header
+    assert "struct IndexService final" in header
+    assert "current_feature_session" in source
+    assert "feature->service<::IndexService>" in source
+    assert "pageCount" not in typescript
+    assert "IndexService" not in typescript

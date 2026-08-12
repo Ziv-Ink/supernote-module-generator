@@ -2835,6 +2835,7 @@ def _lower_sync_object(
     *,
     module_name: str,
     allow_async: bool = False,
+    allow_internal_members: bool = False,
 ) -> ObjectExport:
     try:
         semantic = project_cpp_api((), (source,)).classes[0]
@@ -2877,6 +2878,11 @@ def _lower_sync_object(
     methods: list[ObjectMethod] = []
     for method in source.methods:
         if method.intent.role is DeclarationRole.INTERNAL:
+            if allow_internal_members:
+                # Internal object methods remain in the common semantic model
+                # but never become JSI properties. Their receiver-aware call
+                # paths are emitted separately from this public surface.
+                continue
             raise _source_error(
                 module_root,
                 path,
@@ -3108,6 +3114,7 @@ def scan_v2_bindings(
             allow_async=True,
         )
         for source in function_sources
+        if source.intent.role is DeclarationRole.EXPORTED
     ]
     class_sources = scan_cpp_class_source_model(
         module_root, module_name=module_name
@@ -3118,8 +3125,10 @@ def scan_v2_bindings(
             source,
             module_name=module_name,
             allow_async=True,
+            allow_internal_members=True,
         )
         for source in class_sources
+        if source.intent.role is DeclarationRole.EXPORTED
     ]
     free_names = {export.js_name: export for export in exports}
     for item in objects:
@@ -4107,6 +4116,10 @@ def _jsi_async_host_function(
                         supernote::runtime::CancellationToken executor_cancel) mutable {{
                       if (executor_cancel.is_cancelled() ||
                           operation->cancellation_token().is_cancelled()) return;
+                      auto implementation_feature = weak_feature.lock();
+                      if (!implementation_feature) return;
+                      supernote::runtime::FeatureCallScope feature_call_scope(
+                          implementation_feature);
 {worker_prelude_block}
                       try {{
 {execution}
@@ -4328,21 +4341,35 @@ def _jsi_object_wrapper(
             call=call,
             return_type=method.return_type,
             indent="          ",
+            pre_call=(
+                "supernote::runtime::FeatureCallScope feature_call_scope("
+                "feature_session);",
+            )
+            if session_aware
+            else (),
         )
         arguments_parameter = (
             "const Value *arguments"
             if method.parameters
             else "const Value *"
         )
+        feature_setup = (
+            "      auto feature_session = feature_session_.lock();\n"
+            if session_aware
+            else ""
+        )
+        feature_capture = ", feature_session" if session_aware else ""
         method_branches.append(
             f"    if (property_name == {json.dumps(method.js_name)}) {{\n"
             f"      std::shared_ptr<{item.cpp_name}> native_instance = instance_;\n"
+            f"{feature_setup}"
             "      return Function::createFromHostFunction(\n"
             "          runtime,\n"
             f"          PropNameID::forAscii(runtime, "
             f"{json.dumps(method.js_name)}),\n"
             f"          {len(method.parameters)},\n"
-            "          [native_instance = std::move(native_instance)](\n"
+            "          [native_instance = std::move(native_instance)"
+            f"{feature_capture}](\n"
             "              facebook::jsi::Runtime &runtime,\n"
             "              const Value &,\n"
             f"              {arguments_parameter},\n"
@@ -4428,6 +4455,8 @@ def _jsi_object_registration(
                 "  supernote_throw_error(",
                 '      runtime, "FEATURE_CLOSED", "feature is closed");',
                 "}",
+                "supernote::runtime::FeatureCallScope feature_call_scope("
+                "    feature_session);",
             )
             if session_aware
             else ()
@@ -4509,6 +4538,13 @@ def _jsi_binding(
     )
     object_wrapper_block = f"{object_wrappers}\n\n" if object_wrappers else ""
     registrations: list[str] = []
+    sync_capture = "[feature_session]" if feature_id is not None else "[]"
+    sync_scope = (
+        "          supernote::runtime::FeatureCallScope feature_call_scope(\n"
+        "              feature_session);\n"
+        if feature_id is not None
+        else ""
+    )
     for export in exports:
         if export.async_:
             if feature_id is None:
@@ -4565,7 +4601,7 @@ def _jsi_binding(
             "        runtime,\n"
             f"        PropNameID::forAscii(runtime, {json.dumps(export.js_name)}),\n"
             f"        {len(export.parameters)},\n"
-            "        [](facebook::jsi::Runtime &runtime,\n"
+            f"        {sync_capture}(facebook::jsi::Runtime &runtime,\n"
             "           const Value &,\n"
             "           const Value *arguments,\n"
             "           std::size_t argument_count) -> Value {\n"
@@ -4576,6 +4612,7 @@ def _jsi_binding(
             "          }\n"
             f"{chr(10).join(type_checks)}"
             f"{chr(10) if type_checks else ''}"
+            f"{sync_scope}"
             "          try {\n"
             f"{result}\n"
             "          } catch (const facebook::jsi::JSError &error) {\n"

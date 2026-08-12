@@ -516,9 +516,7 @@ def _render_async_function(
         executor_captures=("invoke",),
         worker_captures_extra=("invoke",),
         worker_prelude=(
-            "                      auto implementation_feature = weak_feature.lock();\n"
-            "                      if (!implementation_feature ||\n"
-            "                          implementation_feature->state() !=\n"
+            "                      if (implementation_feature->state() !=\n"
             "                              supernote::runtime::FeatureState::ACTIVE) return;"
         ),
     )
@@ -791,6 +789,8 @@ def _render_suspend_function(
                       if (!implementation_feature ||
                           implementation_feature->state() !=
                               supernote::runtime::FeatureState::ACTIVE) return;
+                      supernote::runtime::FeatureCallScope feature_call_scope(
+                          implementation_feature);
                       try {{
 {owner_setup}              auto resolved = route->get(implementation_feature);
                         auto cancel_resolved = cancel_route->get(
@@ -905,9 +905,7 @@ def _render_async_object_method(
         executor_captures=("invoke",),
         worker_captures_extra=("invoke",),
         worker_prelude=(
-            "                      auto implementation_feature = weak_feature.lock();\n"
-            "                      if (!implementation_feature ||\n"
-            "                          implementation_feature->state() !=\n"
+            "                      if (implementation_feature->state() !=\n"
             "                              supernote::runtime::FeatureState::ACTIVE) return;"
         ),
     )

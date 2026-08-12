@@ -18,6 +18,10 @@ from common_support.binding_codegen import (
 from common_support.jvm_manifest import read_jvm_manifest
 from common_support.jvm_projection import project_jvm_owners
 from common_support.jvm_codegen import JvmCodegenError, render_jvm_feature_jsi
+from common_support.internal_codegen import (
+    internal_header_path,
+    render_cpp_internal_facade,
+)
 from common_support.semantic import (
     SemanticApi,
     merge_semantic_apis,
@@ -72,6 +76,7 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
     output_root = runtime_root / "build/generated/supernote" / variant
     semantic_registry = []
     generated_jni: dict[str, str] = {}
+    generated_internal_headers: dict[str, str] = {}
     jvm_feature_ids: list[str] = []
     for feature in features:
         feature_id = feature["feature_id"]
@@ -134,6 +139,19 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
             )
         except CodegenError as exc:
             raise RuntimeError(str(exc)) from exc
+        if native_root.is_dir():
+            try:
+                internal_header, internal_source = render_cpp_internal_facade(
+                    feature_root,
+                    module_name=feature["public_name"],
+                    feature_id=feature_id,
+                )
+            except CodegenError as exc:
+                raise RuntimeError(str(exc)) from exc
+            generated_internal_headers[internal_header_path(feature_id)] = (
+                internal_header
+            )
+            generated_jni[f"internal_{suffix}.cpp"] = internal_source
         if source_manifest is not None:
             try:
                 generated_jni[f"jvm_feature_{suffix}.cpp"] = (
@@ -157,6 +175,18 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
     if jni_root.is_dir():
         for stale in jni_root.glob("*.cpp"):
             if stale.name not in generated_jni:
+                stale.unlink()
+    include_root = runtime_root / "include/supernote"
+    for relative, source in generated_internal_headers.items():
+        _atomic_write(runtime_root / relative, source)
+    if include_root.is_dir():
+        expected_headers = {
+            (runtime_root / relative).resolve()
+            for relative in generated_internal_headers
+        }
+        expected_headers.add((include_root / "runtime.hpp").resolve())
+        for stale in include_root.glob("*/internal.hpp"):
+            if stale.resolve() not in expected_headers:
                 stale.unlink()
     _atomic_write(
         output_root / "semantic-registry.json",
