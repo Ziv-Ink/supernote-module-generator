@@ -9,6 +9,12 @@ import os
 from pathlib import Path
 import tempfile
 
+from common_support.binding_codegen import (
+    CodegenError,
+    render_v2_feature_jsi,
+    render_v2_plugin_jsi,
+    scan_cpp_semantic_model,
+)
 from common_support.jvm_manifest import read_jvm_manifest
 from common_support.jvm_projection import project_jvm_owners
 from common_support.semantic import (
@@ -64,6 +70,7 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
 
     output_root = runtime_root / "build/generated/supernote" / variant
     semantic_registry = []
+    generated_jni: dict[str, str] = {}
     for feature in features:
         feature_id = feature["feature_id"]
         suffix = feature_id.removeprefix("supernote:feature:")
@@ -72,7 +79,21 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
                 encoding="utf-8"
             )
         )
-        cpp = semantic_api_from_manifest(cpp_raw)
+        recorded_cpp = semantic_api_from_manifest(cpp_raw)
+        feature_root = plugin_root / "local_modules" / feature["npm_name"]
+        native_root = feature_root / feature["implementation_roots"]["native"]
+        cpp = (
+            scan_cpp_semantic_model(
+                feature_root, module_name=feature["public_name"]
+            )
+            if native_root.is_dir()
+            else SemanticApi()
+        )
+        if cpp.manifest() != recorded_cpp.manifest():
+            raise RuntimeError(
+                f"{feature_id}: recorded C++ semantics are stale; "
+                "run supernote-module update before building"
+            )
         manifests = jvm_by_feature.get(feature_id, [])
         if len(manifests) > 1:
             raise RuntimeError(f"multiple JVM manifests were emitted for {feature_id}")
@@ -82,6 +103,11 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
                 manifests[0], expected_feature_id=feature_id
             )
             jvm = project_jvm_owners(source_manifest.owners)
+        if jvm.functions or jvm.classes:
+            raise RuntimeError(
+                f"{feature_id}: JVM declarations were recognized, but the "
+                "typed JSI/JNI route is not implemented yet"
+            )
         semantic = merge_semantic_apis(cpp, jvm)
         semantic_json = semantic.manifest()
         encoded = json.dumps(
@@ -98,11 +124,28 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
             output_root / "semantics" / f"{suffix}.json",
             json.dumps(semantic_json, indent=2, sort_keys=True) + "\n",
         )
-        feature_root = plugin_root / "local_modules" / feature["npm_name"]
         _atomic_write(
             feature_root / "index.d.ts",
             render_typescript(feature["public_name"], semantic),
         )
+        try:
+            generated_jni[f"feature_{suffix}.cpp"] = render_v2_feature_jsi(
+                feature_root,
+                module_name=feature["public_name"],
+                feature_id=feature_id,
+            )
+        except CodegenError as exc:
+            raise RuntimeError(str(exc)) from exc
+    generated_jni["plugin_bindings.cpp"] = render_v2_plugin_jsi(
+        [feature["feature_id"] for feature in features]
+    )
+    jni_root = output_root / "jni"
+    for name, source in generated_jni.items():
+        _atomic_write(jni_root / name, source)
+    if jni_root.is_dir():
+        for stale in jni_root.glob("*.cpp"):
+            if stale.name not in generated_jni:
+                stale.unlink()
     _atomic_write(
         output_root / "semantic-registry.json",
         json.dumps(

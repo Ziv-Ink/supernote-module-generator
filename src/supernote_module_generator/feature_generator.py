@@ -116,13 +116,24 @@ def stage_feature(
         _write(
             temporary,
             "index.js",
+            "export class SupernoteError extends Error {\n"
+            "  constructor(code, message) {\n"
+            "    super(message);\n"
+            "    this.name = 'SupernoteError';\n"
+            "    Object.defineProperty(this, 'code', { value: code, enumerable: true });\n"
+            "  }\n"
+            "}\n\n"
             "const runtime = globalThis."
             + global_name
             + ";\n"
             "if (!runtime || typeof runtime.feature !== 'function') {\n"
             f"  throw new Error({json.dumps(config.public_name + ' is not installed in the Supernote V2 runtime')});\n"
             "}\n"
-            f"export default runtime.feature({json.dumps(feature.feature_id)});\n",
+            f"const feature = runtime.feature({json.dumps(feature.feature_id)});\n"
+            "Object.defineProperty(feature, '__supernoteErrorConstructor', {\n"
+            "  value: SupernoteError,\n"
+            "});\n"
+            "export default feature;\n",
         )
         _write(
             temporary,

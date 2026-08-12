@@ -41,3 +41,38 @@ def test_duplicate_runtime_blocks_are_rejected(tmp_path: Path):
     (android / "app/build.gradle").write_text("plugins {}\n")
     with pytest.raises(ConfigurationError, match="duplicate"):
         set_runtime_wiring(tmp_path, enabled=True)
+
+
+@pytest.mark.parametrize("language", ["kt", "java"])
+def test_registers_generated_react_package_idempotently(
+    tmp_path: Path, language: str
+):
+    android = tmp_path / "android"
+    (android / "app").mkdir(parents=True)
+    (android / "settings.gradle").write_text("rootProject.name = 'fixture'\n")
+    (android / "app/build.gradle").write_text("plugins {}\n")
+    source = android / "app/src/main/java/com/example" / f"MainApplication.{language}"
+    source.parent.mkdir(parents=True)
+    if language == "kt":
+        source.write_text(
+            "fun getPackages() =\n"
+            "    PackageList(this).packages.apply {\n"
+            "      add(ExistingPackage())\n"
+            "    }\n"
+        )
+    else:
+        source.write_text(
+            "List<ReactPackage> packages = new PackageList(this).getPackages();\n"
+            "return packages;\n"
+        )
+
+    set_runtime_wiring(tmp_path, enabled=True)
+    first = source.read_text()
+    set_runtime_wiring(tmp_path, enabled=True)
+    assert source.read_text() == first
+    assert first.count("SupernoteV2Package") == 1
+    verify_runtime_wiring(tmp_path, enabled=True)
+
+    set_runtime_wiring(tmp_path, enabled=False)
+    assert "SupernoteV2Package" not in source.read_text()
+    verify_runtime_wiring(tmp_path, enabled=False)

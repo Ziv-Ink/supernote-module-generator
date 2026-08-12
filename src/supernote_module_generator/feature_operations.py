@@ -37,7 +37,9 @@ class FeatureOperationService:
 
     def add(self, config: FeatureConfig) -> Path:
         had_features = bool(self.feature_paths())
-        verify_runtime_wiring(self.root, enabled=had_features)
+        verify_runtime_wiring(
+            self.root, enabled=had_features, allow_missing_package=True
+        )
         destination = config.output.resolve()
         if destination.exists():
             raise FeatureOperationError(f"feature already exists: {config.npm_name}")
@@ -77,7 +79,9 @@ class FeatureOperationService:
 
     def update(self, npm_name: str) -> Path:
         had_features = bool(self.feature_paths())
-        verify_runtime_wiring(self.root, enabled=had_features)
+        verify_runtime_wiring(
+            self.root, enabled=had_features, allow_missing_package=True
+        )
         current = self.find(npm_name)
         metadata = read_feature_manifest(current)
         raw = json.loads((current / ".supernote-module.json").read_text())
@@ -127,7 +131,9 @@ class FeatureOperationService:
 
     def remove(self, npm_name: str) -> None:
         had_features = bool(self.feature_paths())
-        verify_runtime_wiring(self.root, enabled=had_features)
+        verify_runtime_wiring(
+            self.root, enabled=had_features, allow_missing_package=True
+        )
         current = self.find(npm_name)
         staged_runtime = None
         runtime_backup = None

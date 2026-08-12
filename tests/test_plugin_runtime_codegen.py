@@ -10,6 +10,7 @@ from supernote_module_generator.feature_model import (
     FeatureRegistryEntry,
     PluginRuntimeRegistry,
 )
+from supernote_module_generator import binding_codegen
 from supernote_module_generator.plugin_runtime_codegen import (
     RUNTIME_RELATIVE_ROOT,
     activate_plugin_runtime,
@@ -47,12 +48,20 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
         generated
         / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV2Processor.kt"
     ).read_text()
+    bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
+    module = (
+        generated
+        / "src/main/java/supernote/generated/runtime/SupernoteV2Module.kt"
+    ).read_text()
 
     assert cmake.count("add_library(") == 1
     assert "runtime_services.cpp" in cmake
     assert "feature_registry.cpp" in cmake
-    assert "alpha" not in cmake
-    assert "beta" not in cmake
+    assert "local_modules/@local/alpha/android/src/main/cpp" in cmake
+    assert "local_modules/@local/beta/android/src/main/cpp" in cmake
+    assert "SUPERNOTE_GENERATED_BINDINGS" in cmake
+    assert "ReactAndroid::jsi" in cmake
+    assert "runtime_bootstrap.cpp" in cmake
     assert services.count("static ProcessServices services") == 1
     assert "supernote:feature:" in source
     assert '"Alpha"' in source
@@ -66,6 +75,15 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "Kotlin suspend requires explicit SupernoteAsync" in processor
     assert "ReactMethod" not in processor
     assert "TypeScript" not in processor
+    assert "nativeInstall" in bootstrap
+    assert "nativeInvalidate" in bootstrap
+    assert "nativeRunJsTask" in bootstrap
+    assert "RegisterNatives" not in bootstrap
+    assert "JNI_OnLoad" in bootstrap
+    assert "install_plugin_bindings" in bootstrap
+    assert "runOnJSQueueThread" in module
+    assert "nativeInstall(runtimePointer, loader)" in module
+    assert "class SupernoteV2Package" in module
     assert (
         generated
         / "annotations/src/main/java/supernote/generated/annotations/SupernoteExport.java"
@@ -290,3 +308,65 @@ def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: 
     assert semantic_registry["features"][0]["feature_id"] == entry(
         "alpha"
     ).feature.feature_id
+    jni = generated / "build/generated/supernote/debug/jni"
+    assert (jni / "plugin_bindings.cpp").is_file()
+    feature_source = next(jni.glob("feature_*.cpp")).read_text()
+    assert "register_feature" in feature_source
+    assert "JNI_OnLoad" not in feature_source
+
+
+def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
+    feature = FeatureManifest.create(
+        npm_name="@local/math",
+        public_name="Math",
+        android_namespace="com.example.math",
+    )
+    feature_root = tmp_path / "local_modules/@local/math"
+    cpp = feature_root / feature.roots.native
+    cpp.mkdir(parents=True)
+    (cpp / "math.cpp").write_text(
+        "// @SupernoteExport\n"
+        "double add(double left, double right) { return left + right; }\n"
+    )
+    api = binding_codegen.scan_cpp_semantic_model(
+        feature_root, module_name=feature.public_name
+    )
+    generated = generate_plugin_runtime(
+        tmp_path,
+        PluginRuntimeRegistry.create(
+            plugin_id="com.example.plugin",
+            generator_version="2.0.0.dev0",
+            features=(FeatureRegistryEntry.create(feature, api),),
+        ),
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            "python3",
+            str(generated / "common_codegen.py"),
+            "--plugin-root",
+            str(tmp_path),
+            "--runtime-root",
+            str(generated),
+            "--variant",
+            "debug",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    jni = generated / "build/generated/supernote/debug/jni"
+    source = next(jni.glob("feature_*.cpp")).read_text()
+    assert "createFromHostFunction" in source
+    assert 'exports.setProperty(runtime, "add"' in source
+    assert feature.feature_id in source
+    assert "JNI_OnLoad" not in source
+    bootstrap = (jni / "plugin_bindings.cpp").read_text()
+    assert "install_plugin_bindings" in bootstrap
+    assert "__supernoteV2FeatureRegistry_" in bootstrap
+    assert '"__supernoteV2"' in bootstrap

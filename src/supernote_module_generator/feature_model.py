@@ -199,6 +199,7 @@ class FeatureRegistryEntry:
             "npm_name": self.feature.npm_name,
             "public_name": self.feature.public_name,
             "android_namespace": self.feature.android_namespace,
+            "implementation_roots": self.feature.roots.manifest(),
             "semantic_digest": self.semantic_digest,
             "requirements": self.requirements.manifest(),
             "source_semantic_api": self.source_semantic_api.manifest(),

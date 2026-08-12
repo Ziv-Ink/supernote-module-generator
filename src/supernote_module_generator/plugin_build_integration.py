@@ -14,6 +14,8 @@ ANNOTATIONS_PROJECT = "supernote-v2-annotations"
 PROCESSOR_PROJECT = "supernote-v2-processor"
 START = "// supernote-module-v2-runtime"
 END = "// end supernote-module-v2-runtime"
+PACKAGE_START = "// supernote-module-v2-package"
+PACKAGE_END = "// end supernote-module-v2-package"
 
 
 def integration_files(plugin_root: Path) -> tuple[Path, Path]:
@@ -39,10 +41,13 @@ def set_runtime_wiring(plugin_root: Path, *, enabled: bool) -> tuple[Path, Path]
     """Wire or unwire exactly one generated Android library atomically."""
 
     settings, app_build = integration_files(plugin_root)
+    application = _application_file(plugin_root)
     originals = {
         settings: settings.read_text(encoding="utf-8"),
         app_build: app_build.read_text(encoding="utf-8"),
     }
+    if application is not None:
+        originals[application] = application.read_text(encoding="utf-8")
     desired = {
         settings: _replace_block(
             originals[settings],
@@ -53,9 +58,13 @@ def set_runtime_wiring(plugin_root: Path, *, enabled: bool) -> tuple[Path, Path]
             _dependency_block(app_build.suffix == ".kts") if enabled else None,
         ),
     }
+    if application is not None:
+        desired[application] = _replace_package_registration(
+            originals[application], enabled=enabled, kotlin=application.suffix == ".kt"
+        )
     changed: list[Path] = []
     try:
-        for path in (settings, app_build):
+        for path in originals:
             if desired[path] == originals[path]:
                 continue
             _atomic_write(path, desired[path])
@@ -67,7 +76,12 @@ def set_runtime_wiring(plugin_root: Path, *, enabled: bool) -> tuple[Path, Path]
     return settings, app_build
 
 
-def verify_runtime_wiring(plugin_root: Path, *, enabled: bool) -> None:
+def verify_runtime_wiring(
+    plugin_root: Path,
+    *,
+    enabled: bool,
+    allow_missing_package: bool = False,
+) -> None:
     settings, app_build = integration_files(plugin_root)
     for path in (settings, app_build):
         count = path.read_text(encoding="utf-8").count(START)
@@ -75,6 +89,17 @@ def verify_runtime_wiring(plugin_root: Path, *, enabled: bool) -> None:
         if count != expected:
             raise ConfigurationError(
                 f"{path} contains {count} V2 runtime blocks; expected {expected}"
+            )
+    application = _application_file(plugin_root)
+    if application is not None:
+        count = application.read_text(encoding="utf-8").count(PACKAGE_START)
+        expected = 1 if enabled else 0
+        if count != expected and not (
+            enabled and allow_missing_package and count == 0
+        ):
+            raise ConfigurationError(
+                f"{application} contains {count} V2 package blocks; "
+                f"expected {expected}"
             )
 
 
@@ -121,6 +146,64 @@ def _replace_block(content: str, replacement: str | None) -> str:
         updated = pattern.sub("\n" + replacement + "\n", content)
         return updated.rstrip() + "\n"
     return content.rstrip() + "\n\n" + replacement + "\n"
+
+
+def _application_file(plugin_root: Path) -> Path | None:
+    source = plugin_root.resolve() / "android/app/src/main/java"
+    if not source.is_dir():
+        return None
+    matches = sorted(
+        path
+        for name in ("MainApplication.kt", "MainApplication.java")
+        for path in source.rglob(name)
+    )
+    if len(matches) > 1:
+        raise ConfigurationError("Android app has multiple MainApplication sources")
+    return matches[0] if matches else None
+
+
+def _replace_package_registration(
+    content: str, *, enabled: bool, kotlin: bool
+) -> str:
+    pattern = re.compile(
+        r"[ \t]*" + re.escape(PACKAGE_START) + r"\n.*?\n[ \t]*"
+        + re.escape(PACKAGE_END) + r"\n?",
+        re.DOTALL,
+    )
+    matches = list(pattern.finditer(content))
+    if len(matches) > 1:
+        raise ConfigurationError("MainApplication has duplicate V2 package blocks")
+    cleaned = pattern.sub("", content)
+    if not enabled:
+        return cleaned
+    if kotlin:
+        anchor = re.search(r"(?m)^(?P<indent>[ \t]*).*PackageList\(this\)\.packages\.apply\s*\{[ \t]*$", cleaned)
+        if anchor is None:
+            raise ConfigurationError(
+                "cannot locate PackageList(this).packages.apply in MainApplication.kt"
+            )
+        indent = anchor.group("indent") + "  "
+        block = (
+            f"\n{indent}{PACKAGE_START}\n"
+            f"{indent}add(supernote.generated.runtime.SupernoteV2Package())\n"
+            f"{indent}{PACKAGE_END}"
+        )
+        return cleaned[: anchor.end()] + block + cleaned[anchor.end() :]
+    anchor = re.search(
+        r"(?m)^(?P<indent>[ \t]*).*new PackageList\(this\)\.getPackages\(\);[ \t]*$",
+        cleaned,
+    )
+    if anchor is None:
+        raise ConfigurationError(
+            "cannot locate new PackageList(this).getPackages() in MainApplication.java"
+        )
+    indent = anchor.group("indent")
+    block = (
+        f"\n{indent}{PACKAGE_START}\n"
+        f"{indent}packages.add(new supernote.generated.runtime.SupernoteV2Package());\n"
+        f"{indent}{PACKAGE_END}"
+    )
+    return cleaned[: anchor.end()] + block + cleaned[anchor.end() :]
 
 
 def _atomic_write(path: Path, content: str) -> None:

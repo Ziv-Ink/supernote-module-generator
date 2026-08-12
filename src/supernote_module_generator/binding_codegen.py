@@ -4018,12 +4018,19 @@ def _jsi_binding(
     config: dict[str, object],
     exports: list[Export],
     objects: list[ObjectExport],
+    *,
+    feature_id: str | None = None,
 ) -> str:
     namespace = str(config["android_namespace"])
     module_name = str(config["module_name"])
     class_prefix = str(config["class_prefix"])
     installer = f"{namespace}.generated.{class_prefix}JsiModule"
     global_name = str(config["jsi_global_name"])
+    feature_suffix = ""
+    if feature_id is not None:
+        if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
+            raise CodegenError(f"invalid V2 feature identity {feature_id!r}")
+        feature_suffix = feature_id.removeprefix("supernote:feature:")
     declarations = _cpp_declarations(exports)
     object_includes = "\n".join(
         f'#include "{include}"'
@@ -4124,53 +4131,49 @@ def _jsi_binding(
         _jsi_object_registration(module_name, item, index)
         for index, item in enumerate(objects)
     )
-    return f"""#include <jni.h>
-#include <jsi/jsi.h>
-
-#include <android/log.h>
-
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-{object_include_block}{declarations}
-
-namespace {{
-
-constexpr char kLogTag[] = "SupernoteJsi{class_prefix}";
-constexpr char kInstallerClassName[] = {json.dumps(installer)};
+    namespace_open = (
+        f"namespace supernote::generated::feature_{feature_suffix} {{"
+        if feature_id is not None
+        else "namespace {"
+    )
+    bootstrap_constants = ""
+    if feature_id is None:
+        bootstrap_constants = f"""constexpr char kInstallerClassName[] = {json.dumps(installer)};
 constexpr char kGlobalName[] = {json.dumps(global_name)};
-
-{_jsi_value_helpers()}
-
-{object_wrapper_block}void clear_pending_exception(JNIEnv *env, const char *operation) {{
-  if (!env->ExceptionCheck()) {{
-    return;
-  }}
-  __android_log_print(
-      ANDROID_LOG_ERROR, kLogTag, "%s raised a Java exception", operation);
-  env->ExceptionDescribe();
-  env->ExceptionClear();
-}}
-
-void install_exports(facebook::jsi::Runtime &runtime) {{
-  using facebook::jsi::Function;
-  using facebook::jsi::Object;
-  using facebook::jsi::PropNameID;
-  using facebook::jsi::String;
-  using facebook::jsi::Value;
-
-  Object exports(runtime);
-{chr(10).join(registrations)}
-  runtime.global().setProperty(runtime, kGlobalName, std::move(exports));
-}}
-
+"""
+    else:
+        bootstrap_constants = f"""constexpr char kFeatureRegistryGlobal[] =
+    "__supernoteV2FeatureRegistry_63f6999c8c67";
+constexpr char kFeatureId[] = {json.dumps(feature_id)};
+"""
+    value_helpers = _jsi_value_helpers()
+    if feature_id is not None:
+        value_helpers = value_helpers.replace(
+            "auto exports = runtime.global().getPropertyAsObject(runtime, kGlobalName);",
+            "auto registry = runtime.global().getPropertyAsObject(\n"
+            "      runtime, kFeatureRegistryGlobal);\n"
+            "  auto exports = registry.getPropertyAsObject(runtime, kFeatureId);",
+        )
+    install_name = "register_feature" if feature_id is not None else "install_exports"
+    install_parameters = (
+        "facebook::jsi::Runtime &runtime,\n"
+        "    facebook::jsi::Object &feature_registry"
+        if feature_id is not None
+        else "facebook::jsi::Runtime &runtime"
+    )
+    install_target = (
+        f"feature_registry.setProperty(runtime, {json.dumps(feature_id)}, "
+        "std::move(exports));"
+        if feature_id is not None
+        else "runtime.global().setProperty(runtime, kGlobalName, std::move(exports));"
+    )
+    if feature_id is not None:
+        bootstrap_tail = (
+            "\n}  // namespace supernote::generated::feature_"
+            f"{feature_suffix}\n"
+        )
+    else:
+        bootstrap_tail = f"""
 jboolean native_install(JNIEnv *, jobject, jlong runtime_pointer) {{
   if (runtime_pointer == 0) {{
     return JNI_FALSE;
@@ -4249,6 +4252,180 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
   }}
   return register_installer_natives(env) ? JNI_VERSION_1_6 : JNI_ERR;
 }}
+"""
+    exception_helper = ""
+    if feature_id is None:
+        exception_helper = """
+void clear_pending_exception(JNIEnv *env, const char *operation) {
+  if (!env->ExceptionCheck()) {
+    return;
+  }
+  __android_log_print(
+      ANDROID_LOG_ERROR, kLogTag, "%s raised a Java exception", operation);
+  env->ExceptionDescribe();
+  env->ExceptionClear();
+}
+"""
+    return f"""#include <jni.h>
+#include <jsi/jsi.h>
+
+#include <android/log.h>
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+{object_include_block}{declarations}
+
+{namespace_open}
+
+constexpr char kLogTag[] = "SupernoteJsi{class_prefix}";
+{bootstrap_constants}
+
+{value_helpers}
+
+{object_wrapper_block}{exception_helper}
+void {install_name}(
+    {install_parameters}) {{
+  using facebook::jsi::Function;
+  using facebook::jsi::Object;
+  using facebook::jsi::PropNameID;
+  using facebook::jsi::String;
+  using facebook::jsi::Value;
+
+  Object exports(runtime);
+{chr(10).join(registrations)}
+  {install_target}
+}}
+{bootstrap_tail}
+"""
+
+
+def render_v2_feature_jsi(
+    module_root: Path,
+    *,
+    module_name: str,
+    feature_id: str,
+) -> str:
+    """Render one feature registration unit without owning plugin bootstrap."""
+
+    if (module_root / "android/src/main/cpp").is_dir():
+        bindings = scan_bindings(
+            module_root,
+            backend="jsi",
+            module_name=module_name,
+        )
+    else:
+        bindings = ScannedBindings((), ())
+    config: dict[str, object] = {
+        "android_namespace": "supernote.generated.v2",
+        "module_name": module_name,
+        "class_prefix": "V2Feature",
+        "jsi_global_name": "__supernoteV2",
+    }
+    return _jsi_binding(
+        config,
+        list(bindings.exports),
+        list(bindings.objects),
+        feature_id=feature_id,
+    )
+
+
+def render_v2_plugin_jsi(feature_ids: list[str]) -> str:
+    """Render the single plugin registry installed by the runtime bootstrap."""
+
+    validated: list[tuple[str, str]] = []
+    for feature_id in feature_ids:
+        if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
+            raise CodegenError(f"invalid V2 feature identity {feature_id!r}")
+        validated.append(
+            (feature_id, feature_id.removeprefix("supernote:feature:"))
+        )
+    if len({feature_id for feature_id, _ in validated}) != len(validated):
+        raise CodegenError("duplicate V2 feature identity in plugin registry")
+    declarations = "\n".join(
+        "namespace supernote::generated::feature_"
+        f"{suffix} {{\n"
+        "void register_feature(facebook::jsi::Runtime &runtime,\n"
+        "                      facebook::jsi::Object &feature_registry);\n"
+        "}"
+        for _, suffix in validated
+    )
+    registrations = "\n".join(
+        f"  feature_{suffix}::register_feature(runtime, features);"
+        for _, suffix in validated
+    )
+    return f"""#include <jsi/jsi.h>
+
+#include <cstddef>
+#include <string>
+#include <utility>
+
+{declarations}
+
+namespace supernote::generated {{
+namespace {{
+
+constexpr char kFeatureRegistryGlobal[] =
+    "__supernoteV2FeatureRegistry_63f6999c8c67";
+
+[[noreturn]] void throw_type_error(
+    facebook::jsi::Runtime &runtime, const std::string &message) {{
+  auto constructor =
+      runtime.global().getPropertyAsFunction(runtime, "TypeError");
+  throw facebook::jsi::JSError(
+      runtime, constructor.callAsConstructor(runtime, message));
+}}
+
+}}  // namespace
+
+void install_plugin_bindings(facebook::jsi::Runtime &runtime) {{
+  using facebook::jsi::Function;
+  using facebook::jsi::Object;
+  using facebook::jsi::PropNameID;
+  using facebook::jsi::Value;
+
+  Object features(runtime);
+{registrations}
+  runtime.global().setProperty(
+      runtime, kFeatureRegistryGlobal, std::move(features));
+
+  Object public_runtime(runtime);
+  auto feature = Function::createFromHostFunction(
+      runtime,
+      PropNameID::forAscii(runtime, "feature"),
+      1,
+      [](facebook::jsi::Runtime &runtime,
+         const Value &,
+         const Value *arguments,
+         std::size_t argument_count) -> Value {{
+        if (argument_count != 1 || !arguments[0].isString()) {{
+          throw_type_error(
+              runtime,
+              "Supernote V2 runtime feature(id) expects exactly one string");
+        }}
+        const auto feature_id = arguments[0].asString(runtime).utf8(runtime);
+        auto registry = runtime.global().getPropertyAsObject(
+            runtime, kFeatureRegistryGlobal);
+        auto binding = registry.getProperty(runtime, feature_id.c_str());
+        if (binding.isUndefined()) {{
+          throw_type_error(
+              runtime, "unknown Supernote V2 feature: " + feature_id);
+        }}
+        return binding;
+      }});
+  public_runtime.setProperty(runtime, "feature", std::move(feature));
+  runtime.global().setProperty(
+      runtime, "__supernoteV2", std::move(public_runtime));
+}}
+
+}}  // namespace supernote::generated
 """
 
 

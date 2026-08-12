@@ -60,6 +60,21 @@ class BindingCodegenScannerTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return path
 
+    def test_v2_feature_renderer_has_no_one_shot_jni_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            source = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="LocalTest",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
+
+            self.assertIn("void register_feature(", source)
+            self.assertIn("feature_registry.setProperty", source)
+            self.assertIn("createFromHostFunction", source)
+            self.assertNotIn("JNI_OnLoad", source)
+            self.assertNotIn("RegisterNatives", source)
+
     def test_bare_export_noexcept_and_lexer_defenses_are_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(

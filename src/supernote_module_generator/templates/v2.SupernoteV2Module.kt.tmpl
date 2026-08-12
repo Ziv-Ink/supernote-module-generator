@@ -1,0 +1,108 @@
+package supernote.generated.runtime
+
+import android.util.Log
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.uimanager.ViewManager
+import com.facebook.soloader.DirectorySoSource
+import com.facebook.soloader.SoLoader
+import dalvik.system.BaseDexClassLoader
+import java.io.File
+
+class SupernoteV2Module(
+    private val context: ReactApplicationContext,
+) : ReactContextBaseJavaModule(context) {
+  private var sessionId: Long = 0L
+
+  override fun getName(): String = "SupernoteV2Runtime"
+
+  override fun initialize() {
+    super.initialize()
+    if (!loadNativeLibrary()) return
+    context.runOnJSQueueThread {
+      val runtimePointer = context.javaScriptContextHolder?.get() ?: 0L
+      if (runtimePointer == 0L) {
+        Log.e(TAG, "JSI runtime pointer is unavailable")
+        return@runOnJSQueueThread
+      }
+      val loader = SupernoteV2Module::class.java.classLoader
+      if (loader == null) {
+        Log.e(TAG, "plugin ClassLoader is unavailable")
+        return@runOnJSQueueThread
+      }
+      val installed = nativeInstall(runtimePointer, loader)
+      if (installed == 0L) {
+        Log.e(TAG, "V2 runtime installation failed")
+      } else {
+        sessionId = installed
+      }
+    }
+  }
+
+  override fun invalidate() {
+    val invalidated = sessionId
+    sessionId = 0L
+    if (invalidated != 0L) nativeInvalidate(invalidated)
+    super.invalidate()
+  }
+
+  @Suppress("unused")
+  fun scheduleOnJsThread(taskId: Long) {
+    context.runOnJSQueueThread {
+      val runtimePointer = context.javaScriptContextHolder?.get() ?: 0L
+      nativeRunJsTask(taskId, runtimePointer)
+    }
+  }
+
+  private fun loadNativeLibrary(): Boolean = try {
+    val pluginClassLoader = SupernoteV2Module::class.java.classLoader
+    val libraryPath =
+        (pluginClassLoader as? BaseDexClassLoader)
+            ?.findLibrary("${NATIVE_LIBRARY_NAME}")
+            ?: error("Cannot find lib${NATIVE_LIBRARY_NAME}.so")
+    val libraryDirectory =
+        File(libraryPath).parentFile ?: error("Cannot resolve native directory")
+    val thread = Thread.currentThread()
+    val previous = thread.contextClassLoader
+    try {
+      thread.contextClassLoader = pluginClassLoader
+      SoLoader.loadLibrary("jsi")
+      if (SoLoader.getLibraryPath(System.mapLibraryName("${NATIVE_LIBRARY_NAME}")) !=
+          libraryPath) {
+        SoLoader.prependSoSource(
+            DirectorySoSource(
+                libraryDirectory,
+                DirectorySoSource.RESOLVE_DEPENDENCIES,
+            ),
+        )
+      }
+      SoLoader.loadLibrary("${NATIVE_LIBRARY_NAME}")
+    } finally {
+      thread.contextClassLoader = previous
+    }
+    true
+  } catch (failure: Throwable) {
+    Log.e(TAG, "Cannot load the generated V2 runtime", failure)
+    false
+  }
+
+  private external fun nativeInstall(runtimePointer: Long, classLoader: ClassLoader): Long
+  private external fun nativeInvalidate(sessionId: Long)
+  private external fun nativeRunJsTask(taskId: Long, runtimePointer: Long)
+
+  private companion object {
+    const val TAG = "SupernoteV2Runtime"
+  }
+}
+
+class SupernoteV2Package : ReactPackage {
+  override fun createNativeModules(
+      reactContext: ReactApplicationContext,
+  ): List<NativeModule> = listOf(SupernoteV2Module(reactContext))
+
+  override fun createViewManagers(
+      reactContext: ReactApplicationContext,
+  ): List<ViewManager<*, *>> = emptyList()
+}
