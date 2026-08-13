@@ -39,7 +39,10 @@ def registry(*names: str) -> PluginRuntimeRegistry:
 
 
 def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Path):
-    generated = generate_plugin_runtime(tmp_path, registry("alpha", "beta"))
+    runtime_registry = registry("alpha", "beta")
+    generated = generate_plugin_runtime(tmp_path, runtime_registry)
+    component = runtime_registry.component_name
+    registration_component = f"{component}_registration"
     cmake = (generated / "CMakeLists.txt").read_text()
     services = (generated / "src/runtime_services.cpp").read_text()
     services_header = (generated / "src/runtime_services.hpp").read_text()
@@ -51,12 +54,16 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
         / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV2Processor.kt"
     ).read_text()
     bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
+    registration_bridge = (
+        generated / "src/runtime_registration_bridge.c"
+    ).read_text()
     module = (
         generated
         / "src/main/java/supernote/generated/runtime/SupernoteV2Module.kt"
     ).read_text()
 
-    assert cmake.count("add_library(") == 1
+    assert cmake.count(f"add_library({component} SHARED") == 1
+    assert cmake.count(f"add_library({registration_component} SHARED") == 1
     assert '"${SUPERNOTE_NATIVE_ROOT}/*.c"' in cmake
     assert "C_STANDARD 23 C_STANDARD_REQUIRED YES" in cmake
     assert "target_compile_features" in cmake and "cxx_std_23" in cmake
@@ -66,7 +73,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "local_modules/@local/beta/android/src/main/cpp" in cmake
     assert "SUPERNOTE_GENERATED_BINDINGS" in cmake
     assert "ReactAndroid::jsi" in cmake
+    assert "ReactAndroid::reactnative" in cmake
+    assert "find_package(fbjni REQUIRED CONFIG)" in cmake
+    assert "fbjni::fbjni" in cmake
     assert "runtime_bootstrap.cpp" in cmake
+    assert "runtime_registration_bridge.c" in cmake
     assert services.count("static ProcessServices services") == 1
     assert "class FeatureCallScope" in services_header
     assert "claim_internal_completion" in services_header
@@ -90,17 +101,41 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "TypeScript" not in processor
     assert "nativeInstall" in bootstrap
     assert "nativeInvalidate" in bootstrap
-    assert "nativeRunJsTask" in bootstrap
+    assert "nativeRunJsTask" not in bootstrap
     assert "RegisterNatives" in bootstrap
     assert "register_coroutine_bridge(env, class_loader)" in bootstrap
     assert "configure_worker_threads" in bootstrap
     assert "AttachCurrentThread" in bootstrap
     assert "DetachCurrentThread" in bootstrap
-    assert "RegisterNatives" not in bootstrap[bootstrap.index("JNI_OnLoad") :]
+    assert f"{component}_register_natives" in bootstrap
+    assert "publish_runtime_registrar(env)" in bootstrap
+    assert f"supernote.v2.registrar.{component}.v1" in bootstrap
+    assert "supernote.generated.runtime.SupernoteV2Module" in bootstrap
+    assert "(JLjava/lang/ClassLoader;" in bootstrap
+    assert "Lcom/facebook/react/bridge/ReactApplicationContext;" in bootstrap
+    assert "CallInvokerHolder;)J" in bootstrap
+    assert "CallInvokerHolder::javaobject" in bootstrap
+    assert "call_invoker->invokeAsync" in bootstrap
+    assert "runOnJSQueueThread" not in bootstrap
+    assert 'const_cast<char *>("nativeInvalidate")' in bootstrap
     assert "JNI_OnLoad" in bootstrap
+    assert "RegisterNatives" not in bootstrap[bootstrap.index("JNI_OnLoad") :]
     assert "install_plugin_bindings" in bootstrap
     assert "runOnJSQueueThread" in module
-    assert "nativeInstall(runtimePointer, loader, context)" in module
+    assert "context.jsCallInvokerHolder" in module
+    assert "nativeInstall(runtimePointer, loader, context, callInvoker)" in module
+    assert "nativeRunJsTask" not in module
+    assert f'findLibrary("{registration_component}")' in module
+    assert "SupernoteV2NativeRegistrationBridge.register" in module
+    assert "File.createTempFile" in module
+    assert "System.load(bridge.absolutePath)" in module
+    assert "bridge.delete()" in module
+    assert f"supernote.v2.registrar.{component}.v1" in module
+    assert "nativeRegister(registrarAddress, classLoader)" in module
+    assert "SupernoteRuntimeRegistrar" in registration_bridge
+    assert "nativeRegister" in registration_bridge
+    assert "jsi" not in registration_bridge
+    assert "RuntimeSession" not in registration_bridge
     assert "class SupernoteV2Package" in module
     assert (
         generated

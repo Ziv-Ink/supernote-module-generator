@@ -32,7 +32,12 @@ class SupernoteV2Module(
         Log.e(TAG, "plugin ClassLoader is unavailable")
         return@runOnJSQueueThread
       }
-      val installed = nativeInstall(runtimePointer, loader, context)
+      val callInvoker = context.jsCallInvokerHolder
+      if (callInvoker == null) {
+        Log.e(TAG, "React Native JS CallInvoker is unavailable")
+        return@runOnJSQueueThread
+      }
+      val installed = nativeInstall(runtimePointer, loader, context, callInvoker)
       if (installed == 0L) {
         Log.e(TAG, "V2 runtime installation failed")
       } else {
@@ -48,20 +53,15 @@ class SupernoteV2Module(
     super.invalidate()
   }
 
-  @Suppress("unused")
-  fun scheduleOnJsThread(taskId: Long) {
-    context.runOnJSQueueThread {
-      val runtimePointer = context.javaScriptContextHolder?.get() ?: 0L
-      nativeRunJsTask(taskId, runtimePointer)
-    }
-  }
-
   private fun loadNativeLibrary(): Boolean = try {
     val pluginClassLoader = SupernoteV2Module::class.java.classLoader
     val libraryPath =
         (pluginClassLoader as? BaseDexClassLoader)
             ?.findLibrary("${NATIVE_LIBRARY_NAME}")
             ?: error("Cannot find lib${NATIVE_LIBRARY_NAME}.so")
+    val registrationLibraryPath =
+        pluginClassLoader.findLibrary("${NATIVE_REGISTRATION_LIBRARY_NAME}")
+            ?: error("Cannot find lib${NATIVE_REGISTRATION_LIBRARY_NAME}.so")
     val libraryDirectory =
         File(libraryPath).parentFile ?: error("Cannot resolve native directory")
     val thread = Thread.currentThread()
@@ -79,6 +79,13 @@ class SupernoteV2Module(
         )
       }
       SoLoader.loadLibrary("${NATIVE_LIBRARY_NAME}")
+      if (!SupernoteV2NativeRegistrationBridge.register(
+              context,
+              File(registrationLibraryPath),
+              pluginClassLoader,
+          )) {
+        error("Cannot register generated V2 runtime natives")
+      }
     } finally {
       thread.contextClassLoader = previous
     }
@@ -92,13 +99,53 @@ class SupernoteV2Module(
       runtimePointer: Long,
       classLoader: ClassLoader,
       platformContext: ReactApplicationContext,
+      callInvoker: com.facebook.react.turbomodule.core.interfaces.CallInvokerHolder,
   ): Long
   private external fun nativeInvalidate(sessionId: Long)
-  private external fun nativeRunJsTask(taskId: Long, runtimePointer: Long)
 
   private companion object {
     const val TAG = "SupernoteV2Runtime"
   }
+}
+
+private object SupernoteV2NativeRegistrationBridge {
+  fun register(
+      context: ReactApplicationContext,
+      sourceLibrary: File,
+      classLoader: ClassLoader,
+  ): Boolean {
+    val registrarAddress =
+        System.getProperty("${NATIVE_REGISTRAR_PROPERTY}")?.toLongOrNull()
+            ?: error("Generated V2 runtime registrar is unavailable")
+    if (registrarAddress == 0L) {
+      error("Generated V2 runtime registrar address is invalid")
+    }
+    val directory =
+        File(context.codeCacheDir, "supernote-v2-registration/${NATIVE_LIBRARY_NAME}")
+    if (!directory.isDirectory && !directory.mkdirs() && !directory.isDirectory) {
+      error("Cannot create generated V2 registration directory")
+    }
+    val bridge =
+        File.createTempFile("${NATIVE_REGISTRATION_LIBRARY_NAME}-", ".so", directory)
+    return try {
+      sourceLibrary.copyTo(bridge, overwrite = true)
+      // System.load is deliberately invoked from this child-loaded class. The
+      // bridge has no JSI/React Native dependency and contains no runtime state.
+      System.load(bridge.absolutePath)
+      nativeRegister(registrarAddress, classLoader)
+    } finally {
+      if (bridge.exists() && !bridge.delete()) {
+        Log.w(TAG, "Cannot delete temporary native-registration bridge $bridge")
+      }
+    }
+  }
+
+  private external fun nativeRegister(
+      registrarAddress: Long,
+      classLoader: ClassLoader,
+  ): Boolean
+
+  private const val TAG = "SupernoteV2Runtime"
 }
 
 class SupernoteV2Package : ReactPackage {
