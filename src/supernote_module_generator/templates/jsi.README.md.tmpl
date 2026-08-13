@@ -10,7 +10,7 @@ android/src/main/cpp/
 ```
 
 ```cpp
-// @SupernoteExport
+// @SupernotePluginExport
 double add(double left, double right) {
   return left + right;
 }
@@ -18,7 +18,7 @@ double add(double left, double right) {
 
 ## Persistent C++ objects
 
-JSI modules can also expose persistent C++ objects. Put `@SupernoteExport` on
+JSI modules can also expose persistent C++ objects. Put `@SupernotePluginExport` on
 the class or struct and on each method that JavaScript should see. Ordinary
 unmarked public methods remain C++-only.
 
@@ -26,13 +26,13 @@ unmarked public methods remain C++-only.
 // Counter.hpp
 #pragma once
 
-// @SupernoteExport
+// @SupernotePluginExport
 class Counter {
 public:
   Counter(double initial);
-  // @SupernoteExport
+  // @SupernotePluginExport
   double value() const;
-  // @SupernoteExport
+  // @SupernotePluginExport
   void increment(double amount);
   void rebuildInternalCache();
 

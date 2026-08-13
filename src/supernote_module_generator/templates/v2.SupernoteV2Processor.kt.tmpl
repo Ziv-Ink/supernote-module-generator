@@ -30,9 +30,9 @@ import kotlin.io.path.invariantSeparatorsPathString
 private const val manifestSchema = 1
 private const val manifestKind = "supernote_jvm_source_manifest"
 private val markerOrder = listOf(
-  "SupernoteExport",
-  "SupernoteInternal",
-  "SupernoteAsync",
+  "SupernotePluginExport",
+  "SupernotePluginInternal",
+  "SupernotePluginAsync",
   "SupernoteConstructor",
 )
 private val markerNames = markerOrder.associateWith {
@@ -127,8 +127,8 @@ class SupernoteV2Processor(
     val language = language(declaration)
     val owner = ownerName(declaration)
     val marked = markers(declaration)
-    if ("SupernoteAsync" in marked || "SupernoteConstructor" in marked) {
-      fail(declaration, "classes accept only SupernoteExport or SupernoteInternal")
+    if ("SupernotePluginAsync" in marked || "SupernoteConstructor" in marked) {
+      fail(declaration, "classes accept only SupernotePluginExport or SupernotePluginInternal")
     }
     validateReachability(declaration, marked)
     val form = when {
@@ -223,8 +223,8 @@ class SupernoteV2Processor(
     validateValueType(function, result, returned.nullability == Nullability.NULLABLE, true)
     val suspend = Modifier.SUSPEND in function.modifiers
     val marked = markers(function)
-    if (suspend && "SupernoteAsync" !in marked) {
-      fail(function, "Kotlin suspend requires explicit SupernoteAsync")
+    if (suspend && "SupernotePluginAsync" !in marked) {
+      fail(function, "Kotlin suspend requires explicit SupernotePluginAsync")
     }
     val actualParameters = parameters.joinToString("") { descriptor(it.jvmType) }
     val jvmDescriptor = if (suspend) {
@@ -266,32 +266,32 @@ class SupernoteV2Processor(
     val marked = markers(function)
     if ("SupernoteConstructor" in marked) fail(function, "SupernoteConstructor is valid only on constructors")
     validateReachability(function, marked)
-    if ("SupernoteAsync" in marked && marked.none { it == "SupernoteExport" || it == "SupernoteInternal" }) {
-      fail(function, "SupernoteAsync requires SupernoteExport or SupernoteInternal")
+    if ("SupernotePluginAsync" in marked && marked.none { it == "SupernotePluginExport" || it == "SupernotePluginInternal" }) {
+      fail(function, "SupernotePluginAsync requires SupernotePluginExport or SupernotePluginInternal")
     }
   }
 
   private fun validateReachability(node: KSNode, marked: Set<String>) {
-    if ("SupernoteExport" in marked && "SupernoteInternal" in marked) {
-      fail(node, "SupernoteExport and SupernoteInternal cannot mark one declaration")
+    if ("SupernotePluginExport" in marked && "SupernotePluginInternal" in marked) {
+      fail(node, "SupernotePluginExport and SupernotePluginInternal cannot mark one declaration")
     }
   }
 
   private fun validateOwner(owner: OwnerFact) {
     if (owner.visibility != "public") fail(owner.source.path, "JVM implementation owners must be public")
     val role = when {
-      owner.markers.any { it.name == "SupernoteExport" } -> "export"
-      owner.markers.any { it.name == "SupernoteInternal" } -> "internal"
+      owner.markers.any { it.name == "SupernotePluginExport" } -> "export"
+      owner.markers.any { it.name == "SupernotePluginInternal" } -> "internal"
       else -> "ordinary"
     }
     owner.declarations.forEach { declaration ->
       val declarationRole = when {
-        declaration.markers.any { it.name == "SupernoteExport" } -> "export"
-        declaration.markers.any { it.name == "SupernoteInternal" } -> "internal"
+        declaration.markers.any { it.name == "SupernotePluginExport" } -> "export"
+        declaration.markers.any { it.name == "SupernotePluginInternal" } -> "internal"
         else -> "ordinary"
       }
       if (role == "internal" && declarationRole != "internal") {
-        fail(declaration.source.path, "SupernoteInternal classes may contain only SupernoteInternal generated methods")
+        fail(declaration.source.path, "SupernotePluginInternal classes may contain only SupernotePluginInternal generated methods")
       }
       if (role != "ordinary" && declaration.isStatic) {
         fail(declaration.source.path, "static methods are not object/service members")

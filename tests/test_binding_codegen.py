@@ -23,7 +23,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
         *,
         backend: str = "jni",
         source: str = (
-            "// @SupernoteExport\n"
+            "// @SupernotePluginExport\n"
             "double add(double left, double right) { return left + right; }\n"
         ),
     ) -> Path:
@@ -80,10 +80,10 @@ class BindingCodegenScannerTests(unittest.TestCase):
             module = self.make_module(
                 Path(directory),
                 source=(
-                    'const char *example = R"tag(// @SupernoteExport)tag";\n'
-                    "/* // @SupernoteExport */\n"
-                    "// Documentation mentions @SupernoteExport here.\n"
-                    "// @SupernoteExport\n"
+                    'const char *example = R"tag(// @SupernotePluginExport)tag";\n'
+                    "/* // @SupernotePluginExport */\n"
+                    "// Documentation mentions @SupernotePluginExport here.\n"
+                    "// @SupernotePluginExport\n"
                     "double subtract(\n"
                     "    double left,\n"
                     "    double right) noexcept {\n"
@@ -115,25 +115,25 @@ class BindingCodegenScannerTests(unittest.TestCase):
         cases = (
             (
                 "export-sync",
-                "// @SupernoteExport\n",
+                "// @SupernotePluginExport\n",
                 DeclarationRole.EXPORTED,
                 ExecutionMode.SYNC,
             ),
             (
                 "internal-sync",
-                "// @SupernoteInternal\n",
+                "// @SupernotePluginInternal\n",
                 DeclarationRole.INTERNAL,
                 ExecutionMode.SYNC,
             ),
             (
                 "export-async",
-                "  // @SupernoteAsync\n\n// @SupernoteExport\n",
+                "  // @SupernotePluginAsync\n\n// @SupernotePluginExport\n",
                 DeclarationRole.EXPORTED,
                 ExecutionMode.ASYNC,
             ),
             (
                 "internal-async",
-                "// @SupernoteInternal\n  // @SupernoteAsync\n",
+                "// @SupernotePluginInternal\n  // @SupernotePluginAsync\n",
                 DeclarationRole.INTERNAL,
                 ExecutionMode.ASYNC,
             ),
@@ -199,18 +199,18 @@ class BindingCodegenScannerTests(unittest.TestCase):
         cases = (
             (
                 "async-alone",
-                "// @SupernoteAsync\n",
-                "SupernoteAsync requires SupernoteExport or SupernoteInternal",
+                "// @SupernotePluginAsync\n",
+                "SupernotePluginAsync requires SupernotePluginExport or SupernotePluginInternal",
             ),
             (
                 "conflicting-role",
-                "// @SupernoteExport\n// @SupernoteInternal\n",
-                "SupernoteExport and SupernoteInternal cannot mark one declaration",
+                "// @SupernotePluginExport\n// @SupernotePluginInternal\n",
+                "SupernotePluginExport and SupernotePluginInternal cannot mark one declaration",
             ),
             (
                 "duplicate",
-                "// @SupernoteExport\n// @SupernoteExport\n",
-                "duplicate SupernoteExport marker",
+                "// @SupernotePluginExport\n// @SupernotePluginExport\n",
+                "duplicate SupernotePluginExport marker",
             ),
             (
                 "constructor",
@@ -219,18 +219,33 @@ class BindingCodegenScannerTests(unittest.TestCase):
             ),
             (
                 "alias",
-                '// @SupernoteExport(name = "renamed")\n',
+                '// @SupernotePluginExport(name = "renamed")\n',
                 "initial V2 markers take no arguments",
             ),
             (
                 "trailing-text",
-                "// @SupernoteExport trailing\n",
+                "// @SupernotePluginExport trailing\n",
                 "malformed Supernote marker",
             ),
             (
                 "unknown",
                 "// @SupernoteService\n",
                 "unknown Supernote marker 'SupernoteService'",
+            ),
+            (
+                "obsolete-v1-export",
+                "// @SupernoteExport\n",
+                "unknown Supernote marker 'SupernoteExport'",
+            ),
+            (
+                "obsolete-v1-internal",
+                "// @SupernoteInternal\n",
+                "unknown Supernote marker 'SupernoteInternal'",
+            ),
+            (
+                "obsolete-v1-async",
+                "// @SupernoteAsync\n",
+                "unknown Supernote marker 'SupernoteAsync'",
             ),
         )
         for name, markers, diagnostic in cases:
@@ -250,18 +265,18 @@ class BindingCodegenScannerTests(unittest.TestCase):
         cases = (
             (
                 "internal",
-                "// @SupernoteInternal\ndouble value() { return 1.0; }\n",
+                "// @SupernotePluginInternal\ndouble value() { return 1.0; }\n",
                 "generated C++ caller route is not implemented yet",
             ),
             (
                 "async",
-                "// @SupernoteExport\n// @SupernoteAsync\n"
+                "// @SupernotePluginExport\n// @SupernotePluginAsync\n"
                 "double value() { return 1.0; }\n",
                 "async lowering is not implemented yet",
             ),
             (
                 "recognized-type",
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "std::int32_t value() { return 1; }\n",
                 "synchronous JNI conversion is not implemented yet for "
                 "std::int32_t",
@@ -282,8 +297,8 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 Path(directory),
                 backend="jsi",
                 source=(
-                    "// @SupernoteExport\n"
-                    "// @SupernoteAsync\n"
+                    "// @SupernotePluginExport\n"
+                    "// @SupernotePluginAsync\n"
                     "std::int64_t load(std::string path) { return 42; }\n"
                 ),
             )
@@ -312,12 +327,12 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 """#include <cstddef>
 #include <cstdint>
 #include <vector>
-// @SupernoteExport
+// @SupernotePluginExport
 class Document {
 public:
   Document();
-  // @SupernoteExport
-  // @SupernoteAsync
+  // @SupernotePluginExport
+  // @SupernotePluginAsync
   std::vector<std::byte> load(std::int32_t page);
 };
 """,
@@ -348,16 +363,16 @@ public:
             )
 
     def test_cpp_class_source_and_semantic_models_use_explicit_member_intent(self):
-        source = """// @SupernoteExport
+        source = """// @SupernotePluginExport
 class Document {
 public:
   Document(std::string path);
 
-  // @SupernoteExport
+  // @SupernotePluginExport
   std::int32_t pageCount() const noexcept;
 
-  // @SupernoteInternal
-  // @SupernoteAsync
+  // @SupernotePluginInternal
+  // @SupernotePluginAsync
   std::vector<std::byte> rebuild(std::int32_t page);
 
   int unsupportedButOrdinary();
@@ -393,7 +408,7 @@ private:
             self.assertEqual(ExecutionMode.ASYNC, document.methods[1].execution)
 
     def test_cpp_class_constructor_selection_and_implicit_default(self):
-        selected = """// @SupernoteExport
+        selected = """// @SupernotePluginExport
 class Document {
 public:
   Document(std::string path);
@@ -411,9 +426,9 @@ public:
             semantic = binding_codegen.scan_cpp_semantic_model(module).classes[0]
             self.assertEqual(SemanticType.INT64, semantic.constructor.parameters[0].type)
 
-        implicit = """// @SupernoteExport
+        implicit = """// @SupernotePluginExport
 struct Page {
-  // @SupernoteExport
+  // @SupernotePluginExport
   void refresh();
 };
 """
@@ -429,7 +444,7 @@ struct Page {
         cases = (
             (
                 "ambiguous",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   Document(std::string path);
@@ -441,7 +456,7 @@ public:
             ),
             (
                 "missing",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 private:
   Document();
@@ -461,12 +476,12 @@ private:
                     binding_codegen.scan_cpp_semantic_model(module)
 
     def test_cpp_internal_class_projects_as_feature_service(self):
-        source = """// @SupernoteInternal
+        source = """// @SupernotePluginInternal
 class IndexService {
 public:
   IndexService();
 
-  // @SupernoteInternal
+  // @SupernotePluginInternal
   std::int32_t rebuild();
 
   void ordinaryHelper();
@@ -488,7 +503,7 @@ public:
                 """class Document {
 public:
   Document();
-  // @SupernoteExport
+  // @SupernotePluginExport
   void refresh();
 };
 """,
@@ -496,12 +511,12 @@ public:
             ),
             (
                 "private-method",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   Document();
 private:
-  // @SupernoteExport
+  // @SupernotePluginExport
   void refresh();
 };
 """,
@@ -509,11 +524,11 @@ private:
             ),
             (
                 "field",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   Document();
-  // @SupernoteExport
+  // @SupernotePluginExport
   std::int32_t pageCount;
 };
 """,
@@ -521,11 +536,11 @@ public:
             ),
             (
                 "static",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   Document();
-  // @SupernoteExport
+  // @SupernotePluginExport
   static void refresh();
 };
 """,
@@ -533,15 +548,15 @@ public:
             ),
             (
                 "export-on-internal-service",
-                """// @SupernoteInternal
+                """// @SupernotePluginInternal
 class Service {
 public:
   Service();
-  // @SupernoteExport
+  // @SupernotePluginExport
   void refresh();
 };
 """,
-                "may contain only SupernoteInternal",
+                "may contain only SupernotePluginInternal",
             ),
         )
         for name, source, diagnostic in cases:
@@ -558,19 +573,19 @@ public:
         cases = (
             (
                 "class-role-conflict",
-                """// @SupernoteExport
-// @SupernoteInternal
+                """// @SupernotePluginExport
+// @SupernotePluginInternal
 class Document { public: Document(); };
 """,
-                "SupernoteExport and SupernoteInternal cannot mark one declaration",
+                "SupernotePluginExport and SupernotePluginInternal cannot mark one declaration",
             ),
             (
                 "async-class",
-                """// @SupernoteExport
-// @SupernoteAsync
+                """// @SupernotePluginExport
+// @SupernotePluginAsync
 class Document { public: Document(); };
 """,
-                "SupernoteAsync cannot mark a class",
+                "SupernotePluginAsync cannot mark a class",
             ),
             (
                 "constructor-on-class",
@@ -581,19 +596,19 @@ class Document { public: Document(); };
             ),
             (
                 "async-only-method",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   Document();
-  // @SupernoteAsync
+  // @SupernotePluginAsync
   void refresh();
 };
 """,
-                "SupernoteAsync requires SupernoteExport or SupernoteInternal",
+                "SupernotePluginAsync requires SupernotePluginExport or SupernotePluginInternal",
             ),
             (
                 "constructor-on-method",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   Document();
@@ -605,18 +620,18 @@ public:
             ),
             (
                 "constructor-on-service",
-                """// @SupernoteInternal
+                """// @SupernotePluginInternal
 class Service {
 public:
   // @SupernoteConstructor
   Service();
 };
 """,
-                "SupernoteConstructor does not apply to a SupernoteInternal",
+                "SupernoteConstructor does not apply to a SupernotePluginInternal",
             ),
             (
                 "two-selected-constructors",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Document {
 public:
   // @SupernoteConstructor
@@ -643,7 +658,7 @@ public:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                "// @SupernoteExport\nclass Page { public: Page(); };\n",
+                "// @SupernotePluginExport\nclass Page { public: Page(); };\n",
             )
             objects = binding_codegen.scan_bindings(module).objects
             self.assertEqual(["Page"], [item.js_name for item in objects])
@@ -652,17 +667,17 @@ public:
         cases = (
             (
                 "service",
-                "// @SupernoteInternal\n"
+                "// @SupernotePluginInternal\n"
                 "class Service { public: Service(); };\n",
                 "FeatureSession service route is not implemented yet",
             ),
             (
                 "internal-method",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Page {
 public:
   Page();
-  // @SupernoteInternal
+  // @SupernotePluginInternal
   void rebuild();
 };
 """,
@@ -670,12 +685,12 @@ public:
             ),
             (
                 "async-method",
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Page {
 public:
   Page();
-  // @SupernoteExport
-  // @SupernoteAsync
+  // @SupernotePluginExport
+  // @SupernotePluginAsync
   void refresh();
 };
 """,
@@ -698,7 +713,7 @@ public:
                 Path(directory),
                 source=(
                     "#if 0\n"
-                    "// @SupernoteExport\n"
+                    "// @SupernotePluginExport\n"
                     "double hidden(double value) { return value; }\n"
                     "#endif\n"
                 ),
@@ -714,27 +729,27 @@ public:
         cases = {
             "before-static": (
                 "static\n"
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "double hidden(double value) { return value; }\n",
                 "declaration prefix before the marker",
             ),
             "after-inline": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "inline double hidden(double value) { return value; }\n",
                 "modifier 'inline' is forbidden",
             ),
             "attribute": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "[[nodiscard]] double hidden(double value) { return value; }\n",
                 r"modifier '\[\[' is forbidden",
             ),
             "declaration": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "double hidden(double value);\n",
                 "tagged declarations are not exported",
             ),
             "suffix": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "double hidden(double value) FINAL { return value; }\n",
                 "unsupported tokens after the parameter list",
             ),
@@ -763,7 +778,7 @@ public:
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
                 module = self.make_module(Path(directory))
                 (module / f"android/src/main/cpp/forbidden{suffix}").write_text(
-                    "// @SupernoteExport\n",
+                    "// @SupernotePluginExport\n",
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(
@@ -777,7 +792,7 @@ public:
 
     def test_jni_reserved_names_do_not_apply_to_jsi(self):
         source = (
-            "// @SupernoteExport\n"
+            "// @SupernotePluginExport\n"
             "double choose(double when) { return when; }\n"
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -797,13 +812,13 @@ public:
                 cases = (
                     (
                         f"function-{keyword}",
-                        "// @SupernoteExport\n"
+                        "// @SupernotePluginExport\n"
                         f"double {keyword}() {{ return 0.0; }}\n",
                         f"C++ function name {keyword!r} is a C++23 keyword",
                     ),
                     (
                         f"parameter-{keyword}",
-                        "// @SupernoteExport\n"
+                        "// @SupernotePluginExport\n"
                         f"double evaluate(double {keyword}) {{ return 0.0; }}\n",
                         f"argument 1 name {keyword!r} is a C++23 keyword",
                     ),
@@ -825,17 +840,17 @@ public:
     def test_jni_rejects_generated_method_and_promise_collisions(self):
         cases = {
             "getName": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "double getName() { return 1.0; }\n",
                 "collides with a generated Kotlin method",
             ),
             "initialize": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "void initialize() {}\n",
                 "collides with a generated Kotlin method",
             ),
             "promise": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "double evaluate(double promise) { return promise; }\n",
                 "generated React Native Promise parameter",
             ),
@@ -913,7 +928,7 @@ public:
         source = """#include <cstddef>
 #include <cstdint>
 #include <vector>
-// @SupernoteExport
+// @SupernotePluginExport
 std::vector<std::byte> convert(
     std::int32_t page,
     std::int64_t offset,
@@ -921,7 +936,7 @@ std::vector<std::byte> convert(
     std::vector<std::byte> bytes) {
   return bytes;
 }
-// @SupernoteExport
+// @SupernotePluginExport
 std::int64_t identity(std::int64_t value) { return value; }
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -958,11 +973,11 @@ std::int64_t identity(std::int64_t value) { return value; }
         source = """#include <cstddef>
 #include <cstdint>
 #include <vector>
-// @SupernoteExport
+// @SupernotePluginExport
 class Page {
 public:
   Page(std::int64_t handle, std::vector<std::byte> seed);
-  // @SupernoteExport
+  // @SupernotePluginExport
   std::vector<std::byte> render(std::int32_t page, float scale);
 };
 """
@@ -991,7 +1006,7 @@ public:
 
     def test_generated_errors_include_module_export_and_jsi_argument_details(self):
         source = (
-            "// @SupernoteExport\n"
+            "// @SupernotePluginExport\n"
             "double add(double left, bool enabled) { return enabled ? left : 0; }\n"
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -1033,7 +1048,7 @@ public:
     def test_rejects_user_owned_jni_on_load(self):
         source = (
             'extern "C" int JNI_OnLoad(void *, void *) { return 0; }\n'
-            "// @SupernoteExport\n"
+            "// @SupernotePluginExport\n"
             "double add(double value) { return value; }\n"
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -1047,7 +1062,7 @@ public:
     def test_rejects_untagged_overload_in_same_source(self):
         source = (
             "double add(double value) { return value; }\n"
-            "// @SupernoteExport\n"
+            "// @SupernotePluginExport\n"
             "double add(double left, double right) { return left + right; }\n"
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -1077,7 +1092,7 @@ public:
 
     def test_calls_inside_function_bodies_are_not_overloads(self):
         source = (
-            "// @SupernoteExport\n"
+            "// @SupernotePluginExport\n"
             "double add(double left, double right) { return left + right; }\n"
             "\n"
             "double call_export(double value) {\n"
@@ -1172,17 +1187,17 @@ public:
             )
 
     def test_jsi_object_scans_constructor_methods_and_access_control(self):
-        source = """// @SupernoteExport
+        source = """// @SupernotePluginExport
 class Counter {
 public:
   Counter(bool enabled, double initial, std::string label);
-  // @SupernoteExport
+  // @SupernotePluginExport
   bool enabled() const;
-  // @SupernoteExport
+  // @SupernotePluginExport
   double value() const noexcept;
-  // @SupernoteExport
+  // @SupernotePluginExport
   std::string label() noexcept;
-  // @SupernoteExport
+  // @SupernotePluginExport
   void increment(double amount, bool notify, std::string reason);
   double public_field;
 private:
@@ -1212,10 +1227,10 @@ protected:
             self.assertTrue(item.methods[2].noexcept)
 
     def test_jsi_object_uses_source_struct_name_and_zero_argument_constructor(self):
-        source = """// @SupernoteExport
+        source = """// @SupernotePluginExport
 struct NativeDocument {
   NativeDocument();
-  // @SupernoteExport
+  // @SupernotePluginExport
   double pageCount() const;
 private:
   int hidden();
@@ -1235,18 +1250,18 @@ private:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class PrivateByDefault {
   PrivateByDefault();
 public:
   PrivateByDefault(double value);
-  // @SupernoteExport
+  // @SupernotePluginExport
   double value();
 };
-// @SupernoteExport
+// @SupernotePluginExport
 struct PublicByDefault {
   PublicByDefault();
-  // @SupernoteExport
+  // @SupernotePluginExport
   void reset();
 };
 """,
@@ -1277,9 +1292,9 @@ struct PublicByDefault {
                 module = self.make_module(Path(directory), backend="jsi")
                 self.write_object_header(
                     module,
-                    "// @SupernoteExport\nclass Example {\npublic:\n"
+                    "// @SupernotePluginExport\nclass Example {\npublic:\n"
                     "  Example();\n"
-                    f"  // @SupernoteExport\n  {method}\n"
+                    f"  // @SupernotePluginExport\n  {method}\n"
                     "};\n",
                 )
                 with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
@@ -1289,8 +1304,8 @@ struct PublicByDefault {
         cases = {
             "method": (
                 "Example();\n"
-                "  // @SupernoteExport\n  double value();\n"
-                "  // @SupernoteExport\n  double value(double fallback);",
+                "  // @SupernotePluginExport\n  double value();\n"
+                "  // @SupernotePluginExport\n  double value(double fallback);",
                 "duplicate generated method name 'value'",
             ),
             "constructor": (
@@ -1303,7 +1318,7 @@ struct PublicByDefault {
                 module = self.make_module(Path(directory), backend="jsi")
                 self.write_object_header(
                     module,
-                    "// @SupernoteExport\nclass Example {\npublic:\n  "
+                    "// @SupernotePluginExport\nclass Example {\npublic:\n  "
                     + members
                     + "\n};\n",
                 )
@@ -1315,7 +1330,7 @@ struct PublicByDefault {
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class add { public: add(); };
 """,
             )
@@ -1325,14 +1340,14 @@ class add { public: add(); };
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Thing { public: Thing(); };
 """,
                 relative="First.hpp",
             )
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Thing { public: Thing(); };
 """,
                 relative="Second.hpp",
@@ -1348,9 +1363,9 @@ class Thing { public: Thing(); };
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Counter { public: Counter(); };
-// @SupernoteExport
+// @SupernotePluginExport
 class CounterFactory { public: CounterFactory(); };
 """,
             )
@@ -1383,7 +1398,7 @@ class NativeCounter { public: NativeCounter(); };
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class LocalTestModule { public: LocalTestModule(); };
 """,
             )
@@ -1399,16 +1414,16 @@ class LocalTestModule { public: LocalTestModule(); };
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class First { public: First(); };
-// @SupernoteExport
+// @SupernotePluginExport
 class Second { public: Second(); };
 """,
                 relative="model/Objects.hpp",
             )
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Third { public: Third(); };
 """,
                 relative="other/Third.hh",
@@ -1426,19 +1441,19 @@ class Third { public: Third(); };
             (
                 "jsi",
                 "Counter.cpp",
-                "// @SupernoteExport\nclass Counter { public: Counter(); };\n",
+                "// @SupernotePluginExport\nclass Counter { public: Counter(); };\n",
                 "supported top-level function definition",
             ),
             (
                 "jni",
                 "Counter.hpp",
-                "// @SupernoteExport\nclass Counter { public: Counter(); };\n",
+                "// @SupernotePluginExport\nclass Counter { public: Counter(); };\n",
                 "require the JSI frontend",
             ),
             (
                 "jsi",
                 "Counter.hpp",
-                "// @SupernoteExport(bad)\nclass Counter { public: Counter(); };\n",
+                "// @SupernotePluginExport(bad)\nclass Counter { public: Counter(); };\n",
                 "malformed Supernote marker",
             ),
         )
@@ -1454,16 +1469,16 @@ class Third { public: Third(); };
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                'const char *text = "// @SupernoteExport";\n'
-                "/* // @SupernoteExport */\n"
-                "// Documentation mentions @SupernoteExport here.\n",
+                'const char *text = "// @SupernotePluginExport";\n'
+                "/* // @SupernotePluginExport */\n"
+                "// Documentation mentions @SupernotePluginExport here.\n",
             )
             self.assertEqual((), binding_codegen.scan_bindings(module).objects)
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                "#if 0\n// @SupernoteExport\n"
+                "#if 0\n// @SupernotePluginExport\n"
                 "class Hidden { public: Hidden(); };\n#endif\n",
             )
             with self.assertRaisesRegex(
@@ -1475,17 +1490,17 @@ class Third { public: Third(); };
     def test_object_rejects_templates_inheritance_and_nested_exports(self):
         cases = {
             "template": (
-                "template <typename T>\n// @SupernoteExport\n"
+                "template <typename T>\n// @SupernotePluginExport\n"
                 "class Example { public: Example(); };\n",
                 "declaration prefix before the class marker",
             ),
             "inheritance": (
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "class Example : public Base { public: Example(); };\n",
                 "inheritance is not supported",
             ),
             "nested": (
-                "class Outer {\n// @SupernoteExport\n"
+                "class Outer {\n// @SupernotePluginExport\n"
                 "class Example { public: Example(); };\n};\n",
                 "requires a marked top-level",
             ),
@@ -1498,7 +1513,7 @@ class Third { public: Third(); };
                     binding_codegen.scan_bindings(module)
 
     def test_object_ignores_destructor_copy_constructor_and_public_fields(self):
-        source = """// @SupernoteExport
+        source = """// @SupernotePluginExport
 class Example {
 public:
   Example();
@@ -1506,7 +1521,7 @@ public:
   Example(Example &&);
   ~Example();
   double (*callback)();
-  // @SupernoteExport
+  // @SupernotePluginExport
   double value() const { return 1.0; }
 };
 """
@@ -1518,7 +1533,7 @@ public:
             self.assertEqual(["value"], [method.js_name for method in item.methods])
 
     def test_constructor_containing_class_name_is_not_mistaken_for_copy(self):
-        source = """// @SupernoteExport
+        source = """// @SupernotePluginExport
 class Example {
 public:
   Example();
@@ -1536,7 +1551,7 @@ public:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                "// @SupernoteExport\ndouble illegal(double value);\n",
+                "// @SupernotePluginExport\ndouble illegal(double value);\n",
             )
             with self.assertRaisesRegex(
                 binding_codegen.CodegenError,
@@ -1547,13 +1562,13 @@ public:
     def test_object_manifest_typescript_hostobject_and_lifetime_generation(self):
         source = """#pragma once
 #include <string>
-// @SupernoteExport
+// @SupernotePluginExport
 class Counter {
 public:
   Counter(double initial);
-  // @SupernoteExport
+  // @SupernotePluginExport
   double value() const noexcept;
-  // @SupernoteExport
+  // @SupernotePluginExport
   void increment(double amount);
   void resetInternalCache();
 private:
@@ -1602,7 +1617,7 @@ private:
 
     def test_selected_constructor_drives_generated_factory(self):
         source = """#include <string>
-// @SupernoteExport
+// @SupernotePluginExport
 class Document {
 public:
   Document(double handle);
@@ -1638,7 +1653,7 @@ public:
             module = self.make_module(Path(directory), backend="jsi", source="")
             self.write_object_header(
                 module,
-                """// @SupernoteExport
+                """// @SupernotePluginExport
 class Counter { public: Counter(); };
 """,
             )

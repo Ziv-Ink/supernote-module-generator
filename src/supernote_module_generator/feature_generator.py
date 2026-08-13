@@ -59,7 +59,7 @@ def stage_feature(
                 temporary,
                 relative,
                 "#include <string>\n\n"
-                "// @SupernoteExport\n"
+                "// @SupernotePluginExport\n"
                 "std::string greet(std::string name) {\n"
                 '  return "Hello, " + name;\n'
                 "}\n",
@@ -79,8 +79,8 @@ def stage_feature(
                 temporary,
                 relative,
                 f"package {config.android_namespace}\n\n"
-                "import supernote.generated.annotations.SupernoteExport\n\n"
-                "@SupernoteExport\n"
+                "import supernote.generated.annotations.SupernotePluginExport\n\n"
+                "@SupernotePluginExport\n"
                 "fun greetFromJvm(name: String): String = \"Hello, $name\"\n",
             )
         if preserve_sources_from is not None:
@@ -176,11 +176,11 @@ Generated Supernote V2 feature package. Its logical feature is language-neutral:
 C/C++ and Kotlin/Java source may coexist under `android/src/main/`.
 
 Only declarations with explicit Supernote markers enter generated APIs. Ordinary
-public source remains ordinary implementation code. `SupernoteExport` publishes a
-declaration to JavaScript; `SupernoteInternal` generates hidden cross-language
-routing; `SupernoteAsync` makes an accepted call return a Promise. Marker spelling
-is source-language-specific (`// @SupernoteExport` in C++ and
-`@SupernoteExport` on Kotlin/Java declarations).
+public source remains ordinary implementation code. `SupernotePluginExport` publishes a
+declaration to JavaScript; `SupernotePluginInternal` generates hidden cross-language
+routing; `SupernotePluginAsync` makes an accepted call return a Promise. Marker spelling
+is source-language-specific (`// @SupernotePluginExport` in C++ and
+`@SupernotePluginExport` on Kotlin/Java declarations).
 
 The generated TypeScript API is `index.d.ts`. Run the plugin's Android/Gradle
 generation after changing marked declarations. `supernote-module update

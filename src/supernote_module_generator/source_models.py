@@ -13,9 +13,9 @@ class SourceModelError(ValueError):
 
 
 class SupernoteMarker(str, Enum):
-    EXPORT = "SupernoteExport"
-    INTERNAL = "SupernoteInternal"
-    ASYNC = "SupernoteAsync"
+    EXPORT = "SupernotePluginExport"
+    INTERNAL = "SupernotePluginInternal"
+    ASYNC = "SupernotePluginAsync"
     CONSTRUCTOR = "SupernoteConstructor"
 
 
@@ -52,7 +52,7 @@ class SourceIntent:
         marker_set = self.marker_set
         if SupernoteMarker.EXPORT in marker_set and SupernoteMarker.INTERNAL in marker_set:
             raise SourceModelError(
-                "SupernoteExport and SupernoteInternal cannot mark one declaration"
+                "SupernotePluginExport and SupernotePluginInternal cannot mark one declaration"
             )
 
         if self.target is DeclarationTarget.CONSTRUCTOR:
@@ -72,10 +72,10 @@ class SourceIntent:
                 and SupernoteMarker.INTERNAL not in marker_set
             ):
                 raise SourceModelError(
-                    "SupernoteAsync requires SupernoteExport or SupernoteInternal"
+                    "SupernotePluginAsync requires SupernotePluginExport or SupernotePluginInternal"
                 )
             if self.target is DeclarationTarget.CLASS and SupernoteMarker.ASYNC in marker_set:
-                raise SourceModelError("SupernoteAsync cannot mark a class")
+                raise SourceModelError("SupernotePluginAsync cannot mark a class")
 
     @classmethod
     def from_markers(
@@ -271,7 +271,7 @@ class JvmDeclarationSource:
                 raise SourceModelError("only Kotlin declarations can be suspending")
             if self.intent.execution is not ExecutionMode.ASYNC:
                 raise SourceModelError(
-                    "a suspending Kotlin declaration requires SupernoteAsync"
+                    "a suspending Kotlin declaration requires SupernotePluginAsync"
                 )
         for parameter in self.parameters:
             if parameter.injected is not None:

@@ -37,8 +37,8 @@ def test_kotlin_only_project_is_complete(tmp_path):
     assert "fun add(left: Double, right: Double): Double" in example.read_text()
     assert (path / "android/.native-module/processor/build.gradle.kts").is_file()
     assert (path / "android/autolink/MathNativeModulePackage.kt").is_file()
-    assert "com.example.math.nativemodule.annotation.SupernoteExport" in readme
-    assert (path / "android/.native-module/annotation/src/main/java/com/example/math/nativemodule/annotation/SupernoteExport.java").is_file()
+    assert "com.example.math.nativemodule.annotation.SupernotePluginExport" in readme
+    assert (path / "android/.native-module/annotation/src/main/java/com/example/math/nativemodule/annotation/SupernotePluginExport.java").is_file()
     assert not (path / "android/.native-module/annotation/src/main/java/com/example/math/nativemodule/annotation/ReactNativeExport.java").exists()
     assert not (path / "android/src/main/kotlin").exists()
     assert "GeneratedNativeModule" in (path / "android/.native-module/processor/src/main/kotlin/localmodule/processor/SupernoteExportProcessor.kt").read_text()
@@ -56,8 +56,8 @@ def test_deterministic_rendering(tmp_path):
 def test_annotation_is_unique_to_each_android_namespace(tmp_path):
     first = generate(config(tmp_path, output=tmp_path / "one", npm_name="local-one", android_namespace="com.example.one", module_name="One"))
     second = generate(config(tmp_path, output=tmp_path / "two", npm_name="local-two", android_namespace="com.example.two", module_name="Two"))
-    assert (first / "android/.native-module/annotation/src/main/java/com/example/one/nativemodule/annotation/SupernoteExport.java").is_file()
-    assert (second / "android/.native-module/annotation/src/main/java/com/example/two/nativemodule/annotation/SupernoteExport.java").is_file()
+    assert (first / "android/.native-module/annotation/src/main/java/com/example/one/nativemodule/annotation/SupernotePluginExport.java").is_file()
+    assert (second / "android/.native-module/annotation/src/main/java/com/example/two/nativemodule/annotation/SupernotePluginExport.java").is_file()
     assert "compileOnly(annotationProject)" in (first / "android/build.gradle.kts").read_text()
 
 
@@ -103,8 +103,8 @@ def test_native_codegen_is_self_contained_and_checkable(tmp_path):
     assert 'fileTree(".supernote-module/supernote_codegen")' in build_script
     assert '"-B"' in build_script
     starter = (module / "android/src/main/cpp/text.cpp").read_text()
-    assert "// @SupernoteExport\nstd::string greet(" in starter
-    assert "SupernoteExport(" not in starter
+    assert "// @SupernotePluginExport\nstd::string greet(" in starter
+    assert "SupernotePluginExport(" not in starter
     index = (module / "index.js").read_text()
     assert "export class SupernoteError extends Error" in index
     assert "this.name = 'SupernoteError'" in index

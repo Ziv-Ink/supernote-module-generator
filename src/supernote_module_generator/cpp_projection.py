@@ -156,7 +156,7 @@ def _project_method(
     ):
         raise _error(
             source,
-            "a SupernoteInternal class may contain only SupernoteInternal "
+            "a SupernotePluginInternal class may contain only SupernotePluginInternal "
             "generated methods",
         )
     parameters = tuple(
@@ -236,7 +236,7 @@ def _select_js_constructor(
     if not eligible:
         raise _error(
             source,
-            "a SupernoteExport class requires at least one eligible public "
+            "a SupernotePluginExport class requires at least one eligible public "
             "constructor; returned-only objects are deferred",
         )
     selected = [item for item in eligible if item[0].selected]
@@ -259,7 +259,7 @@ def _select_service_constructor(
     if any(constructor.selected for constructor in source.constructors):
         raise _error(
             source,
-            "SupernoteConstructor does not apply to a SupernoteInternal "
+            "SupernoteConstructor does not apply to a SupernotePluginInternal "
             "feature service",
         )
     eligible = [
@@ -272,7 +272,7 @@ def _select_service_constructor(
     if len(eligible) != 1:
         raise _error(
             source,
-            "a SupernoteInternal C++ class requires one unambiguous public "
+            "a SupernotePluginInternal C++ class requires one unambiguous public "
             "zero-argument construction path",
         )
     return eligible[0]

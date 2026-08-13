@@ -51,7 +51,7 @@ def expected_generated_files(module: ManagedModule) -> List[str]:
     if module.type == "native":
         return common + [
             f"android/autolink/{prefix}NativeModulePackage.kt",
-            f"android/.native-module/annotation/src/main/java/{namespace}/nativemodule/annotation/SupernoteExport.java",
+            f"android/.native-module/annotation/src/main/java/{namespace}/nativemodule/annotation/SupernotePluginExport.java",
             "android/.native-module/annotation/build.gradle.kts",
             "android/.native-module/processor/build.gradle.kts",
             "android/.native-module/processor/src/main/kotlin/localmodule/processor/SupernoteExportProcessor.kt",

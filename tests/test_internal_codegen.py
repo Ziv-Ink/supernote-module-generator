@@ -20,22 +20,22 @@ def module(tmp_path: Path) -> Path:
     (source / "internal.hpp").write_text(
         """#pragma once
 #include <cstdint>
-// @SupernoteInternal
+// @SupernotePluginInternal
 class IndexService {
 public:
   IndexService();
-  // @SupernoteInternal
+  // @SupernotePluginInternal
   std::int32_t rebuild(std::int32_t page);
 };
 """
     )
     (source / "internal.cpp").write_text(
         """#include "internal.hpp"
-// @SupernoteInternal
+// @SupernotePluginInternal
 std::int32_t pageCount(std::int32_t offset) { return offset + 1; }
 
-// @SupernoteInternal
-// @SupernoteAsync
+// @SupernotePluginInternal
+// @SupernotePluginAsync
 std::int32_t loadIndex(std::int32_t page) { return page; }
 """
     )

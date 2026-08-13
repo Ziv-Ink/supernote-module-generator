@@ -188,8 +188,8 @@ def _project_method(
     ):
         raise _error(
             source,
-            "a SupernoteInternal JVM class may contain only "
-            "SupernoteInternal generated methods",
+            "a SupernotePluginInternal JVM class may contain only "
+            "SupernotePluginInternal generated methods",
         )
     kind = (
         BindingKind.OBJECT_METHOD
@@ -281,7 +281,7 @@ def _select_class_constructor(
         if any(item.selected for item in owner.constructors):
             raise _error(
                 owner,
-                "SupernoteConstructor does not apply to a SupernoteInternal service",
+                "SupernoteConstructor does not apply to a SupernotePluginInternal service",
             )
         if len(eligible) != 1:
             raise _error(
@@ -291,7 +291,7 @@ def _select_class_constructor(
             )
         return eligible[0]
     if not eligible:
-        raise _error(owner, "a SupernoteExport JVM class has no eligible constructor")
+        raise _error(owner, "a SupernotePluginExport JVM class has no eligible constructor")
     selected = [item for item in eligible if item[0].selected]
     if len(eligible) == 1:
         return selected[0] if selected else eligible[0]

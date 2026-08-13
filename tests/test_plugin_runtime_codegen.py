@@ -96,7 +96,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "supernoteFeatureRoots" in gradle
     assert "schema_version" in processor
     assert "getSymbolsWithAnnotation" in processor
-    assert "Kotlin suspend requires explicit SupernoteAsync" in processor
+    assert "Kotlin suspend requires explicit SupernotePluginAsync" in processor
     assert "ReactMethod" not in processor
     assert "TypeScript" not in processor
     assert "nativeInstall" in bootstrap
@@ -139,8 +139,20 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "class SupernoteV2Package" in module
     assert (
         generated
-        / "annotations/src/main/java/supernote/generated/annotations/SupernoteExport.java"
+        / "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java"
     ).is_file()
+    assert (
+        generated
+        / "annotations/src/main/java/supernote/generated/annotations/SupernotePluginInternal.java"
+    ).is_file()
+    assert (
+        generated
+        / "annotations/src/main/java/supernote/generated/annotations/SupernotePluginAsync.java"
+    ).is_file()
+    assert not (
+        generated
+        / "annotations/src/main/java/supernote/generated/annotations/SupernoteExport.java"
+    ).exists()
 
 
 def test_registry_and_ownership_are_deterministic(tmp_path: Path):
@@ -463,7 +475,7 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     cpp = feature_root / feature.roots.native
     cpp.mkdir(parents=True)
     (cpp / "math.cpp").write_text(
-        "// @SupernoteExport\n"
+        "// @SupernotePluginExport\n"
         "double add(double left, double right) { return left + right; }\n"
     )
     api = binding_codegen.scan_cpp_semantic_model(
@@ -522,18 +534,18 @@ def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):
     (cpp / "documents.hpp").write_text(
         """#pragma once
 #include <cstdint>
-// @SupernoteInternal
+// @SupernotePluginInternal
 class IndexService {
 public:
   IndexService();
-  // @SupernoteInternal
+  // @SupernotePluginInternal
   std::int32_t rebuild(std::int32_t page);
 };
 """
     )
     (cpp / "documents.cpp").write_text(
         """#include "documents.hpp"
-// @SupernoteInternal
+// @SupernotePluginInternal
 std::int32_t pageCount(std::int32_t page) { return page; }
 """
     )

@@ -1784,14 +1784,14 @@ def _marker_entries(
             if match and match.group("name") not in SOURCE_MARKERS:
                 message = (
                     f"unknown Supernote marker {match.group('name')!r}; supported "
-                    "markers are SupernoteExport, SupernoteInternal, "
-                    "SupernoteAsync, and SupernoteConstructor"
+                    "markers are SupernotePluginExport, SupernotePluginInternal, "
+                    "SupernotePluginAsync, and SupernoteConstructor"
                 )
             else:
                 message = (
                     "malformed Supernote marker; initial V2 markers take no "
                     "arguments and must be written exactly, for example "
-                    "// @SupernoteExport"
+                    "// @SupernotePluginExport"
                 )
             raise _source_error(
                 module_root,
@@ -2537,7 +2537,7 @@ def scan_cpp_class_source_model(
                     module_name,
                     None,
                     "a marked C++ member requires a marked top-level "
-                    "SupernoteExport or SupernoteInternal class",
+                    "SupernotePluginExport or SupernotePluginInternal class",
                 )
     classes.sort(
         key=lambda item: (
@@ -2699,7 +2699,7 @@ def _lower_sync_export(
             source.provenance.line,
             module_name,
             name,
-            "SupernoteInternal was recognized, but its generated C++ caller "
+            "SupernotePluginInternal was recognized, but its generated C++ caller "
             "route is not implemented yet",
         )
     if source.intent.execution is ExecutionMode.ASYNC and not allow_async:
@@ -2709,7 +2709,7 @@ def _lower_sync_export(
             source.provenance.line,
             module_name,
             name,
-            "SupernoteAsync was recognized, but async lowering is not "
+            "SupernotePluginAsync was recognized, but async lowering is not "
             "implemented yet",
         )
     used_types = {source.return_type_spelling}
@@ -2849,7 +2849,7 @@ def _lower_sync_object(
             source.provenance.line,
             module_name,
             source.cpp_name,
-            "SupernoteInternal class semantics were recognized, but the "
+            "SupernotePluginInternal class semantics were recognized, but the "
             "FeatureSession service route is not implemented yet",
         )
     selected = next(
@@ -2889,7 +2889,7 @@ def _lower_sync_object(
                 method.provenance.line,
                 module_name,
                 f"{source.cpp_name}.{method.cpp_name}",
-                "SupernoteInternal object methods were recognized, but their "
+                "SupernotePluginInternal object methods were recognized, but their "
                 "receiver-aware internal route is not implemented yet",
             )
         if method.intent.execution is ExecutionMode.ASYNC and not allow_async:
@@ -2899,7 +2899,7 @@ def _lower_sync_object(
                 method.provenance.line,
                 module_name,
                 f"{source.cpp_name}.{method.cpp_name}",
-                "SupernoteAsync object methods were recognized, but async "
+                "SupernotePluginAsync object methods were recognized, but async "
                 "HostObject lowering is not implemented yet",
             )
         used_types = {method.return_type_spelling}
@@ -2975,7 +2975,7 @@ def scan_objects(
                 module_name,
                 None,
                 "SupernoteExportObject is removed in V2; mark the class with "
-                "SupernoteExport and mark each generated method explicitly",
+                "SupernotePluginExport and mark each generated method explicitly",
             )
     class_sources = scan_cpp_class_source_model(
         module_root,

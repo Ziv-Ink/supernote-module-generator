@@ -74,9 +74,9 @@ def test_feature_readme_explains_language_neutral_explicit_intent_model(
 
     assert "C/C++ and Kotlin/Java source may coexist" in readme
     assert "Ordinary" in readme
-    assert "SupernoteExport" in readme
-    assert "SupernoteInternal" in readme
-    assert "SupernoteAsync" in readme
+    assert "SupernotePluginExport" in readme
+    assert "SupernotePluginInternal" in readme
+    assert "SupernotePluginAsync" in readme
     assert "README.md" in package["files"]
 
 

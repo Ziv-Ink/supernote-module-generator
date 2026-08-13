@@ -78,14 +78,14 @@ only when it has a deliberate Supernote marker.
 For C++ the initial marker form is an exact source comment:
 
 ```cpp
-// @SupernoteExport
+// @SupernotePluginExport
 std::int32_t pageCount();
 
-// @SupernoteInternal
+// @SupernotePluginInternal
 void rebuildIndex();
 
-// @SupernoteExport
-// @SupernoteAsync
+// @SupernotePluginExport
+// @SupernotePluginAsync
 std::vector<std::byte> loadPage(std::int32_t page);
 
 void ordinaryHelper(); // ignored
@@ -94,19 +94,19 @@ void ordinaryHelper(); // ignored
 For Kotlin and Java, use the generated annotations with the same names:
 
 ```kotlin
-@SupernoteExport
+@SupernotePluginExport
 fun pageCount(): Int = 42
 
-@SupernoteInternal
+@SupernotePluginInternal
 fun rebuildIndex() = Unit
 
-@SupernoteExport
-@SupernoteAsync
+@SupernotePluginExport
+@SupernotePluginAsync
 suspend fun loadPage(page: Int): ByteArray = TODO()
 ```
 
-`SupernoteInternal` generates typed cross-language routing without adding the
-declaration to JavaScript or TypeScript. `SupernoteAsync` is always explicit;
+`SupernotePluginInternal` generates typed cross-language routing without adding the
+declaration to JavaScript or TypeScript. `SupernotePluginAsync` is always explicit;
 Kotlin `suspend`, C++ future-like types, or blocking implementation code never
 silently change the public API.
 
@@ -115,12 +115,12 @@ constructor becomes the normal `create(...)` factory, while every other method
 still needs its own marker:
 
 ```cpp
-// @SupernoteExport
+// @SupernotePluginExport
 class Document {
 public:
   explicit Document(std::string path);
 
-  // @SupernoteExport
+  // @SupernotePluginExport
   std::int32_t pageCount() const;
 
   void resetInternalCache(); // ignored

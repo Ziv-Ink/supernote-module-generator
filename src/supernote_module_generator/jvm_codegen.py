@@ -713,7 +713,7 @@ def _render_internal_suspend_route(
     if binding.execution is not ExecutionMode.ASYNC:
         raise _error(
             source,
-            "a Kotlin suspend implementation requires SupernoteAsync intent",
+            "a Kotlin suspend implementation requires SupernotePluginAsync intent",
         )
     takes_owner = owner.form is JvmOwnerForm.CLASS
     parameters = _internal_parameters(binding)

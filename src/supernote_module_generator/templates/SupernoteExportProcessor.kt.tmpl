@@ -75,7 +75,7 @@ class SupernoteExportProcessor(
       symbols.map { symbol ->
         val function =
           symbol as? KSFunctionDeclaration
-            ?: error(symbol, "@SupernoteExport may annotate only functions")
+            ?: error(symbol, "@SupernotePluginExport may annotate only functions")
         validate(function, annotationNames)
       }.sortedWith(compareBy({ it.name }, { it.owner }))
     exports.groupBy { it.name }.filterValues { it.size > 1 }.forEach {
@@ -83,7 +83,7 @@ class SupernoteExportProcessor(
       error(
         entries.first().symbol,
         "duplicate JavaScript export name '$name'; use " +
-          "@SupernoteExport(name = \"...\") to disambiguate",
+          "@SupernotePluginExport(name = \"...\") to disambiguate",
       )
     }
     generate(exports)
@@ -99,7 +99,7 @@ class SupernoteExportProcessor(
     val parent =
       function.parentDeclaration as? KSClassDeclaration
         ?: fail(
-          "@SupernoteExport functions must be members of a concrete public class",
+          "@SupernotePluginExport functions must be members of a concrete public class",
         )
     if (
       parent.classKind != ClassKind.CLASS ||
@@ -196,7 +196,7 @@ class SupernoteExportProcessor(
     if (annotations.size != 1) {
       fail(
         "apply exactly one export annotation; do not combine " +
-          "@SupernoteExport with legacy @ReactNativeExport",
+          "@SupernotePluginExport with legacy @ReactNativeExport",
       )
     }
     val explicit =
@@ -211,7 +211,7 @@ class SupernoteExportProcessor(
       fail(
         "export name '$name' conflicts with generated React Native module " +
           "infrastructure; choose another name with " +
-          "@SupernoteExport(name = \"...\")",
+          "@SupernotePluginExport(name = \"...\")",
       )
     }
     return Export(
@@ -429,7 +429,7 @@ class ${packageClass}NativeModulePackage : ReactPackage {
     }
 
   private fun error(symbol: KSNode, message: String): Nothing {
-    environment.logger.error("SupernoteExport: $message", symbol)
+    environment.logger.error("SupernotePluginExport: $message", symbol)
     throw IllegalArgumentException(message)
   }
 }

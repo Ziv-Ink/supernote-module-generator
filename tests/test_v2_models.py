@@ -160,7 +160,7 @@ def test_source_intent_validates_composable_source_located_markers_and_targets()
         (
             DeclarationTarget.FUNCTION,
             (SupernoteMarker.ASYNC,),
-            "requires SupernoteExport or SupernoteInternal",
+            "requires SupernotePluginExport or SupernotePluginInternal",
         ),
         (
             DeclarationTarget.FUNCTION,
@@ -180,7 +180,7 @@ def test_source_intent_validates_composable_source_located_markers_and_targets()
         (
             DeclarationTarget.FUNCTION,
             (SupernoteMarker.EXPORT, SupernoteMarker.EXPORT),
-            "duplicate SupernoteExport marker",
+            "duplicate SupernotePluginExport marker",
         ),
     ]
     for target, markers, message in invalid:
@@ -488,7 +488,7 @@ def test_jvm_source_model_rejects_impossible_suspend_and_owner_forms():
     kotlin_source = SourceProvenance(
         "jvm:method:Example.load:()V", "kotlin", "Example.kt", 12
     )
-    with pytest.raises(SourceModelError, match="requires SupernoteAsync"):
+    with pytest.raises(SourceModelError, match="requires SupernotePluginAsync"):
         JvmDeclarationSource(
             kotlin_source,
             "jvm:owner:Example",

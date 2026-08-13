@@ -158,8 +158,8 @@ def test_root_readme_explains_the_v2_public_model():
     assert "pip install supernote-module-generator" in readme
     assert "--starter cpp --starter kotlin" in readme
     assert "--type native" not in readme
-    assert "SupernoteInternal" in readme
-    assert "SupernoteAsync" in readme
+    assert "SupernotePluginInternal" in readme
+    assert "SupernotePluginAsync" in readme
     assert "C23" in readme and "C++23" in readme
     assert "--delete-build-files" in readme
     assert "managed non-JS context" in " ".join(readme.split())
@@ -232,7 +232,7 @@ def test_generated_jsi_readme_documents_native_objects(tmp_path: Path):
     readme = (module / "README.md").read_text(encoding="utf-8")
 
     assert "## Persistent C++ objects" in readme
-    assert readme.count("// @SupernoteExport") >= 3
+    assert readme.count("// @SupernotePluginExport") >= 3
     assert "SupernoteExportObject" not in readme
     assert "android/src/main/cpp/" in readme
     assert "class Counter" in readme

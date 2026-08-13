@@ -4,16 +4,16 @@ import $ANNOTATION_FQCN
 
 /** Edit or delete this example after trying it from App.tsx. */
 class Example {
-  @SupernoteExport
+  @SupernotePluginExport
   fun add(left: Double, right: Double): Double = left + right
 
-  @SupernoteExport
+  @SupernotePluginExport
   fun greet(name: String): String = "Hello, $name"
 
-  @SupernoteExport
+  @SupernotePluginExport
   fun negate(value: Boolean): Boolean = !value
 
-  @SupernoteExport
+  @SupernotePluginExport
   fun setEnabled(enabled: Boolean) {
     println("Enabled: $enabled")
   }

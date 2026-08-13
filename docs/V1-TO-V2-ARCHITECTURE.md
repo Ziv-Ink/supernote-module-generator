@@ -54,9 +54,9 @@ C++, or Kotlin backend fields.
 ## Explicit intent replaces inference
 
 V1 object exports exposed supported public methods automatically. V2 ignores
-ordinary code regardless of language visibility. `SupernoteExport` publishes a
-declaration to JavaScript, `SupernoteInternal` creates hidden generated routing,
-`SupernoteAsync` selects async Supernote semantics, and
+ordinary code regardless of language visibility. `SupernotePluginExport` publishes a
+declaration to JavaScript, `SupernotePluginInternal` creates hidden generated routing,
+`SupernotePluginAsync` selects async Supernote semantics, and
 `SupernoteConstructor` resolves an otherwise ambiguous construction path.
 
 An exported class publishes its type and automatically uses its one eligible

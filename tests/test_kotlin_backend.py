@@ -25,9 +25,9 @@ def test_new_kotlin_module_uses_only_canonical_export_and_types(tmp_path):
         / "android/.native-module/annotation/src/main/java/com/example/kotlin"
         / "nativemodule/annotation"
     )
-    assert (annotation_root / "SupernoteExport.java").is_file()
+    assert (annotation_root / "SupernotePluginExport.java").is_file()
     assert not (annotation_root / "ReactNativeExport.java").exists()
-    assert "@SupernoteExport" in (
+    assert "@SupernotePluginExport" in (
         module / "android/src/main/java/com/example/kotlin/Example.kt"
     ).read_text(encoding="utf-8")
 
@@ -52,7 +52,7 @@ def test_update_preserves_legacy_source_and_previous_declarations(tmp_path):
     source = module / "android/src/main/java/com/example/kotlin/Example.kt"
     source.write_text(
         source.read_text(encoding="utf-8")
-        .replace("SupernoteExport", "ReactNativeExport")
+        .replace("SupernotePluginExport", "ReactNativeExport")
         .replace(
             "com.example.kotlin.nativemodule.annotation.ReactNativeExport",
             "com.example.kotlin.nativemodule.annotation.ReactNativeExport",
@@ -71,7 +71,7 @@ def test_update_preserves_legacy_source_and_previous_declarations(tmp_path):
         / "android/.native-module/annotation/src/main/java/com/example/kotlin"
         / "nativemodule/annotation"
     )
-    assert (annotation_root / "SupernoteExport.java").is_file()
+    assert (annotation_root / "SupernotePluginExport.java").is_file()
     legacy = annotation_root / "ReactNativeExport.java"
     assert legacy.is_file()
     assert "@Deprecated" in legacy.read_text(encoding="utf-8")
