@@ -124,6 +124,22 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "runOnJSQueueThread" in module
     assert "context.jsCallInvokerHolder" in module
     assert "nativeInstall(runtimePointer, loader, context, callInvoker)" in module
+    assert "private val lifecycleLock = Any()" in module
+    assert "private var lifecycleState = LifecycleState.NEW" in module
+    assert "LifecycleState.INSTALL_PENDING" in module
+    assert "LifecycleState.INVALIDATED" in module
+    install_guard = module[
+        module.index("val installed = synchronized(lifecycleLock)") :
+        module.index("?: return@runOnJSQueueThread")
+    ]
+    assert "lifecycleState != LifecycleState.INSTALL_PENDING" in install_guard
+    assert "nativeInstall(runtimePointer, loader, context, callInvoker)" in install_guard
+    invalidate_guard = module[
+        module.index("val invalidated = synchronized(lifecycleLock)") :
+        module.index("super.invalidate()")
+    ]
+    assert "lifecycleState = LifecycleState.INVALIDATED" in invalidate_guard
+    assert "sessionId.also { sessionId = 0L }" in invalidate_guard
     assert "nativeRunJsTask" not in module
     assert f'findLibrary("{registration_component}")' in module
     assert "SupernoteV2NativeRegistrationBridge.register" in module
@@ -300,6 +316,16 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                 if (!scoped_weak.expired()) return 22;
                 if (current_feature_session()) return 23;
               }
+
+              auto detached_runtime = RuntimeSession::create(
+                  [](RuntimeSession::JsTask) {});
+              auto detached_feature = FeatureSession::create(
+                  detached_runtime, cleanup);
+              std::weak_ptr<FeatureSession> detached_weak = detached_feature;
+              detached_feature->close_feature();
+              detached_feature.reset();
+              if (!detached_weak.expired()) return 24;
+              detached_runtime->invalidate();
 
               BoundedExecutor executor(1, 2);
               std::atomic<int> worker_initialized{0};

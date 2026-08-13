@@ -3896,7 +3896,8 @@ facebook::jsi::Object supernote_promise_continuations(
   auto value = runtime.global().getProperty(
       runtime, kPromiseContinuationsGlobal);
   if (value.isObject()) return value.getObject(runtime);
-  facebook::jsi::Object continuations(runtime);
+  auto map = runtime.global().getPropertyAsFunction(runtime, "Map");
+  auto continuations = map.callAsConstructor(runtime).getObject(runtime);
   runtime.global().setProperty(
       runtime, kPromiseContinuationsGlobal, continuations);
   return continuations;
@@ -3912,7 +3913,11 @@ void supernote_register_continuation(
   continuation.setProperty(runtime, "reject", reject);
   auto continuations = supernote_promise_continuations(runtime);
   const auto key = std::to_string(operation_id);
-  continuations.setProperty(runtime, key.c_str(), std::move(continuation));
+  auto set = continuations.getPropertyAsFunction(runtime, "set");
+  set.callWithThis(
+      runtime, continuations,
+      facebook::jsi::String::createFromAscii(runtime, key),
+      std::move(continuation));
 }
 
 facebook::jsi::Object supernote_take_continuation(
@@ -3920,14 +3925,20 @@ facebook::jsi::Object supernote_take_continuation(
     std::uint64_t operation_id) {
   auto continuations = supernote_promise_continuations(runtime);
   const auto key = std::to_string(operation_id);
-  auto value = continuations.getProperty(runtime, key.c_str());
+  auto key_value = facebook::jsi::String::createFromAscii(runtime, key);
+  auto get = continuations.getPropertyAsFunction(runtime, "get");
+  auto value = get.callWithThis(runtime, continuations, key_value);
   if (!value.isObject()) {
     throw facebook::jsi::JSError(
         runtime, "Supernote async continuation is unavailable");
   }
   auto continuation = value.getObject(runtime);
-  continuations.setProperty(
-      runtime, key.c_str(), facebook::jsi::Value::undefined());
+  auto remove = continuations.getPropertyAsFunction(runtime, "delete");
+  auto removed = remove.callWithThis(runtime, continuations, key_value);
+  if (!removed.isBool() || !removed.getBool()) {
+    throw facebook::jsi::JSError(
+        runtime, "Supernote async continuation cannot be removed");
+  }
   return continuation;
 }
 

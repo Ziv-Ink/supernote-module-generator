@@ -319,6 +319,33 @@ class BindingCodegenScannerTests(unittest.TestCase):
             self.assertIn("static_cast<std::size_t>(1)", source)
             self.assertNotIn("jsi::Runtime *runtime", source)
 
+    def test_v2_async_continuations_are_deleted_from_private_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(
+                Path(directory),
+                backend="jsi",
+                source=(
+                    "// @SupernotePluginExport\n"
+                    "// @SupernotePluginAsync\n"
+                    "double load() { return 1.0; }\n"
+                ),
+            )
+            source = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="Files",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
+
+            self.assertIn('getPropertyAsFunction(runtime, "Map")', source)
+            self.assertIn('getPropertyAsFunction(runtime, "set")', source)
+            self.assertIn('getPropertyAsFunction(runtime, "get")', source)
+            self.assertIn('getPropertyAsFunction(runtime, "delete")', source)
+            self.assertIn("!removed.isBool() || !removed.getBool()", source)
+            self.assertNotIn(
+                "key.c_str(), facebook::jsi::Value::undefined()",
+                source,
+            )
+
     def test_v2_async_object_method_retains_receiver_for_physical_work(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")

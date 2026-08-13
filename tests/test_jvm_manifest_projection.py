@@ -218,6 +218,8 @@ def test_kotlin_suspend_route_uses_coroutine_job_and_common_completion():
     assert "process_services().workers().submit" in source
     assert "schedule_completion" in source
     assert "runtime_pointer" in source
+    assert 'getPropertyAsFunction(runtime, "Map")' in source
+    assert 'getPropertyAsFunction(runtime, "delete")' in source
 
 
 def test_sync_jvm_route_targets_ksp_adapter_and_feature_scoped_owner():

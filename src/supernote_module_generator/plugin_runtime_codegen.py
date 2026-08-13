@@ -470,6 +470,7 @@ class RuntimeSession : public std::enable_shared_from_this<RuntimeSession> {
                  std::shared_ptr<void> plugin_class_loader,
                  std::shared_ptr<void> platform_context);
   void add_feature(const std::shared_ptr<FeatureSession> &feature);
+  void remove_feature(SessionId feature_id) noexcept;
 
   SessionId id_;
   JsScheduler scheduler_;
@@ -1069,6 +1070,11 @@ void RuntimeSession::add_feature(
   features_[feature->id()] = feature;
 }
 
+void RuntimeSession::remove_feature(SessionId feature_id) noexcept {
+  std::lock_guard lock(mutex_);
+  features_.erase(feature_id);
+}
+
 void RuntimeSession::invalidate() noexcept {
   if (!active_.exchange(false, std::memory_order_acq_rel)) return;
   std::vector<std::shared_ptr<FeatureSession>> features;
@@ -1283,6 +1289,7 @@ void FeatureSession::close(bool runtime_teardown) noexcept {
   }
 
   auto runtime = runtime_.lock();
+  if (!runtime_teardown && runtime) runtime->remove_feature(id_);
   for (auto &operation : pending) {
     const auto outcome = runtime_teardown
         ? OperationWinner::CANCELLED_BY_RUNTIME
