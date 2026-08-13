@@ -102,7 +102,7 @@ def test_every_plain_command_route_is_ascii(tmp_path: Path):
             ],
         ),
         run_plain(root, ["update", "local-unicode", "--skip-install", "--yes"]),
-        run_plain(root, ["validate", "local-unicode"]),
+        run_plain(root, ["validate", "local-unicode"], "n\n"),
         run_plain(root, ["doctor"]),
         run_plain(root, ["validate", "missing-module"]),
         run_plain(root, ["remove", "local-unicode", "--skip-install", "--yes"]),

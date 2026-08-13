@@ -361,10 +361,15 @@ class FeatureDecisionCollector:
             raise ConfigurationError(
                 "Validate needs more information in non-interactive mode\n\n  missing  feature or --all"
             )
+        build = self.args.has("build")
+        if self.interactive and not build:
+            build = self._confirm(
+                "validate", "Run an Android build too?", default=False
+            )
         return FeatureValidateDecisions(
             tuple(record.manifest.npm_name for record in selected),
             all_selected,
-            self.args.has("build"),
+            build,
         )
 
     def remove(self) -> FeatureRemoveDecisions | None:
@@ -403,7 +408,12 @@ class FeatureDecisionCollector:
                 else f'Type "{expected}" to continue: '
             )
             if not self.ui.typed_confirmation(prompt, expected):
-                raise OperationCancelled("remove")
+                self.ui.error(
+                    f'Confirmation did not match. Type "{expected}" exactly, '
+                    "or type :cancel."
+                )
+                if not self.ui.typed_confirmation(prompt, expected):
+                    raise OperationCancelled("remove")
         skip_install = self.args.has("skip_install")
         manager = self._manager(required=not skip_install, allow_default=False)
         return FeatureRemoveDecisions(
@@ -442,7 +452,15 @@ class FeatureDecisionCollector:
             for record in records
         ]
         if include_all:
-            items.insert(0, MenuItem("__all__", "All features", f"{len(records)} features"))
+            count = len(records)
+            items.insert(
+                0,
+                MenuItem(
+                    "__all__",
+                    "All features",
+                    f"{count} {'feature' if count == 1 else 'features'}",
+                ),
+            )
         selected = self.ui.menu("Feature", items, default=items[0].value)
         if selected == "__all__":
             return None

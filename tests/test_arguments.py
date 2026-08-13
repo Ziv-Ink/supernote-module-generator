@@ -135,3 +135,12 @@ def test_unknown_option_recovery_names_command(tmp_path: Path):
     assert code == 2
     assert "unknown option \"--force\"" in stderr
     assert "supernote-module add --help" in stderr
+
+
+def test_unknown_command_recovery_suggests_a_close_command(tmp_path: Path):
+    code, _, stderr = invoke(["ad"], tmp_path)
+
+    assert code == 2
+    assert 'unknown command "ad"' in stderr
+    assert "Did you mean `supernote-module add`?" in stderr
+    assert "supernote-module --help" in stderr

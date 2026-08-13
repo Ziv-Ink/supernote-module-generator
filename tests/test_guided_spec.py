@@ -250,3 +250,59 @@ def test_guided_remove_offers_build_cleanup_with_a_safe_no_default(tmp_path: Pat
     assert "Also delete generated plugin build files? [y/N]: " in stderr.getvalue()
     assert 'Type "local-safe" to continue: ' in stderr.getvalue()
     assert (build / "proof.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_guided_validate_offers_android_build_with_a_safe_no_default(tmp_path: Path):
+    root = plugin(tmp_path)
+    assert main(
+        ["add", "local-safe", "--starter", "cpp", "--skip-install", "--yes"],
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        cwd=root,
+    ) == 0
+    feature = root / "local_modules/local-safe"
+    link = root / "node_modules/local-safe"
+    link.parent.mkdir()
+    link.symlink_to(feature, target_is_directory=True)
+    stdout = TtyStringIO()
+    stderr = TtyStringIO()
+
+    code = main(
+        ["--plain", "validate"],
+        stdin=TtyStringIO("1\n\n"),
+        stdout=stdout,
+        stderr=stderr,
+        cwd=root,
+    )
+
+    assert code == 0
+    assert "All features - 1 feature" in stderr.getvalue()
+    assert "Run an Android build too? [y/N]: " in stderr.getvalue()
+    assert "1 feature is valid" in stdout.getvalue()
+
+
+def test_guided_remove_allows_one_confirmation_typo(tmp_path: Path):
+    root = plugin(tmp_path)
+    assert main(
+        ["add", "local-safe", "--starter", "cpp", "--skip-install", "--yes"],
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        cwd=root,
+    ) == 0
+    stdout = TtyStringIO()
+    stderr = TtyStringIO()
+
+    code = main(
+        ["--plain", "remove", "local-safe", "--skip-install"],
+        stdin=TtyStringIO("\nlocal-sfae\nlocal-safe\n"),
+        stdout=stdout,
+        stderr=stderr,
+        cwd=root,
+    )
+
+    assert code == 0
+    assert stderr.getvalue().count('Type "local-safe" to continue: ') == 2
+    assert 'Confirmation did not match. Type "local-safe" exactly' in stderr.getvalue()
+    assert not (root / "local_modules/local-safe").exists()

@@ -5,11 +5,12 @@ import subprocess
 import sys
 import time
 import traceback
+from difflib import get_close_matches
 from pathlib import Path
 from typing import IO, List, Optional
 
 from . import __version__
-from .arguments import ParsedArguments, parse_arguments
+from .arguments import COMMANDS, ParsedArguments, parse_arguments
 from .doctor import DoctorService
 from .feature_cli_operations import FeatureCliOperationService
 from .feature_workflows import FeatureDecisionCollector
@@ -129,7 +130,13 @@ def _usage_result(
 
 def _usage_recovery(command: str, message: str) -> str:
     if message.startswith("unknown command"):
-        return "Run `supernote-module --help` for available commands."
+        matches = get_close_matches(command, COMMANDS, n=1, cutoff=0.6)
+        suggestion = (
+            f"Did you mean `supernote-module {matches[0]}`?\n"
+            if matches
+            else ""
+        )
+        return suggestion + "Run `supernote-module --help` for available commands."
     if message.startswith("unknown option"):
         target = f" {command}" if command in {"add", "update", "validate", "remove", "doctor"} else ""
         return f"Run `supernote-module{target} --help` for valid options."

@@ -41,6 +41,7 @@ from .project import (
     dependency_link_path,
     dependency_value,
     ensure_within_plugin,
+    manager_evidence,
     parent_mutation_targets,
     read_parent_package,
 )
@@ -272,7 +273,7 @@ class FeatureCliOperationService:
             validation = replace(validation, build="passed" if success else "failed")
         infos = [replace(record.info(), validation=validation) for record in records]
         if _failed(validation):
-            return CommandResult(
+            result = CommandResult(
                 "validate",
                 status="failure",
                 exit_code=1,
@@ -286,6 +287,12 @@ class FeatureCliOperationService:
                     build_error,
                 ),
             )
+            issue_kinds = {str(issue.get("kind")) for issue in validation.issues}
+            if issue_kinds and issue_kinds <= {"dependency", "dependency_link"}:
+                result.metadata["next_action"] = self._next_install(
+                    manager_evidence(self.root).sole
+                )
+            return result
         return CommandResult(
             "validate",
             module=infos[0] if not decisions.all else None,

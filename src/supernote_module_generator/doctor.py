@@ -5,8 +5,9 @@ import os
 import re
 import shutil
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, ContextManager, List, Optional, Sequence, Tuple
 
 from .models import CommandResult, DoctorCheckResult, DoctorResult, ErrorInfo
 from .project import manager_evidence, resolve_plugin_root
@@ -39,6 +40,14 @@ class DoctorService:
         self.progress = ProgressReporter(renderer)
         self.run = run
 
+    def _phase(self, active: str, completed: str) -> ContextManager[object]:
+        # Plain output is commonly redirected or read linearly. The final Doctor
+        # table already reports every check, so static progress lines only repeat
+        # the same information and make the report harder to scan.
+        if self.renderer.plain:
+            return nullcontext()
+        return self.progress.phase(active, completed)
+
     def _verbose_stream(self, destination: str, content: str) -> None:
         target = self.renderer.stdout if destination == "stdout" else self.renderer.stderr
         target.write(content)
@@ -46,7 +55,7 @@ class DoctorService:
 
     def execute(self, scope: str) -> CommandResult:
         checks: List[DoctorCheckResult] = []
-        with self.progress.phase("Checking project", "Checked project"):
+        with self._phase("Checking project", "Checked project"):
             try:
                 root = resolve_plugin_root(self.cwd)
             except Exception:
@@ -77,15 +86,15 @@ class DoctorService:
                 )
                 valid_root = True
 
-        with self.progress.phase("Checking JavaScript tools", "Checked JavaScript tools"):
+        with self._phase("Checking JavaScript tools", "Checked JavaScript tools"):
             checks.extend(self._javascript_checks(root, valid_root))
-        with self.progress.phase("Checking Android tools", "Checked Android tools"):
+        with self._phase("Checking Android tools", "Checked Android tools"):
             checks.extend(self._android_checks(root, valid_root))
         if scope == "plugin":
-            with self.progress.phase("Checking native tools", "Checked native tools"):
+            with self._phase("Checking native tools", "Checked native tools"):
                 checks.extend(self._native_checks())
         if scope == "plugin":
-            with self.progress.phase("Checking JSI runtime", "Checked JSI runtime"):
+            with self._phase("Checking JSI runtime", "Checked JSI runtime"):
                 checks.extend(self._jsi_runtime_checks())
 
         required_failed = [
@@ -119,10 +128,29 @@ class DoctorService:
                 ),
                 metadata={
                     "phase_label": "Doctor",
-                    "next_action": "Install the missing tools, then rerun `supernote-module doctor`.",
+                    "next_action": self._required_issue_next_action(required_failed),
                 },
             )
         return CommandResult("doctor", doctor=doctor)
+
+    @staticmethod
+    def _required_issue_next_action(
+        failed: Sequence[DoctorCheckResult],
+    ) -> str:
+        if len(failed) == 1 and failed[0].id == "gradle_wrapper":
+            if failed[0].path is None:
+                return (
+                    "Restore `android/gradlew`, make it executable, then rerun "
+                    "`supernote-module doctor`."
+                )
+            return (
+                "Fix `android/gradlew` so it executes successfully, then rerun "
+                "`supernote-module doctor`."
+            )
+        return (
+            "Resolve the required checks listed above, then rerun "
+            "`supernote-module doctor`."
+        )
 
     def _probe(self, command: Sequence[str], timeout: int = 10) -> Tuple[bool, Optional[str], str]:
         try:
@@ -265,14 +293,21 @@ class DoctorService:
                 passed, version, _ = self._probe(command, timeout=120)
             else:
                 passed, version = False, None
+            gradle_exists = gradle.is_file()
             gradle_check = DoctorCheckResult(
                 "gradle_wrapper",
                 "Gradle wrapper",
                 "required",
                 "passed" if passed else "failed",
                 version,
-                str(gradle) if gradle.is_file() else None,
-                "Gradle wrapper executed successfully." if passed else "The project Gradle wrapper could not be executed.",
+                str(gradle) if gradle_exists else None,
+                (
+                    "Gradle wrapper executed successfully."
+                    if passed
+                    else "The project Gradle wrapper could not be executed."
+                    if gradle_exists
+                    else "The project Gradle wrapper is missing."
+                ),
             )
         else:
             gradle_check = DoctorCheckResult(

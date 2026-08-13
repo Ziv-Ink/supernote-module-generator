@@ -55,6 +55,40 @@ def test_add_validate_remove_smoke(tmp_path: Path):
     assert not module.exists()
 
 
+def test_validate_missing_dependency_link_gives_install_action_without_rollback(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "local-math", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+
+    code, _, stderr = invoke(root, ["validate", "local-math"])
+
+    assert code == 1
+    assert "local-math is not installed in node_modules" in stderr
+    assert "Run `npm install` to refresh local dependencies." in stderr
+    assert "Rollback:" not in stderr
+
+
+def test_validate_all_uses_singular_copy_for_one_feature(tmp_path: Path):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "local-math", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/local-math"
+    link = root / "node_modules/local-math"
+    link.parent.mkdir()
+    link.symlink_to(feature, target_is_directory=True)
+
+    code, stdout, stderr = invoke(root, ["validate", "--all"])
+
+    assert code == 0, stderr
+    assert stdout == "✓ 1 feature is valid\n"
+
+
 def test_json_add_has_stable_envelope_and_empty_stderr(tmp_path: Path):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(

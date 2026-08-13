@@ -55,6 +55,35 @@ def test_doctor_report_goes_to_stdout_and_failure_summary_to_stderr():
     assert "Doctor found 1 required issue" in stderr.getvalue()
 
 
+def test_doctor_report_separates_long_labels_from_messages():
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    renderer = Renderer("human", capabilities(), stdout=stdout, stderr=stderr)
+    check = DoctorCheckResult(
+        "gradle_wrapper",
+        "Gradle wrapper",
+        "required",
+        "failed",
+        None,
+        None,
+        "The project Gradle wrapper is missing.",
+    )
+
+    renderer.render(
+        CommandResult(
+            "doctor",
+            status="failure",
+            exit_code=1,
+            doctor=DoctorResult("plugin", False, 1, 0, [check]),
+            error=ErrorInfo("doctor_failed", "doctor", "Doctor found 1 required issue."),
+        )
+    )
+
+    combined = stdout.getvalue() + stderr.getvalue()
+    assert combined.count("The project Gradle wrapper is missing.") == 1
+    assert "wrapperThe" not in combined
+
+
 def test_successful_doctor_report_and_final_result_are_stdout_only():
     stdout = io.StringIO()
     stderr = io.StringIO()

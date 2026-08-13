@@ -146,3 +146,55 @@ def test_nonzero_tool_probe_fails_doctor(tmp_path: Path, monkeypatch):
     assert result.doctor is not None
     cmake = next(check for check in result.doctor.checks if check.id == "cmake")
     assert cmake.status == "failed"
+
+
+def test_plain_doctor_emits_one_final_report_without_progress_noise(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    install_fake_sdk(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "supernote_module_generator.doctor.shutil.which",
+        lambda name: f"/tools/{name}",
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    plain_renderer = Renderer(
+        "human",
+        TerminalCapabilities(False, False, False, False, 80, 24),
+        stdout=stdout,
+        stderr=stderr,
+        plain=True,
+    )
+
+    result = DoctorService(root, plain_renderer, run=successful_run).execute("plugin")
+    plain_renderer.render(result)
+
+    assert "Doctor - Plugin" in stdout.getvalue()
+    assert "... Checking" not in stderr.getvalue()
+    assert "Checked project" not in stderr.getvalue()
+
+
+def test_missing_gradle_wrapper_has_specific_diagnosis_and_recovery(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    (root / "android/gradlew").unlink()
+    install_fake_sdk(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "supernote_module_generator.doctor.shutil.which",
+        lambda name: f"/tools/{name}",
+    )
+
+    result = DoctorService(root, renderer(), run=successful_run).execute("plugin")
+
+    assert result.exit_code == 1
+    assert result.doctor is not None
+    gradle = next(
+        check for check in result.doctor.checks if check.id == "gradle_wrapper"
+    )
+    assert gradle.message == "The project Gradle wrapper is missing."
+    assert result.metadata["next_action"] == (
+        "Restore `android/gradlew`, make it executable, then rerun "
+        "`supernote-module doctor`."
+    )

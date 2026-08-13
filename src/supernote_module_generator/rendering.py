@@ -183,6 +183,12 @@ class Renderer:
                     else f'{title} "{module.package_name}" is valid'
                 )
             count = len(result.modules)
+            if count == 1:
+                return (
+                    f"1 {noun} is valid and builds successfully"
+                    if built
+                    else f"1 {noun} is valid"
+                )
             return (
                 f"All {count} {noun}s are valid and build successfully"
                 if built
@@ -191,7 +197,8 @@ class Renderer:
         if command == "remove":
             if module:
                 return f'Removed {noun} "{module.package_name}"'
-            return f"Removed {result.metadata.get('removed_count', len(result.modules))} {noun}s"
+            count = result.metadata.get("removed_count", len(result.modules))
+            return f"Removed {count} {noun if count == 1 else noun + 's'}"
         if command == "doctor":
             return "Doctor found no required issues"
         return str(result.metadata.get("success_message", "Success"))
@@ -246,9 +253,6 @@ class Renderer:
                 ),
                 file=self.stderr,
             )
-            for check in result.doctor.checks:
-                if check.requirement == "required" and check.status == "failed":
-                    print(f"\n  {check.label:<12}{check.message}", file=self.stderr)
             if result.metadata.get("next_action"):
                 print(f"\n  Next: {result.metadata['next_action']}", file=self.stderr)
             return
@@ -341,6 +345,7 @@ class Renderer:
                 noun = "feature" if feature else "module"
                 message = f'Gradle could not build {noun} "{module_name}".'
             elif kinds and kinds <= {
+                "dependency",
                 "parent_dependency",
                 "gradle_integration",
                 "parent_integration",
@@ -379,10 +384,8 @@ class Renderer:
         if error.subprocess is not None:
             for line in error.subprocess.relevant_lines[:8]:
                 print(f"\n    {line}", file=self.stderr)
-        rollback = result.rollback.status.replace("_", " ").title()
-        print(f"\n  Rollback: {rollback}", file=self.stderr)
         if result.metadata.get("next_action"):
-            print(f"  Next:     {result.metadata['next_action']}", file=self.stderr)
+            print(f"\n  Next:     {result.metadata['next_action']}", file=self.stderr)
         self._render_debug(error)
 
     def _render_debug(self, error: object) -> None:
@@ -472,7 +475,7 @@ class Renderer:
             else:
                 symbol = "—" if self.unicode_presentation else "[-]"
                 role = "dim"
-            print(self.style(role, f"{symbol} {label:<12}{message}"), file=self.stdout)
+            print(self.style(role, f"{symbol} {label:<12}  {message}"), file=self.stdout)
             for check in failed_checks:
                 if check.path:
                     print(f"  Path: {check.path}", file=self.stdout)
