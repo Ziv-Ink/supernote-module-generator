@@ -647,6 +647,9 @@ def test_internal_jvm_functions_share_cpp_facade_across_sync_worker_and_suspend(
     assert "register_jvm_async_completion" in generated
     assert "Lkotlinx/coroutines/Job;" in generated
     assert "claim_internal_completion" in generated
+    assert generated.count("feature->accept({}, std::move(callback))") == 2
+    assert "operation->take_internal_completion()" in generated
+    assert "[operation, weak_feature, callback" not in generated
     assert "deliver_internal_callback" in generated
     assert "FeatureCallScope" in generated
     assert "feature->service<LazyJvmRoute>" in generated

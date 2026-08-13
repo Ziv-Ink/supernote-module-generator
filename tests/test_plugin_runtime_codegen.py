@@ -61,6 +61,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
         generated
         / "src/main/java/supernote/generated/runtime/SupernoteV2Module.kt"
     ).read_text()
+    coroutine_bridge = (
+        generated
+        / "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt"
+    ).read_text()
 
     assert cmake.count(f"add_library({component} SHARED") == 1
     assert cmake.count(f"add_library({registration_component} SHARED") == 1
@@ -104,6 +108,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "nativeRunJsTask" not in bootstrap
     assert "RegisterNatives" in bootstrap
     assert "register_coroutine_bridge(env, class_loader)" in bootstrap
+    assert "GetStringUTFChars" not in bootstrap
+    assert "GetByteArrayRegion" in bootstrap
+    assert 'const_cast<char *>("(JLjava/lang/Object;[BZ)V")' in bootstrap
+    assert "failureMessageUtf8: ByteArray?" in coroutine_bridge
+    assert "toByteArray(Charsets.UTF_8)" in coroutine_bridge
     assert "configure_worker_threads" in bootstrap
     assert "AttachCurrentThread" in bootstrap
     assert "DetachCurrentThread" in bootstrap
@@ -293,10 +302,14 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               {
                 FeatureCallScope scope(replacement_feature);
                 if (current_feature_session() != replacement_feature) return 16;
-                auto internal = replacement_feature->accept({});
+                auto completion_state = std::make_shared<int>(9);
+                auto internal = replacement_feature->accept(
+                    {}, completion_state);
                 if (!replacement_feature->claim_internal_completion(internal) ||
                     internal->winner() != OperationWinner::COMPLETING) return 17;
                 if (replacement_feature->claim_internal_completion(internal)) return 18;
+                if (internal->take_internal_completion() != completion_state ||
+                    internal->take_internal_completion()) return 25;
               }
               if (current_feature_session()) return 19;
               auto dropped = replacement_feature->accept(
@@ -400,6 +413,26 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               if (destroyed_future.wait_for(std::chrono::seconds(2)) !=
                   std::future_status::ready) return 10;
               if (destroyed_future.get() == releasing_thread) return 11;
+
+              std::promise<std::thread::id> callback_destroyed;
+              auto callback_destroyed_future = callback_destroyed.get_future();
+              auto callback_runtime = RuntimeSession::create(
+                  [](RuntimeSession::JsTask) {});
+              auto callback_feature = FeatureSession::create(
+                  callback_runtime, cleanup);
+              auto callback_capture =
+                  std::make_shared<Service>(&callback_destroyed);
+              auto callback_holder = std::make_shared<std::function<void()>>(
+                  [callback_capture] {});
+              callback_capture.reset();
+              auto callback_operation = callback_feature->accept(
+                  {}, callback_holder);
+              callback_holder.reset();
+              callback_feature->close_feature();
+              if (callback_operation->take_internal_completion()) return 26;
+              if (callback_destroyed_future.wait_for(std::chrono::seconds(2)) !=
+                  std::future_status::ready) return 27;
+              if (callback_destroyed_future.get() == releasing_thread) return 28;
 
               std::promise<void> blocking_started;
               auto blocking_started_future = blocking_started.get_future();

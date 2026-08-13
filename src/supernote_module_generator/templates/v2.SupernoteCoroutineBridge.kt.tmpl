@@ -21,7 +21,7 @@ object SupernoteCoroutineBridge {
           nativeComplete(
               completionToken,
               null,
-              failure.message ?: failure.javaClass.name,
+              (failure.message ?: failure.javaClass.name).toByteArray(Charsets.UTF_8),
               false,
           )
         }
@@ -36,7 +36,7 @@ object SupernoteCoroutineBridge {
   private external fun nativeComplete(
       completionToken: Long,
       result: Any?,
-      failureMessage: String?,
+      failureMessageUtf8: ByteArray?,
       cancelled: Boolean,
   )
 }

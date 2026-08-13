@@ -323,16 +323,16 @@ def _async_definition(
     throw supernote::Error(
         supernote::ErrorCode::INTERNAL, "completion callback is empty");
   }}
-  auto operation = feature->accept({{}});
+  auto callback = std::make_shared<decltype(completion)>(
+      std::move(completion));
+  auto operation = feature->accept({{}}, std::move(callback));
   if (!operation) {{
     throw supernote::Error(
         supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
   }}
-  auto callback = std::make_shared<decltype(completion)>(
-      std::move(completion));
   std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
   auto work = supernote::runtime::process_services().workers().submit(
-      [operation, weak_feature, callback{capture_suffix}](
+      [operation, weak_feature{capture_suffix}](
           supernote::runtime::CancellationToken executor_cancel) mutable {{
         if (executor_cancel.is_cancelled() ||
             operation->cancellation_token().is_cancelled()) return;
@@ -359,18 +359,30 @@ def _async_definition(
         if (operation->cancellation_token().is_cancelled() ||
             !completion_feature ||
             !completion_feature->claim_internal_completion(operation)) return;
+        auto callback = std::static_pointer_cast<decltype(completion)>(
+            operation->take_internal_completion());
+        if (!callback) return;
         deliver_callback(*callback, std::move(outcome));
       }});
   operation->set_work(work);
-  if (!work.accepted() && feature->claim_internal_completion(operation)) {{
+  if (!work.accepted()) {{
     auto cleanup = supernote::runtime::process_services().cleanup();
-    auto exhausted = [callback]() mutable {{
+    auto exhausted = [operation, weak_feature]() mutable {{
+      auto completion_feature = weak_feature.lock();
+      if (!completion_feature ||
+          !completion_feature->claim_internal_completion(operation)) return;
+      auto callback = std::static_pointer_cast<decltype(completion)>(
+          operation->take_internal_completion());
+      if (!callback) return;
       auto result = {result_type}::failure(supernote::Error(
           supernote::ErrorCode::RESOURCE_EXHAUSTED,
           "Supernote worker queue is full"));
       deliver_callback(*callback, std::move(result));
     }};
     if (!cleanup || !cleanup->submit(std::move(exhausted))) {{
+      if (feature->claim_internal_completion(operation)) {{
+        operation->take_internal_completion();
+      }}
       throw supernote::Error(
           supernote::ErrorCode::INTERNAL,
           "cannot schedule internal completion callback");

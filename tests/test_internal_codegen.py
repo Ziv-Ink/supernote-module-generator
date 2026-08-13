@@ -59,6 +59,13 @@ def test_cpp_internal_facade_is_typed_hidden_and_feature_scoped(tmp_path: Path):
     assert 'feature->service<::IndexService>' in source
     assert "process_services().workers().submit" in source
     assert "claim_internal_completion" in source
+    assert "feature->accept({}, std::move(callback))" in source
+    assert "operation->take_internal_completion()" in source
+    worker_capture = source[
+        source.index("process_services().workers().submit") :
+        source.index("operation->set_work(work)")
+    ]
+    assert "[operation, weak_feature, callback" not in worker_capture
     assert "feature.reset();" in source
     assert "auto completion_feature = weak_feature.lock();" in source
     assert "deliver_callback" in source

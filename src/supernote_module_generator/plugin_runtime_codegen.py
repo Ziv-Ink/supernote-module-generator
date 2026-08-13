@@ -499,9 +499,11 @@ class PendingOperation {
   CancellationToken cancellation_token() const noexcept;
   void set_work(BoundedExecutor::WorkHandle work) noexcept;
   void set_cancel_hook(std::function<void()> hook) noexcept;
+  std::shared_ptr<void> take_internal_completion() noexcept;
 
  private:
-  PendingOperation(SessionId id, TeardownRejection rejection);
+  PendingOperation(SessionId id, TeardownRejection rejection,
+                   std::shared_ptr<void> internal_completion = {});
   bool claim(OperationWinner winner) noexcept;
   TeardownRejection take_rejection() noexcept;
 
@@ -511,6 +513,7 @@ class PendingOperation {
   std::mutex mutex_;
   BoundedExecutor::WorkHandle work_;
   std::function<void()> cancel_hook_;
+  std::shared_ptr<void> internal_completion_;
   TeardownRejection rejection_;
   friend class FeatureSession;
 };
@@ -525,7 +528,8 @@ class FeatureSession : public std::enable_shared_from_this<FeatureSession> {
   FeatureState state() const noexcept;
   std::shared_ptr<RuntimeSession> runtime() const noexcept;
   std::shared_ptr<PendingOperation> accept(
-      PendingOperation::TeardownRejection rejection);
+      PendingOperation::TeardownRejection rejection,
+      std::shared_ptr<void> internal_completion = {});
   std::shared_ptr<PendingOperation> accept_factory(
       std::function<PendingOperation::TeardownRejection(SessionId)> factory);
   bool schedule_completion(
@@ -1102,8 +1106,12 @@ std::shared_ptr<void> RuntimeSession::platform_context() const noexcept {
   return platform_context_;
 }
 
-PendingOperation::PendingOperation(SessionId id, TeardownRejection rejection)
-    : id_(id), rejection_(std::move(rejection)) {}
+PendingOperation::PendingOperation(
+    SessionId id, TeardownRejection rejection,
+    std::shared_ptr<void> internal_completion)
+    : id_(id),
+      internal_completion_(std::move(internal_completion)),
+      rejection_(std::move(rejection)) {}
 
 SessionId PendingOperation::id() const noexcept { return id_; }
 
@@ -1137,6 +1145,11 @@ void PendingOperation::set_cancel_hook(std::function<void()> hook) noexcept {
   if (run_now) {
     try { hook(); } catch (...) {}
   }
+}
+
+std::shared_ptr<void> PendingOperation::take_internal_completion() noexcept {
+  std::lock_guard lock(mutex_);
+  return std::move(internal_completion_);
 }
 
 bool PendingOperation::claim(OperationWinner winner) noexcept {
@@ -1198,14 +1211,17 @@ std::shared_ptr<RuntimeSession> FeatureSession::runtime() const noexcept {
 }
 
 std::shared_ptr<PendingOperation> FeatureSession::accept(
-    PendingOperation::TeardownRejection rejection) {
+    PendingOperation::TeardownRejection rejection,
+    std::shared_ptr<void> internal_completion) {
   std::lock_guard lock(mutex_);
   auto runtime = runtime_.lock();
   if (state() != FeatureState::ACTIVE || !runtime || !runtime->active()) {
     return {};
   }
   auto operation = std::shared_ptr<PendingOperation>(
-      new PendingOperation(allocate_session_id(), std::move(rejection)));
+      new PendingOperation(
+          allocate_session_id(), std::move(rejection),
+          std::move(internal_completion)));
   pending_.emplace(operation->id(), operation);
   return operation;
 }
@@ -1295,6 +1311,10 @@ void FeatureSession::close(bool runtime_teardown) noexcept {
         ? OperationWinner::CANCELLED_BY_RUNTIME
         : OperationWinner::CANCELLED_BY_FEATURE;
     if (!operation->claim(outcome)) continue;
+    auto internal_completion = operation->take_internal_completion();
+    if (internal_completion) {
+      defer_release(std::move(internal_completion));
+    }
     auto rejection = operation->take_rejection();
     if (!runtime_teardown && runtime && runtime->active() && rejection) {
       runtime->schedule(std::move(rejection));
@@ -1513,27 +1533,34 @@ bool publish_runtime_registrar(JNIEnv *env) {{
   return true;
 }}
 
-std::string java_string(JNIEnv *env, jstring value) {{
+std::string utf8_bytes(JNIEnv *env, jbyteArray value) {{
   if (env == nullptr || value == nullptr) return {{}};
-  const char *characters = env->GetStringUTFChars(value, nullptr);
-  if (characters == nullptr) {{
+  const auto length = env->GetArrayLength(value);
+  if (env->ExceptionCheck() || length < 0) {{
     clear_exception(env, "read coroutine failure");
     return "Kotlin coroutine implementation failed";
   }}
-  std::string result(characters);
-  env->ReleaseStringUTFChars(value, characters);
+  std::string result(static_cast<std::size_t>(length), char{{}});
+  if (length != 0) {{
+    env->GetByteArrayRegion(
+        value, 0, length, reinterpret_cast<jbyte *>(result.data()));
+    if (env->ExceptionCheck()) {{
+      clear_exception(env, "copy coroutine failure");
+      return "Kotlin coroutine implementation failed";
+    }}
+  }}
   return result;
 }}
 
 void native_coroutine_complete(
     JNIEnv *env, jclass, jlong completion_id, jobject result,
-    jstring failure, jboolean cancelled) {{
+    jbyteArray failure, jboolean cancelled) {{
   supernote::runtime::process_services().complete_jvm_async(
       static_cast<supernote::runtime::SessionId>(completion_id), env, result,
       cancelled == JNI_TRUE
           ? "CANCELLED"
           : (failure == nullptr ? "" : "IMPLEMENTATION_ERROR"),
-      java_string(env, failure));
+      utf8_bytes(env, failure));
 }}
 
 void register_coroutine_bridge(JNIEnv *env, jobject class_loader) {{
@@ -1553,7 +1580,7 @@ void register_coroutine_bridge(JNIEnv *env, jobject class_loader) {{
   }}
   JNINativeMethod methods[] = {{
       {{const_cast<char *>("nativeComplete"),
-        const_cast<char *>("(JLjava/lang/Object;Ljava/lang/String;Z)V"),
+        const_cast<char *>("(JLjava/lang/Object;[BZ)V"),
         reinterpret_cast<void *>(&native_coroutine_complete)}},
   }};
   if (env->RegisterNatives(

@@ -641,16 +641,16 @@ def _render_internal_blocking_async_facade(
     throw supernote::Error(
         supernote::ErrorCode::INTERNAL, "completion callback is empty");
   }}
-  auto operation = feature->accept({{}});
+  auto callback = std::make_shared<decltype(completion)>(
+      std::move(completion));
+  auto operation = feature->accept({{}}, std::move(callback));
   if (!operation) {{
     throw supernote::Error(
         supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
   }}
-  auto callback = std::make_shared<decltype(completion)>(
-      std::move(completion));
   std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
   auto work = supernote::runtime::process_services().workers().submit(
-      [operation, weak_feature, callback{capture_tail}](
+      [operation, weak_feature{capture_tail}](
           supernote::runtime::CancellationToken executor_cancel) mutable {{
         if (executor_cancel.is_cancelled() ||
             operation->cancellation_token().is_cancelled()) return;
@@ -680,19 +680,31 @@ def _render_internal_blocking_async_facade(
         if (operation->cancellation_token().is_cancelled() ||
             !completion_feature ||
             !completion_feature->claim_internal_completion(operation)) return;
+        auto callback = std::static_pointer_cast<decltype(completion)>(
+            operation->take_internal_completion());
+        if (!callback) return;
         route::deliver_internal_callback(*callback, std::move(outcome));
       }});
   operation->set_work(work);
-  if (!work.accepted() && feature->claim_internal_completion(operation)) {{
+  if (!work.accepted()) {{
     namespace route = supernote::generated::jvm_feature_{feature_suffix};
     auto cleanup = supernote::runtime::process_services().cleanup();
-    auto exhausted = [callback]() mutable {{
+    auto exhausted = [operation, weak_feature]() mutable {{
+      auto completion_feature = weak_feature.lock();
+      if (!completion_feature ||
+          !completion_feature->claim_internal_completion(operation)) return;
+      auto callback = std::static_pointer_cast<decltype(completion)>(
+          operation->take_internal_completion());
+      if (!callback) return;
       auto result = {result_type}::failure(supernote::Error(
           supernote::ErrorCode::RESOURCE_EXHAUSTED,
           "Supernote worker queue is full"));
       route::deliver_internal_callback(*callback, std::move(result));
     }};
     if (!cleanup || !cleanup->submit(std::move(exhausted))) {{
+      if (feature->claim_internal_completion(operation)) {{
+        operation->take_internal_completion();
+      }}
       throw supernote::Error(
           supernote::ErrorCode::INTERNAL,
           "cannot schedule internal completion callback");
@@ -814,18 +826,18 @@ def _render_internal_suspend_facade(
     throw supernote::Error(
         supernote::ErrorCode::INTERNAL, "completion callback is empty");
   }}
-  auto operation = feature->accept({{}});
+  auto callback = std::make_shared<decltype(completion)>(
+      std::move(completion));
+  auto operation = feature->accept({{}}, std::move(callback));
   if (!operation) {{
     throw supernote::Error(
         supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
   }}
-  auto callback = std::make_shared<decltype(completion)>(
-      std::move(completion));
   std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
   namespace route = supernote::generated::jvm_feature_{feature_suffix};
   const auto completion_id =
       supernote::runtime::process_services().register_jvm_async_completion(
-          [operation, weak_feature, callback](
+          [operation, weak_feature](
               void *environment, void *result,
               std::string error_code, std::string error_message) mutable {{
             if (operation->cancellation_token().is_cancelled()) return;
@@ -863,6 +875,9 @@ def _render_internal_suspend_facade(
             if (operation->cancellation_token().is_cancelled()) return;
             auto feature = weak_feature.lock();
             if (!feature || !feature->claim_internal_completion(operation)) return;
+            auto callback = std::static_pointer_cast<decltype(completion)>(
+                operation->take_internal_completion());
+            if (!callback) return;
             route::deliver_internal_callback(*callback, std::move(outcome));
           }});
   operation->set_cancel_hook([completion_id] {{
