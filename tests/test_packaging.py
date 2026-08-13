@@ -69,6 +69,6 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "pypa/gh-action-pypi-publish@v1.14.2" in workflow
     assert "password:" not in workflow
     assert "PYPI_TOKEN" not in workflow
-    assert '[[ "${version}" == "2.0.0" ]]' in workflow
-    assert "Stable 2.0.0 is blocked until the V2 release gates" in workflow
     assert '"${GITHUB_REF_NAME}" != "v${version}"' in workflow
+    assert "Release tag ${GITHUB_REF_NAME} does not match package version" in workflow
+    assert "Stable 2.0.0 is blocked" not in workflow

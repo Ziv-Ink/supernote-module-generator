@@ -10,8 +10,9 @@ lives. One feature may contain C++, C helper files, Kotlin, and Java together.
 JSI is the only JavaScript frontend, and the plugin compiles one generated V2
 runtime/build component shared by all features.
 
-V2 is under active development. Development builds use the `2.0.0.devN`
-series; unqualified `2.0.0` is reserved for the first stable V2 release.
+V2 is the current stable architecture. The initial `2.0.0` release deliberately
+keeps advanced value/object features and caller-controlled cancellation out of
+scope; the supported foundation is described below.
 
 ## Install
 

@@ -4,12 +4,11 @@ This file records user-visible changes to the generator. Documentation on the
 default branch may be newer than the latest published package; released users
 should also check their installed version with `supernote-module --version`.
 
-## 2.0.0.dev0 - Unreleased
+## 2.0.0 - 2026-08-13
 
-- Begin the language-neutral V2 source/semantic/lowering architecture.
+- Introduce the language-neutral V2 source/semantic/lowering architecture.
 - Preserve `supernote-module-generator` and `supernote-module` as the package
-  and command identities while reserving stable `2.0.0` for the completed V2
-  release.
+  and command identities.
 - Replace public Native/JNI/JSI module selection with language-neutral logical
   features and repeatable C/C++ or Kotlin/Java starter scaffolding.
 - Generate one shared plugin-level V2 runtime/build component with explicit
@@ -20,6 +19,10 @@ should also check their installed version with `supernote-module --version`.
   library failures in the parent Android application.
 - Add opt-in `remove --delete-build-files`; ordinary removal and `--yes`
   preserve plugin build output.
+- Improve guided CLI choices, validation summaries, next-step guidance, and
+  source-located diagnostics for invalid marker combinations.
+- Validate V2's initial value, object, async, error, bounded-executor,
+  teardown, and same-process PluginHost reload behavior on the target device.
 
 ## 1.1.0.dev0 - Historical V1 development baseline
 

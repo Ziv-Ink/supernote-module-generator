@@ -89,9 +89,8 @@ create a GitHub release whose tag exactly matches the package version:
 gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
 ```
 
-Set `VERSION` to the version being released. Stable `2.0.0` remains blocked by
-the workflow until every V2 release gate has passed and that guard is removed
-deliberately.
+Set `VERSION` to the version being released. The workflow rejects a release tag
+that does not exactly match the version embedded in the package.
 
 Publishing the release runs `.github/workflows/publish.yml`. It builds/checks
 artifacts from the tag, transfers them to the isolated publishing job, obtains
