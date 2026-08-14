@@ -35,7 +35,7 @@ from .naming import (
     validate_package_name,
     validate_package_version,
 )
-from .plugin_build_integration import integration_files
+from .plugin_build_integration import integration_mutation_files
 from .plugin_runtime_codegen import RUNTIME_RELATIVE_ROOT
 from .project import (
     dependency_link_path,
@@ -260,8 +260,6 @@ class FeatureCliOperationService:
 
     def validate(self, decisions: FeatureValidateDecisions) -> CommandResult:
         records = [self.features.find_record(name) for name in decisions.package_names]
-        if not records:
-            return CommandResult("validate", metadata={"empty": True})
         validation = self._validate_records(records, dependency_requested=True)
         build_error: SubprocessError | None = None
         if decisions.build:
@@ -334,11 +332,9 @@ class FeatureCliOperationService:
     def _snapshot_operation(
         self, transaction: Transaction, feature_paths: Iterable[Path]
     ) -> None:
-        settings, app_build = integration_files(self.root)
         paths = [
             *parent_mutation_targets(self.root),
-            settings,
-            app_build,
+            *integration_mutation_files(self.root),
             self.root / RUNTIME_RELATIVE_ROOT,
             *feature_paths,
         ]

@@ -11,6 +11,8 @@ from supernote_module_generator.cli import main
 from supernote_module_generator.errors import SubprocessFailure
 from supernote_module_generator.feature_cli_operations import FeatureCliOperationService
 from supernote_module_generator.feature_workflows import FeatureDecisionCollector
+from supernote_module_generator.plugin_build_integration import set_runtime_wiring
+from supernote_module_generator.transaction import Transaction, recover_pending
 
 
 def plugin(tmp_path: Path, *, npm_lock: bool = False, yarn_lock: bool = False) -> Path:
@@ -38,6 +40,22 @@ def invoke(root: Path, arguments: list[str]):
     stderr = io.StringIO()
     code = main(arguments, stdin=io.StringIO(), stdout=stdout, stderr=stderr, cwd=root)
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+def main_application(root: Path) -> Path:
+    source = (
+        root
+        / "android/app/src/main/java/com/example/fixture/MainApplication.kt"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "fun getPackages() =\n"
+        "    PackageList(this).packages.apply {\n"
+        "      add(ExistingPackage())\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    return source
 
 
 @pytest.mark.parametrize(
@@ -233,6 +251,130 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
         root / "android/.supernote-module/v2-runtime/feature-registry.json"
     ).read_bytes() == runtime_before
     assert json.loads((root / "package.json").read_text())["dependencies"]["safe"]
+
+
+@pytest.mark.parametrize("command", ["add", "remove"])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_failed_or_interrupted_dependency_refresh_exactly_restores_main_application(
+    tmp_path: Path, monkeypatch, command: str, interrupted: bool
+):
+    root = plugin(tmp_path, npm_lock=True)
+    application = main_application(root)
+    if command == "remove":
+        assert invoke(
+            root,
+            ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+        )[0] == 0
+    before = application.read_bytes()
+
+    monkeypatch.setattr(
+        FeatureCliOperationService, "_health_check_manager", lambda *args: None
+    )
+
+    def fail_dependency(self, invocation, *, phase):
+        if interrupted:
+            raise KeyboardInterrupt
+        raise SubprocessFailure("forced install failure", phase=phase)
+
+    monkeypatch.setattr(FeatureCliOperationService, "_run", fail_dependency)
+    monkeypatch.setattr(FeatureCliOperationService, "_reconcile", lambda *args: True)
+    arguments = (
+        ["add", "safe", "--starter", "cpp", "--package-manager", "npm", "--yes"]
+        if command == "add"
+        else ["remove", "safe", "--package-manager", "npm", "--yes"]
+    )
+
+    code, _, stderr = invoke(root, arguments)
+
+    assert code == (130 if interrupted else 1), stderr
+    assert application.read_bytes() == before
+    expected_marker_count = 0 if command == "add" else 1
+    assert application.read_text().count("supernote-module-v2-package") == (
+        expected_marker_count * 2
+    )
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+def test_partial_then_startup_recovery_preserves_restored_main_application(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    application = main_application(root)
+    before = application.read_bytes()
+    service = FeatureCliOperationService(root, renderer=None)  # type: ignore[arg-type]
+
+    transaction = Transaction(root, "add", ["safe"])
+    service._snapshot_operation(transaction, [root / "local_modules/safe"])
+    set_runtime_wiring(root, enabled=True)
+    transaction.mark_external(["npm", "install"])
+
+    first = transaction.rollback(reconcile=lambda _: False)
+    assert first.status == "partial"
+    assert application.read_bytes() == before
+    assert (root / ".supernote-module-transaction.json").is_file()
+
+    outcome = recover_pending(root, reconcile=lambda _: True)
+
+    assert outcome.rollback.status == "completed"
+    assert application.read_bytes() == before
+
+
+def test_empty_validation_rejects_leftover_v2_runtime_and_package_wiring(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    application = main_application(root)
+    set_runtime_wiring(root, enabled=True)
+
+    code, _, stderr = invoke(root, ["validate", "--all"])
+
+    assert code == 1
+    assert "V2 runtime blocks; expected 0" in stderr
+    assert application.read_text().count("supernote-module-v2-package") == 2
+
+
+def test_empty_validation_rejects_leftover_package_registration_alone(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    application = main_application(root)
+    settings = (root / "android/settings.gradle").read_bytes()
+    app_build = (root / "android/app/build.gradle").read_bytes()
+    set_runtime_wiring(root, enabled=True)
+    (root / "android/settings.gradle").write_bytes(settings)
+    (root / "android/app/build.gradle").write_bytes(app_build)
+
+    code, _, stderr = invoke(root, ["validate", "--all"])
+
+    assert code == 1
+    assert "V2 package blocks; expected 0" in stderr
+    assert application.read_text().count("supernote-module-v2-package") == 2
+
+
+def test_feature_validation_rejects_missing_main_application_registration(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    application = main_application(root)
+    assert invoke(
+        root,
+        ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    settings = (root / "android/settings.gradle").read_bytes()
+    app_build = (root / "android/app/build.gradle").read_bytes()
+    set_runtime_wiring(root, enabled=False)
+    (root / "android/settings.gradle").write_bytes(settings)
+    (root / "android/app/build.gradle").write_bytes(app_build)
+    link = root / "node_modules/safe"
+    link.parent.mkdir()
+    link.symlink_to(root / "local_modules/safe", target_is_directory=True)
+
+    code, _, stderr = invoke(root, ["validate", "safe"])
+
+    assert code == 1
+    assert "V2 package blocks; expected 1" in stderr
+    assert "supernote-module-v2-package" not in application.read_text()
 
 
 def test_remove_preserves_build_outputs_unless_cleanup_is_explicit(tmp_path: Path):

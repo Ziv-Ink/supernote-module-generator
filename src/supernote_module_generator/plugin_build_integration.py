@@ -37,6 +37,18 @@ def integration_files(plugin_root: Path) -> tuple[Path, Path]:
     return settings, app_build
 
 
+def integration_mutation_files(plugin_root: Path) -> tuple[Path, ...]:
+    """Return every user-owned Android file runtime wiring may change."""
+
+    settings, app_build = integration_files(plugin_root)
+    application = _application_file(plugin_root)
+    return (
+        (settings, app_build, application)
+        if application is not None
+        else (settings, app_build)
+    )
+
+
 def set_runtime_wiring(plugin_root: Path, *, enabled: bool) -> tuple[Path, Path]:
     """Wire or unwire exactly one generated Android library atomically."""
 
