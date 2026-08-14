@@ -1,5 +1,10 @@
+import base64
 import json
 from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
 
 from supernote_module_generator.feature_generator import FeatureConfig, generate_feature, stage_feature
 from supernote_module_generator.feature_model import StarterFamily
@@ -87,5 +92,63 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
 
     assert "globalThis.__supernoteV2" in index
     assert "runtime.feature(" in index
+    assert "new Proxy(" in index
     assert package["main"] == "index.js"
     assert "react-native" not in package
+
+
+def test_feature_package_imports_before_runtime_install_and_resolves_lazily(
+    tmp_path: Path,
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the generated ES module")
+
+    feature = generate_feature(config(tmp_path))
+    index = (feature / "index.js").read_text(encoding="utf-8")
+    encoded = base64.b64encode(index.encode("utf-8")).decode("ascii")
+    feature_id = json.loads(
+        (feature / ".supernote-module.json").read_text(encoding="utf-8")
+    )["feature_id"]
+    script = f"""
+const generated = await import('data:text/javascript;base64,{encoded}');
+
+let earlyError;
+try {{
+  generated.default.greet;
+}} catch (error) {{
+  earlyError = error;
+}}
+if (!earlyError || earlyError.message !==
+    'Document is not installed in the Supernote V2 runtime') {{
+  throw new Error(`unexpected early-access result: ${{earlyError}}`);
+}}
+
+const first = {{greet: name => `first:${{name}}`}};
+globalThis.__supernoteV2 = {{
+  feature(id) {{
+    if (id !== {json.dumps(feature_id)}) throw new Error(`wrong id: ${{id}}`);
+    return first;
+  }},
+}};
+if (generated.default.greet('Ada') !== 'first:Ada') {{
+  throw new Error('feature did not resolve after runtime installation');
+}}
+if (first.__supernoteErrorConstructor !== generated.SupernoteError) {{
+  throw new Error('SupernoteError constructor was not installed on the feature');
+}}
+
+const second = {{greet: name => `second:${{name}}`}};
+globalThis.__supernoteV2 = {{feature: () => second}};
+if (generated.default.greet('Ada') !== 'second:Ada') {{
+  throw new Error('feature wrapper retained a stale runtime binding');
+}}
+"""
+    result = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
