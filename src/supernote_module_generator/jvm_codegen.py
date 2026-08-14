@@ -1239,6 +1239,7 @@ def _render_async_function(
         ),
         release_feature_before_execution=False,
         implementation_name="Kotlin/Java",
+        implementation_exception_type="JvmImplementationFailure",
     )
     return (
         "  {\n"
@@ -1631,6 +1632,7 @@ def _render_async_object_method(
         ),
         release_feature_before_execution=False,
         implementation_name="Kotlin/Java",
+        implementation_exception_type="JvmImplementationFailure",
     )
     return f'''    if (property == {json.dumps(method.name)}) {{
       auto route = {route_name}_;

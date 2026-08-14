@@ -287,6 +287,7 @@ def test_blocking_jvm_async_route_uses_shared_worker_and_owned_values():
     assert '"unknown Kotlin/Java implementation failure"' in source
     assert '"Kotlin/Java implementation failed"' in source
     assert "implementation_exception_message" in source
+    assert "catch (const JvmImplementationFailure &error)" in source
     assert '"getMessage"' in source
     assert "class LocalReference" in source
     assert "DeleteLocalRef" in source

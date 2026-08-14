@@ -4002,6 +4002,7 @@ def _jsi_async_host_function(
     worker_prelude: str = "",
     release_feature_before_execution: bool = True,
     implementation_name: str = "C++",
+    implementation_exception_type: str | None = None,
 ) -> str:
     expected_parameters = ", ".join(
         _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
@@ -4095,6 +4096,12 @@ def _jsi_async_host_function(
         if release_feature_before_execution
         else ""
     )
+    implementation_exception_catch = (
+        f"                      }} catch (const {implementation_exception_type} &error) {{\n"
+        "                        state->error = error.what();\n"
+        if implementation_exception_type
+        else ""
+    )
     return f'''Function::createFromHostFunction(
         runtime,
         PropNameID::forAscii(runtime, {json.dumps(js_name)}),
@@ -4159,7 +4166,7 @@ def _jsi_async_host_function(
 {feature_release}
                       try {{
 {execution}
-                      }} catch (const std::exception &error) {{
+{implementation_exception_catch}                      }} catch (const std::exception &error) {{
                         state->error = error.what();
                       }} catch (...) {{
                         state->error = {json.dumps("unknown " + implementation_name + " implementation failure")};
