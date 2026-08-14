@@ -4,6 +4,17 @@ This file records user-visible changes to the generator. Documentation on the
 default branch may be newer than the latest published package; released users
 should also check their installed version with `supernote-module --version`.
 
+## 2.0.1 - 2026-08-14
+
+- Make generated feature imports safe during ordinary JavaScript module
+  evaluation. A normal static import such as `import document from 'document'`
+  can now be evaluated before the Supernote JSI runtime is installed; the
+  feature is resolved lazily when JavaScript actually accesses it.
+- Resolve the current feature on each property access instead of caching a
+  JavaScript wrapper across runtime/session replacement.
+- Keep premature feature use explicit: calling or reading a feature property
+  before the runtime is installed still fails immediately with a clear error.
+
 ## 2.0.0 - 2026-08-13
 
 - Introduce the language-neutral V2 source/semantic/lowering architecture.
