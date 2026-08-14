@@ -177,6 +177,37 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 binding_codegen.scan_cpp_semantic_model(module).functions,
             )
 
+    def test_marked_pointer_and_reference_returns_report_boundary_type(self):
+        cases = (
+            ("pointer", "std::int32_t *", "raw pointers are not supported"),
+            ("reference", "std::string &", "references are not supported"),
+        )
+        for name, result, diagnostic in cases:
+            with self.subTest(name=name):
+                directory_context = tempfile.TemporaryDirectory()
+                self.addCleanup(directory_context.cleanup)
+                directory = directory_context.name
+                module = self.make_module(
+                    Path(directory),
+                    source=(
+                        "// @SupernotePluginExport\n"
+                        f"{result} invalid() {{ throw 1; }}\n"
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    binding_codegen.CodegenError,
+                    diagnostic,
+                ) as raised:
+                    binding_codegen.scan_cpp_semantic_model(module)
+
+                message = str(raised.exception)
+                self.assertIn("unsupported return type", message)
+                self.assertIn(
+                    "return one canonical V2 value type by value",
+                    message,
+                )
+                self.assertNotIn("expected a C++ function name", message)
+
     def test_cpp_source_identity_does_not_depend_on_blank_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory))

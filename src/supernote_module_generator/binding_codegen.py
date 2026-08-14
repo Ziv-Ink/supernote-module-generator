@@ -976,6 +976,23 @@ def _parse_function_source(
         )
     cursor = consumed
 
+    if (
+        cursor < len(following)
+        and following[cursor].value in {"*", "&", "&&"}
+    ):
+        declarator = following[cursor].value
+        description = "raw pointers" if declarator == "*" else "references"
+        raise _source_error(
+            module_root,
+            path,
+            following[cursor].line,
+            module_name,
+            marker_export,
+            f"unsupported return type {return_type + declarator!r}: "
+            f"{description} are not supported; return one canonical V2 value "
+            "type by value",
+        )
+
     if cursor >= len(following) or following[cursor].kind != "identifier":
         line = following[min(cursor, len(following) - 1)].line
         raise _source_error(
@@ -3984,6 +4001,7 @@ def _jsi_async_host_function(
     worker_captures_extra: tuple[str, ...] = (),
     worker_prelude: str = "",
     release_feature_before_execution: bool = True,
+    implementation_name: str = "C++",
 ) -> str:
     expected_parameters = ", ".join(
         _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
@@ -4144,7 +4162,7 @@ def _jsi_async_host_function(
                       }} catch (const std::exception &error) {{
                         state->error = error.what();
                       }} catch (...) {{
-                        state->error = "unknown C++ implementation failure";
+                        state->error = {json.dumps("unknown " + implementation_name + " implementation failure")};
                       }}
                       if (executor_cancel.is_cancelled() ||
                           operation->cancellation_token().is_cancelled()) return;
@@ -4159,7 +4177,7 @@ def _jsi_async_host_function(
                               supernote_reject_operation(
                                   runtime, operation_id, "IMPLEMENTATION_ERROR",
                                   state->error.empty()
-                                      ? "C++ implementation failed"
+                                      ? {json.dumps(implementation_name + " implementation failed")}
                                       : state->error);
                               return;
                             }}

@@ -9,9 +9,10 @@ import uuid
 from dataclasses import dataclass
 
 from . import __version__, binding_codegen
-from .errors import ConfigurationError
+from .errors import ConfigurationError, GeneratorError
 from .feature_generator import FeatureConfig, stage_feature
 from .feature_model import (
+    FeatureModelError,
     FeatureManifest,
     FeatureRegistryEntry,
     ImplementationRoots,
@@ -30,6 +31,20 @@ from .models import ModuleInfo
 
 class FeatureOperationError(ConfigurationError):
     pass
+
+
+class FeatureMetadataError(GeneratorError):
+    """An existing generator-owned feature manifest is corrupt or unsupported."""
+
+    kind = "invalid_metadata"
+    phase = "preflight"
+
+
+class FeatureSourceError(GeneratorError):
+    """A marked user declaration cannot be represented by V2 bindings."""
+
+    kind = "invalid_source"
+    phase = "preflight"
 
 
 @dataclass(frozen=True)
@@ -203,17 +218,72 @@ class FeatureOperationService:
         raise FeatureOperationError(f"feature not found: {npm_name}")
 
     def feature_paths(self) -> list[Path]:
+        if self.features_root.is_symlink():
+            self._reject_escaping_feature_links()
         if not self.features_root.is_dir():
             return []
+        self._reject_escaping_feature_links()
         result = []
         for metadata in sorted(self.features_root.rglob(".supernote-module.json")):
             relative = metadata.relative_to(self.features_root)
             if any(part.startswith(".") for part in relative.parts[:-1]):
                 continue
-            value = json.loads(metadata.read_text(encoding="utf-8"))
-            if value.get("kind") == "supernote_feature":
-                result.append(metadata.parent)
+            self._reject_escaping_managed_path(metadata)
+            read_feature_manifest(metadata.parent)
+            result.append(metadata.parent)
         return result
+
+    def _reject_escaping_feature_links(self) -> None:
+        """Reject managed package-root links without policing user source links."""
+
+        candidates = [self.features_root]
+        if not self.features_root.is_symlink():
+            try:
+                children = sorted(self.features_root.iterdir())
+            except OSError as exc:
+                raise FeatureMetadataError(
+                    f"managed feature directory could not be read:\n\n"
+                    f"{self.features_root}: {exc}"
+                ) from exc
+            candidates.extend(
+                child for child in children if not child.name.startswith(".")
+            )
+            for scope in children:
+                if (
+                    scope.name.startswith("@")
+                    and scope.is_dir()
+                    and not scope.is_symlink()
+                ):
+                    try:
+                        candidates.extend(
+                            child
+                            for child in sorted(scope.iterdir())
+                            if not child.name.startswith(".")
+                        )
+                    except OSError as exc:
+                        raise FeatureMetadataError(
+                            f"managed feature scope could not be read:\n\n{scope}: {exc}"
+                        ) from exc
+        canonical_root = self.root.resolve()
+        for candidate in candidates:
+            self._reject_escaping_managed_path(candidate, canonical_root)
+
+    def _reject_escaping_managed_path(
+        self,
+        candidate: Path,
+        canonical_root: Path | None = None,
+    ) -> None:
+        if not candidate.is_symlink():
+            return
+        canonical = candidate.resolve(strict=False)
+        try:
+            canonical.relative_to(canonical_root or self.root.resolve())
+        except ValueError as exc:
+            raise ConfigurationError(
+                "target resolves outside the Supernote plugin:\n\n"
+                f"managed feature path {candidate}\n"
+                f"resolves to {canonical}"
+            ) from exc
 
     def records(self) -> list[FeatureRecord]:
         return [read_feature_record(path) for path in self.feature_paths()]
@@ -277,13 +347,16 @@ class FeatureOperationService:
         for path in paths:
             manifest = read_feature_manifest(path)
             native_root = path / manifest.roots.native
-            semantic = (
-                binding_codegen.scan_cpp_semantic_model(
-                    path, module_name=manifest.public_name
+            try:
+                semantic = (
+                    binding_codegen.scan_cpp_semantic_model(
+                        path, module_name=manifest.public_name
+                    )
+                    if native_root.is_dir()
+                    else SemanticApi()
                 )
-                if native_root.is_dir()
-                else SemanticApi()
-            )
+            except binding_codegen.CodegenError as exc:
+                raise FeatureSourceError(str(exc)) from exc
             entries.append(FeatureRegistryEntry.create(manifest, semantic))
         return tuple(entries)
 
@@ -340,27 +413,106 @@ class FeatureOperationService:
 
 
 def read_feature_manifest(path: Path) -> FeatureManifest:
-    raw = json.loads((path / ".supernote-module.json").read_text(encoding="utf-8"))
-    roots = raw["implementation_roots"]
-    return FeatureManifest(
-        feature_id=str(raw["feature_id"]),
-        npm_name=str(raw["npm_name"]),
-        public_name=str(raw["public_name"]),
-        android_namespace=str(raw["android_namespace"]),
-        roots=ImplementationRoots(str(roots["native"]), str(roots["jvm"])),
-        starter_files=tuple(str(item) for item in raw.get("starter_files", ())),
-        schema_version=int(raw["schema_version"]),
-    )
+    metadata = path / ".supernote-module.json"
+    raw = _read_feature_metadata(metadata)
+    try:
+        if "implementation_roots" not in raw:
+            raise TypeError("implementation_roots is required")
+        roots = raw["implementation_roots"]
+        if not isinstance(roots, dict):
+            raise TypeError("implementation_roots must be an object")
+        starter_files = raw.get("starter_files", ())
+        if not isinstance(starter_files, list):
+            raise TypeError("starter_files must be an array")
+        return FeatureManifest(
+            feature_id=_required_string(raw, "feature_id"),
+            npm_name=_required_string(raw, "npm_name"),
+            public_name=_required_string(raw, "public_name"),
+            android_namespace=_required_string(raw, "android_namespace"),
+            roots=ImplementationRoots(
+                _required_string(roots, "native"),
+                _required_string(roots, "jvm"),
+            ),
+            starter_files=tuple(
+                _array_string(starter_files, index)
+                for index in range(len(starter_files))
+            ),
+            schema_version=_required_integer(raw, "schema_version"),
+        )
+    except FeatureMetadataError:
+        raise
+    except (FeatureModelError, KeyError, TypeError, ValueError) as exc:
+        raise _invalid_feature_metadata(metadata, str(exc)) from exc
 
 
 def read_feature_record(path: Path) -> FeatureRecord:
-    raw = json.loads((path / ".supernote-module.json").read_text(encoding="utf-8"))
-    return FeatureRecord(
-        path.resolve(),
-        read_feature_manifest(path),
-        str(raw["package_version"]),
-        str(raw.get("description", "")),
+    metadata = path / ".supernote-module.json"
+    raw = _read_feature_metadata(metadata)
+    try:
+        package_version = _required_string(raw, "package_version")
+        description = raw.get("description", "")
+        if not isinstance(description, str):
+            raise TypeError("description must be a string")
+        return FeatureRecord(
+            path.resolve(),
+            read_feature_manifest(path),
+            package_version,
+            description,
+        )
+    except FeatureMetadataError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _invalid_feature_metadata(metadata, str(exc)) from exc
+
+
+def _read_feature_metadata(metadata: Path) -> dict[str, object]:
+    try:
+        value = json.loads(metadata.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        raise _invalid_feature_metadata(metadata, reason) from exc
+    except OSError as exc:
+        raise _invalid_feature_metadata(metadata, f"could not read file: {exc}") from exc
+    if not isinstance(value, dict):
+        raise _invalid_feature_metadata(metadata, "top-level value must be an object")
+    kind = value.get("kind")
+    if kind != "supernote_feature":
+        raise _invalid_feature_metadata(
+            metadata,
+            f"kind must be 'supernote_feature', got {kind!r}",
+        )
+    return value
+
+
+def _invalid_feature_metadata(metadata: Path, reason: str) -> FeatureMetadataError:
+    return FeatureMetadataError(
+        f"feature metadata is invalid or unsupported:\n\n{metadata}: {reason}"
     )
+
+
+def _required_string(value: dict[str, object], name: str) -> str:
+    if name not in value:
+        raise TypeError(f"{name} is required")
+    item = value[name]
+    if not isinstance(item, str) or not item:
+        raise TypeError(f"{name} must be a non-empty string")
+    return item
+
+
+def _required_integer(value: dict[str, object], name: str) -> int:
+    if name not in value:
+        raise TypeError(f"{name} is required")
+    item = value[name]
+    if not isinstance(item, int) or isinstance(item, bool):
+        raise TypeError(f"{name} must be an integer")
+    return item
+
+
+def _array_string(value: list[object], index: int) -> str:
+    item = value[index]
+    if not isinstance(item, str):
+        raise TypeError(f"starter_files[{index}] must be a string")
+    return item
 
 
 def _starter_families(files: tuple[str, ...]) -> tuple[StarterFamily, ...]:
