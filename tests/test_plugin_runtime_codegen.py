@@ -98,6 +98,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "local_modules/@local/alpha/android/src/main/java" in gradle
     assert "local_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteFeatureRoots" in gradle
+    assert "catch (_: SupernoteSourceDiagnostic)" in processor
+    assert "throw SupernoteSourceDiagnostic()" in processor
+    assert "throw IllegalArgumentException(message)" not in processor
     assert "schema_version" in processor
     assert "getSymbolsWithAnnotation" in processor
     assert "Kotlin suspend requires explicit SupernotePluginAsync" in processor

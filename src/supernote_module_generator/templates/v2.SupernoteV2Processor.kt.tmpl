@@ -39,6 +39,8 @@ private val markerNames = markerOrder.associateWith {
   "supernote.generated.annotations.$it"
 }
 
+private class SupernoteSourceDiagnostic : RuntimeException()
+
 class SupernoteV2Processor(
   private val environment: SymbolProcessorEnvironment,
 ) : SymbolProcessor {
@@ -46,6 +48,18 @@ class SupernoteV2Processor(
 
   override fun process(resolver: Resolver): List<KSAnnotated> {
     if (generated) return emptyList()
+    try {
+      return processMarkedDeclarations(resolver)
+    } catch (_: SupernoteSourceDiagnostic) {
+      // The source-located error has already been reported through KSP.  Do
+      // not let an expected user declaration error look like a processor
+      // crash by escaping into Gradle's exception reporting.
+      generated = true
+      return emptyList()
+    }
+  }
+
+  private fun processMarkedDeclarations(resolver: Resolver): List<KSAnnotated> {
     val symbols = linkedMapOf<String, KSAnnotated>()
     markerNames.values.forEach { annotation ->
       resolver.getSymbolsWithAnnotation(annotation).forEach { symbol ->
@@ -408,12 +422,12 @@ class SupernoteV2Processor(
 
   private fun fail(node: KSNode, message: String): Nothing {
     environment.logger.error("Supernote V2: $message", node)
-    throw IllegalArgumentException(message)
+    throw SupernoteSourceDiagnostic()
   }
 
   private fun fail(path: String, message: String): Nothing {
     environment.logger.error("Supernote V2: $path: $message")
-    throw IllegalArgumentException(message)
+    throw SupernoteSourceDiagnostic()
   }
 }
 
