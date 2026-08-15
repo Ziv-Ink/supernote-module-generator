@@ -13,7 +13,7 @@ from . import __version__
 from .arguments import COMMANDS, ParsedArguments, parse_arguments
 from .doctor import DoctorService
 from .feature_cli_operations import FeatureCliOperationService
-from .feature_workflows import FeatureDecisionCollector
+from .feature_workflows import FeatureDecisionCollector, FeatureValidateDecisions
 from .errors import ConfigurationError, GeneratorError, OperationCancelled, PartialFailure
 from .helptext import help_for
 from .interaction import (
@@ -32,6 +32,7 @@ from .models import (
     SubprocessError,
 )
 from .naming import infer_android_namespace, infer_javascript_name
+from .operation_lock import plugin_operation_lock
 from .project import managed_modules, resolve_plugin_root
 from .rendering import Renderer, TerminalCapabilities
 from .transaction import recover_pending
@@ -380,27 +381,56 @@ def _run_command(
     command = parsed.command or "unknown"
     interactive = _interactive_for(parsed, renderer)
     interaction = Interaction(renderer, stdin=stdin) if interactive else None
-    startup_warnings = []
 
     if command == "doctor":
         try:
             valid_root = resolve_plugin_root(cwd)
         except ConfigurationError:
             valid_root = None
-        if valid_root is not None:
+        if valid_root is None:
+            collector = FeatureDecisionCollector(
+                cwd.resolve(),
+                parsed,
+                interaction,
+                launched_from_menu=launched_from_menu,
+            )
+            return DoctorService(cwd, renderer).execute(collector.doctor_scope())
+        with plugin_operation_lock(valid_root):
             startup_warnings = _recover(valid_root, command, renderer)
-        collector = FeatureDecisionCollector(
-            valid_root or cwd.resolve(),
-            parsed,
-            interaction,
-            launched_from_menu=launched_from_menu,
-        )
-        scope = collector.doctor_scope()
-        result = DoctorService(cwd, renderer).execute(scope)
-        result.warnings.extend(warning for warning in startup_warnings if warning is not None)
-        return result
+            collector = FeatureDecisionCollector(
+                valid_root,
+                parsed,
+                interaction,
+                launched_from_menu=launched_from_menu,
+            )
+            result = DoctorService(cwd, renderer).execute(collector.doctor_scope())
+            result.warnings.extend(
+                warning for warning in startup_warnings if warning is not None
+            )
+            return result
 
     root = resolve_plugin_root(cwd)
+    with plugin_operation_lock(root):
+        return _run_feature_command(
+            parsed,
+            renderer,
+            root=root,
+            stdin=stdin,
+            interaction=interaction,
+            launched_from_menu=launched_from_menu,
+        )
+
+
+def _run_feature_command(
+    parsed: ParsedArguments,
+    renderer: Renderer,
+    *,
+    root: Path,
+    stdin: IO[str],
+    interaction: Interaction | None,
+    launched_from_menu: bool,
+) -> CommandResult:
+    command = parsed.command or "unknown"
     startup_warnings = _recover(root, command, renderer)
     collector = FeatureDecisionCollector(
         root,
@@ -427,6 +457,16 @@ def _run_command(
     elif command == "validate":
         decisions = collector.validate()
         if decisions is None:
+            structural_issues = service.features.verify_generated_state()
+            if structural_issues:
+                decisions = FeatureValidateDecisions((), True, False)
+                result = service.validate(decisions)
+                result.warnings = [
+                    *(warning for warning in startup_warnings if warning is not None),
+                    *collector.warnings,
+                    *result.warnings,
+                ]
+                return result
             if renderer.mode == "json":
                 return CommandResult("validate", metadata={"empty": True})
             empty = "No features were found in this plugin."
@@ -511,13 +551,17 @@ def _interactive_loop(
         return result.exit_code
 
     try:
-        startup = recover_pending(
-            root,
-            reconcile=lambda invocation: _startup_reconcile(root, invocation),
-        )
+        with plugin_operation_lock(root):
+            startup = recover_pending(
+                root,
+                reconcile=lambda invocation: _startup_reconcile(root, invocation),
+            )
     except PartialFailure as exc:
         renderer.render(_startup_failure("menu", exc))
         return 3
+    except GeneratorError as exc:
+        renderer.render(_exception_result("menu", exc, renderer.debug))
+        return exc.exit_code
     if startup.rollback.status == "partial":
         result = CommandResult(
             "menu",
@@ -630,7 +674,11 @@ def _main(
         return 0
     if parsed.command is None:
         if renderer.capabilities.interactive and parsed.output_mode != "json":
-            return _interactive_loop(renderer, cwd=cwd, stdin=stdin)
+            try:
+                return _interactive_loop(renderer, cwd=cwd, stdin=stdin)
+            except (InterruptRequested, KeyboardInterrupt):
+                print("Operation cancelled.", file=stdout)
+                return 130
         result = _usage_result(
             "unknown",
             "no command was provided",

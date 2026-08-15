@@ -250,8 +250,65 @@ class LocalFrame {{
   JNIEnv *env_;
 }};
 
+class LocalReference {{
+ public:
+  LocalReference(JNIEnv *env, jobject value) : env_(env), value_(value) {{}}
+  LocalReference(const LocalReference &) = delete;
+  LocalReference &operator=(const LocalReference &) = delete;
+  ~LocalReference() {{
+    if (env_ != nullptr && value_ != nullptr) env_->DeleteLocalRef(value_);
+  }}
+  jobject get() const noexcept {{ return value_; }}
+
+ private:
+  JNIEnv *env_;
+  jobject value_;
+}};
+
 void clear_exception(JNIEnv *env) {{
   if (env != nullptr && env->ExceptionCheck()) env->ExceptionClear();
+}}
+
+std::string implementation_exception_message(
+    JNIEnv *env, jthrowable failure) {{
+  if (env == nullptr || failure == nullptr) return {{}};
+  LocalReference failure_class(env, env->GetObjectClass(failure));
+  if (env->ExceptionCheck() || failure_class.get() == nullptr) {{
+    clear_exception(env);
+    return {{}};
+  }}
+  auto get_message = env->GetMethodID(
+      static_cast<jclass>(failure_class.get()),
+      "getMessage", "()Ljava/lang/String;");
+  if (env->ExceptionCheck() || get_message == nullptr) {{
+    clear_exception(env);
+    return {{}};
+  }}
+  LocalReference message(
+      env, env->CallObjectMethod(failure, get_message));
+  if (env->ExceptionCheck() || message.get() == nullptr) {{
+    clear_exception(env);
+    return {{}};
+  }}
+  const char *utf8 = env->GetStringUTFChars(
+      static_cast<jstring>(message.get()), nullptr);
+  if (env->ExceptionCheck() || utf8 == nullptr) {{
+    clear_exception(env);
+    return {{}};
+  }}
+  std::string result;
+  try {{
+    result.assign(utf8);
+  }} catch (...) {{
+    env->ReleaseStringUTFChars(
+        static_cast<jstring>(message.get()), utf8);
+    clear_exception(env);
+    throw;
+  }}
+  env->ReleaseStringUTFChars(
+      static_cast<jstring>(message.get()), utf8);
+  if (env->ExceptionCheck()) clear_exception(env);
+  return result;
 }}
 
 std::shared_ptr<void> retain_global(JNIEnv *env, jobject value) {{
@@ -384,8 +441,14 @@ jbyteArray write_byte_array(
 
 void require_no_implementation_exception(JNIEnv *env) {{
   if (!env->ExceptionCheck()) return;
+  LocalReference failure(env, env->ExceptionOccurred());
   env->ExceptionClear();
-  throw JvmImplementationFailure("Kotlin/Java implementation failed");
+  auto message = implementation_exception_message(
+      env, static_cast<jthrowable>(failure.get()));
+  throw JvmImplementationFailure(
+      message.empty()
+          ? "Kotlin/Java implementation failed"
+          : "Kotlin/Java implementation failed: " + message);
 }}
 
 {chr(10).join(object_wrappers)}
@@ -1175,6 +1238,8 @@ def _render_async_function(
             "                              supernote::runtime::FeatureState::ACTIVE) return;"
         ),
         release_feature_before_execution=False,
+        implementation_name="Kotlin/Java",
+        implementation_exception_type="JvmImplementationFailure",
     )
     return (
         "  {\n"
@@ -1566,6 +1631,8 @@ def _render_async_object_method(
             "                              supernote::runtime::FeatureState::ACTIVE) return;"
         ),
         release_feature_before_execution=False,
+        implementation_name="Kotlin/Java",
+        implementation_exception_type="JvmImplementationFailure",
     )
     return f'''    if (property == {json.dumps(method.name)}) {{
       auto route = {route_name}_;

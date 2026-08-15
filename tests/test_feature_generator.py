@@ -124,7 +124,7 @@ if (!earlyError || earlyError.message !==
   throw new Error(`unexpected early-access result: ${{earlyError}}`);
 }}
 
-const first = {{greet: name => `first:${{name}}`}};
+const first = {{firstOnly: 1, greet: name => `first:${{name}}`}};
 globalThis.__supernoteV2 = {{
   feature(id) {{
     if (id !== {json.dumps(feature_id)}) throw new Error(`wrong id: ${{id}}`);
@@ -137,11 +137,54 @@ if (generated.default.greet('Ada') !== 'first:Ada') {{
 if (first.__supernoteErrorConstructor !== generated.SupernoteError) {{
   throw new Error('SupernoteError constructor was not installed on the feature');
 }}
+if (Object.prototype.propertyIsEnumerable.call(
+      first,
+      '__supernoteErrorConstructor',
+    )) {{
+  throw new Error('SupernoteError constructor was enumerable on the feature');
+}}
 
-const second = {{greet: name => `second:${{name}}`}};
+if (!('greet' in generated.default) || 'missing' in generated.default) {{
+  throw new Error('feature membership did not reflect the current feature');
+}}
+const firstKeys = Reflect.ownKeys(generated.default);
+if (!firstKeys.includes('greet') || !firstKeys.includes('firstOnly')) {{
+  throw new Error(`feature keys were not forwarded: ${{firstKeys}}`);
+}}
+if (firstKeys.includes('__supernoteErrorConstructor')) {{
+  throw new Error('internal error constructor leaked through feature keys');
+}}
+const greetDescriptor = Object.getOwnPropertyDescriptor(
+  generated.default,
+  'greet',
+);
+if (!greetDescriptor || greetDescriptor.value !== first.greet ||
+    greetDescriptor.configurable !== true) {{
+  throw new Error('feature property descriptor was not forwarded safely');
+}}
+if (generated.default.__supernoteErrorConstructor !== undefined ||
+    '__supernoteErrorConstructor' in generated.default ||
+    Object.getOwnPropertyDescriptor(
+      generated.default,
+      '__supernoteErrorConstructor',
+    ) !== undefined) {{
+  throw new Error('internal error constructor was visible through the proxy');
+}}
+
+const second = {{greet: name => `second:${{name}}`, secondOnly: 2}};
 globalThis.__supernoteV2 = {{feature: () => second}};
 if (generated.default.greet('Ada') !== 'second:Ada') {{
   throw new Error('feature wrapper retained a stale runtime binding');
+}}
+if ('firstOnly' in generated.default || !('secondOnly' in generated.default)) {{
+  throw new Error('feature membership retained a stale runtime binding');
+}}
+const secondKeys = Reflect.ownKeys(generated.default);
+if (secondKeys.includes('firstOnly') || !secondKeys.includes('secondOnly')) {{
+  throw new Error(`feature keys retained a stale runtime binding: ${{secondKeys}}`);
+}}
+if (second.__supernoteErrorConstructor !== generated.SupernoteError) {{
+  throw new Error('SupernoteError constructor was not installed on replacement');
 }}
 """
     result = subprocess.run(

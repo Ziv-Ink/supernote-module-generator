@@ -284,6 +284,16 @@ def test_blocking_jvm_async_route_uses_shared_worker_and_owned_values():
         module_name="Document",
     )
 
+    assert '"unknown Kotlin/Java implementation failure"' in source
+    assert '"Kotlin/Java implementation failed"' in source
+    assert "implementation_exception_message" in source
+    assert "catch (const JvmImplementationFailure &error)" in source
+    assert '"getMessage"' in source
+    assert "class LocalReference" in source
+    assert "DeleteLocalRef" in source
+    assert "ExceptionOccurred" in source
+    assert '"unknown C++ implementation failure"' not in source
+
     assert 'getPropertyAsFunction(runtime, "Promise")' in source
     assert "process_services().workers().submit" in source
     assert "auto implementation_feature = weak_feature.lock()" in source

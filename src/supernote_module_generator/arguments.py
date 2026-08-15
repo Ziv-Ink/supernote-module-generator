@@ -94,17 +94,23 @@ def _split_option(token: str) -> Tuple[str, Optional[str]]:
 
 def _command_index(arguments: List[str]) -> Tuple[Optional[int], Optional[str]]:
     index = 0
+    options_ended = False
     while index < len(arguments):
-        token, attached = _split_option(arguments[index])
-        if token in GLOBAL_BOOLEANS:
-            if attached is not None:
-                raise ConfigurationError(f'unknown option "{arguments[index]}"')
+        raw = arguments[index]
+        if raw == "--" and not options_ended:
+            options_ended = True
             index += 1
             continue
-        if token.startswith("-"):
+        token, attached = _split_option(raw)
+        if not options_ended and token in GLOBAL_BOOLEANS:
+            if attached is not None:
+                raise ConfigurationError(f'unknown option "{raw}"')
+            index += 1
+            continue
+        if not options_ended and token.startswith("-"):
             # A command-specific option cannot validly precede the command.
             raise ConfigurationError(f'unknown option "{token}"')
-        return index, token
+        return index, raw
     return None, None
 
 
@@ -130,6 +136,7 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
     booleans: Set[str] = set()
     globals_seen: Set[str] = set()
     positionals: List[str] = []
+    options_ended = False
 
     index = 0
     while index < len(arguments):
@@ -137,6 +144,14 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
             index += 1
             continue
         raw = arguments[index]
+        if raw == "--" and not options_ended:
+            options_ended = True
+            index += 1
+            continue
+        if options_ended:
+            positionals.append(raw)
+            index += 1
+            continue
         option, attached = _split_option(raw)
         if option in GLOBAL_BOOLEANS:
             if attached is not None:

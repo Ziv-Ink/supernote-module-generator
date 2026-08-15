@@ -4,6 +4,24 @@ This file records user-visible changes to the generator. Documentation on the
 default branch may be newer than the latest published package; released users
 should also check their installed version with `supernote-module --version`.
 
+## 2.0.2 - 2026-08-15
+
+- Make Add and Remove rollback restore Android application integration exactly,
+  including interrupted or dependency-install failure paths.
+- Serialize generator operations per plugin and report a clear busy error when
+  another operation is already changing the same plugin.
+- Validate leftover generated wiring even when a plugin currently has no V2
+  features.
+- Accept the conventional `--` option terminator and reject malformed feature
+  metadata, escaping managed symlinks, and unsupported marked C++ boundaries
+  with focused preflight diagnostics.
+- Keep expected KSP source errors concise instead of appending processor stack
+  traces.
+- Preserve Kotlin/Java exception messages through synchronous and asynchronous
+  JSI routes while retaining the stable `SupernoteError` contract.
+- Expand executable coverage for the runtime-lazy feature Proxy, including
+  runtime replacement and reflection behavior.
+
 ## 2.0.1 - 2026-08-14
 
 - Make generated feature imports safe during ordinary JavaScript module

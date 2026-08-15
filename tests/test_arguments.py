@@ -51,6 +51,50 @@ def test_legacy_command_forms_and_options_are_rejected(legacy: str):
         parse_arguments([legacy])
 
 
+def test_double_dash_ends_option_parsing_for_command_positionals():
+    parsed = parse_arguments(["add", "--", "--help"])
+
+    assert parsed.command == "add"
+    assert parsed.positional == "--help"
+    assert not parsed.show_help
+
+
+def test_double_dash_can_precede_the_command():
+    parsed = parse_arguments(["--", "help", "add"])
+
+    assert parsed.command == "help"
+    assert parsed.positional == "add"
+
+
+def test_options_after_double_dash_are_not_applied():
+    parsed = parse_arguments(["validate", "--", "--all"])
+
+    assert parsed.positional == "--all"
+    assert not parsed.has("all")
+
+
+def test_double_dash_positional_still_passes_normal_package_validation(tmp_path: Path):
+    (tmp_path / "android/app").mkdir(parents=True)
+    (tmp_path / "PluginConfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text(
+        '{"name":"fixture","dependencies":{}}\n', encoding="utf-8"
+    )
+    (tmp_path / "android/settings.gradle").write_text(
+        "include ':app'\n", encoding="utf-8"
+    )
+    (tmp_path / "android/app/build.gradle").write_text(
+        "plugins {}\n", encoding="utf-8"
+    )
+
+    code, _, stderr = invoke(
+        ["add", "--yes", "--skip-install", "--", "--help"], tmp_path
+    )
+
+    assert code == 2
+    assert 'invalid package name "--help"' in stderr
+    assert not (tmp_path / "local_modules").exists()
+
+
 def test_all_and_module_are_mutually_exclusive():
     with pytest.raises(ConfigurationError, match="--all cannot"):
         parse_arguments(["validate", "local-math", "--all"])

@@ -12,6 +12,11 @@ class TtyStringIO(io.StringIO):
         return True
 
 
+class InterruptingTty(TtyStringIO):
+    def readline(self, *args, **kwargs) -> str:
+        raise KeyboardInterrupt
+
+
 class BrokenOutput(io.StringIO):
     def write(self, value: str) -> int:
         raise BrokenPipeError
@@ -79,6 +84,20 @@ def test_plain_main_menu_exit_has_no_final_output(tmp_path: Path):
     assert code == 0
     assert stdout.getvalue() == ""
     assert "Supernote Module Generator" in stderr.getvalue()
+
+
+def test_root_interactive_interrupt_exits_cleanly(tmp_path: Path):
+    root = plugin(tmp_path)
+    stdin = InterruptingTty()
+    stdout = TtyStringIO()
+    stderr = TtyStringIO()
+
+    code = main([], stdin=stdin, stdout=stdout, stderr=stderr, cwd=root)
+
+    assert code == 130
+    assert stdout.getvalue() == "Operation cancelled.\n"
+    assert "Traceback" not in stdout.getvalue()
+    assert "Traceback" not in stderr.getvalue()
 
 
 def test_guided_add_suggestions_are_editable_without_a_customize_gate(tmp_path: Path):
