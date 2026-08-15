@@ -330,8 +330,13 @@ class SupernoteV2Processor(
 
   private fun featureRoots(): List<FeatureRoot> {
     val pluginRoot = environment.options["supernotePluginRoot"] ?: error("Missing supernotePluginRoot")
-    val encoded = environment.options["supernoteFeatureRoots"] ?: error("Missing supernoteFeatureRoots")
-    return encoded.lines().filter { it.isNotBlank() }.map { line ->
+    val optionPrefix = "supernoteFeatureRoot_"
+    val encodedRoots = environment.options
+      .filterKeys { it.startsWith(optionPrefix) }
+      .toSortedMap()
+    return encodedRoots.entries.mapIndexed { index, (optionName, line) ->
+      val expectedName = optionPrefix + index.toString().padStart(8, '0')
+      require(optionName == expectedName) { "Invalid Supernote feature-root option sequence" }
       val parts = line.split('\t')
       require(parts.size == 2) { "Invalid supernoteFeatureRoots entry" }
       FeatureRoot(parts[0], parts[1], java.nio.file.Paths.get(pluginRoot).resolve(parts[1]).toAbsolutePath().normalize())

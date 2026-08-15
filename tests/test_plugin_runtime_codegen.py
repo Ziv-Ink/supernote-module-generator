@@ -38,6 +38,28 @@ def registry(*names: str) -> PluginRuntimeRegistry:
     )
 
 
+def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
+    for feature_count in (0, 1, 2, 32):
+        generated = generate_plugin_runtime(
+            tmp_path / str(feature_count),
+            registry(*(f"feature{index}" for index in range(feature_count))),
+        )
+        gradle = (generated / "build.gradle").read_text()
+        root_options = [
+            line.strip()
+            for line in gradle.splitlines()
+            if line.strip().startswith("arg('supernoteFeatureRoot_")
+        ]
+
+        assert len(root_options) == feature_count
+        assert "supernoteFeatureRoots" not in gradle
+        for index, option in enumerate(root_options):
+            assert option.startswith(
+                f"arg('supernoteFeatureRoot_{index:08d}', "
+            )
+            assert "\\tlocal_modules/" in option
+
+
 def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Path):
     runtime_registry = registry("alpha", "beta")
     generated = generate_plugin_runtime(tmp_path, runtime_registry)
@@ -97,7 +119,15 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "**/libreactnative.so" in gradle
     assert "local_modules/@local/alpha/android/src/main/java" in gradle
     assert "local_modules/@local/beta/android/src/main/java" in gradle
-    assert "supernoteFeatureRoots" in gradle
+    assert "supernoteFeatureRoots" not in gradle
+    assert "arg('supernoteFeatureRoot_00000000'" in gradle
+    assert "arg('supernoteFeatureRoot_00000001'" in gradle
+    assert "supernote:feature:" in gradle
+    assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
+    assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
+    assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
+    assert 'optionPrefix = "supernoteFeatureRoot_"' in processor
+    assert "toSortedMap()" in processor
     assert "catch (_: SupernoteSourceDiagnostic)" in processor
     assert "throw SupernoteSourceDiagnostic()" in processor
     assert "throw IllegalArgumentException(message)" not in processor

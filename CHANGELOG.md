@@ -4,6 +4,15 @@ This file records user-visible changes to the generator. Documentation on the
 default branch may be newer than the latest published package; released users
 should also check their installed version with `supernote-module --version`.
 
+## Unreleased
+
+- Generate one KSP compiler option per feature so plugins with multiple V2
+  features compile instead of passing an invalid newline-bearing option.
+- Allow native-only, JVM-only, and mixed feature sets by ignoring absent
+  optional implementation roots when declaring Gradle task inputs.
+- Include generator templates explicitly in source distributions so every
+  permitted build backend produces an installable, usable wheel.
+
 ## 2.0.2 - 2026-08-15
 
 - Make Add and Remove rollback restore Android application integration exactly,
