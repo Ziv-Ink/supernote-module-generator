@@ -58,6 +58,9 @@ def install_fake_sdk(tmp_path: Path, monkeypatch) -> Path:
         "Pkg.Revision = 27.1.0\n", encoding="utf-8"
     )
     monkeypatch.setenv("ANDROID_HOME", str(sdk))
+    monkeypatch.setenv("ANDROID_SDK_ROOT", str(sdk))
+    monkeypatch.setenv("ANDROID_NDK_HOME", str(ndk))
+    monkeypatch.setenv("ANDROID_NDK_ROOT", str(ndk))
     return sdk
 
 
