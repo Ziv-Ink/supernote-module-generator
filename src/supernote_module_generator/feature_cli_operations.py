@@ -28,6 +28,7 @@ from .models import (
     SubprocessError,
     ValidationResult,
 )
+from .platform_tools import gradle_wrapper_path
 from .naming import (
     normalize_description,
     validate_android_namespace,
@@ -466,7 +467,7 @@ class FeatureCliOperationService:
             raise ConfigurationError(f"{manager} is not available")
 
     def _health_check_build(self) -> None:
-        gradle = self.root / "android/gradlew"
+        gradle = gradle_wrapper_path(self.root)
         if not gradle.is_file():
             raise ConfigurationError("Android Gradle wrapper is not available")
 

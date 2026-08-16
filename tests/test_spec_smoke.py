@@ -27,7 +27,7 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def test_add_validate_remove_smoke(tmp_path: Path):
+def test_add_validate_remove_smoke(tmp_path: Path, make_directory_symlink):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(
         root,
@@ -42,7 +42,7 @@ def test_add_validate_remove_smoke(tmp_path: Path):
 
     link = root / "node_modules/local-math"
     link.parent.mkdir()
-    link.symlink_to(module, target_is_directory=True)
+    make_directory_symlink(link, module)
     code, stdout, stderr = invoke(root, ["validate", "local-math"])
     assert code == 0, stderr
     assert stdout == '✓ Feature "local-math" is valid\n'
@@ -72,7 +72,9 @@ def test_validate_missing_dependency_link_gives_install_action_without_rollback(
     assert "Rollback:" not in stderr
 
 
-def test_validate_all_uses_singular_copy_for_one_feature(tmp_path: Path):
+def test_validate_all_uses_singular_copy_for_one_feature(
+    tmp_path: Path, make_directory_symlink
+):
     root = plugin(tmp_path)
     assert invoke(
         root,
@@ -81,7 +83,7 @@ def test_validate_all_uses_singular_copy_for_one_feature(tmp_path: Path):
     feature = root / "local_modules/local-math"
     link = root / "node_modules/local-math"
     link.parent.mkdir()
-    link.symlink_to(feature, target_is_directory=True)
+    make_directory_symlink(link, feature)
 
     code, stdout, stderr = invoke(root, ["validate", "--all"])
 

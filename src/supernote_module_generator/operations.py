@@ -39,6 +39,7 @@ from .models import (
     ValidationResult,
     WarningInfo,
 )
+from .platform_tools import gradle_wrapper_command, gradle_wrapper_path
 from .naming import (
     normalize_description,
     validate_android_namespace,
@@ -210,10 +211,10 @@ class OperationService:
         self._run([manager, "--version"], timeout=10, phase="preflight")
 
     def _health_check_build(self) -> None:
-        gradle = self.root / "android" / "gradlew"
+        gradle = gradle_wrapper_path(self.root)
         if not gradle.is_file():
             raise ConfigurationError("Android Gradle wrapper is not available")
-        command = [str(gradle), "--version"] if os.access(gradle, os.X_OK) else ["sh", str(gradle), "--version"]
+        command = gradle_wrapper_command(gradle, ["--version"])
         self._run(command, cwd=self.root / "android", timeout=120, phase="preflight")
 
     def _reconcile(self, command: List[str]) -> bool:

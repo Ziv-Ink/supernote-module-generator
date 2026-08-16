@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -11,6 +14,7 @@ from supernote_module_generator.cli import main
 from supernote_module_generator.feature_cli_operations import FeatureCliOperationService
 from supernote_module_generator.operation_lock import (
     PluginBusyError,
+    _windows_mutex_name,
     plugin_operation_lock,
 )
 from supernote_module_generator.transaction import JOURNAL_NAME, Transaction
@@ -48,6 +52,45 @@ def test_plugin_directory_lock_is_nonblocking_and_leaves_no_artifact(tmp_path: P
                 pass
 
     assert not list(root.glob("*lock*"))
+
+
+def test_windows_mutex_identity_is_stable_and_contains_no_plugin_path(tmp_path: Path):
+    identity = str(tmp_path.resolve())
+
+    first = _windows_mutex_name(identity)
+    second = _windows_mutex_name(identity)
+
+    assert first == second
+    assert first.startswith("Local\\SupernoteModuleGenerator-")
+    assert identity not in first
+
+
+def test_operation_lock_module_import_does_not_require_fcntl(tmp_path: Path):
+    source = Path(__file__).parents[1] / "src"
+    script = (
+        "import builtins\n"
+        "original = builtins.__import__\n"
+        "def guarded(name, *args, **kwargs):\n"
+        "    if name == 'fcntl':\n"
+        "        raise ModuleNotFoundError('simulated Windows host')\n"
+        "    return original(name, *args, **kwargs)\n"
+        "builtins.__import__ = guarded\n"
+        "import supernote_module_generator.operation_lock\n"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_overlapping_cli_command_fails_cleanly_before_mutation(tmp_path: Path):

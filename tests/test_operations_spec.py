@@ -12,6 +12,7 @@ from supernote_module_generator.cli import main
 from supernote_module_generator.errors import SubprocessFailure
 from supernote_module_generator.feature_cli_operations import FeatureCliOperationService
 from supernote_module_generator.feature_workflows import FeatureDecisionCollector
+from supernote_module_generator.platform_tools import gradle_wrapper_path
 from supernote_module_generator.plugin_build_integration import set_runtime_wiring
 from supernote_module_generator.transaction import Transaction, recover_pending
 
@@ -174,7 +175,7 @@ def test_update_preserves_both_source_roots_and_deleted_starter(tmp_path: Path):
 
 @pytest.mark.parametrize("option", ["--skip-install", "--package-manager=npm"])
 def test_update_rejects_dependency_options_when_refresh_is_not_required(
-    tmp_path: Path, option: str
+    tmp_path: Path, option: str, make_directory_symlink
 ):
     root = plugin(tmp_path)
     assert invoke(
@@ -184,7 +185,7 @@ def test_update_rejects_dependency_options_when_refresh_is_not_required(
     feature = root / "local_modules/current"
     link = root / "node_modules/current"
     link.parent.mkdir()
-    link.symlink_to(feature, target_is_directory=True)
+    make_directory_symlink(link, feature)
 
     code, _, stderr = invoke(root, ["update", "current", option, "--yes"])
 
@@ -224,6 +225,10 @@ def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
         assert path.read_bytes() == content
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX fake npm; byte-decoding behavior has a platform-neutral subprocess test",
+)
 def test_non_utf8_dependency_failure_is_structured_and_restores_exact_parents(
     tmp_path: Path, monkeypatch
 ):
@@ -402,7 +407,7 @@ def test_empty_validation_rejects_leftover_package_registration_alone(
 
 
 def test_feature_validation_rejects_missing_main_application_registration(
-    tmp_path: Path,
+    tmp_path: Path, make_directory_symlink
 ):
     root = plugin(tmp_path)
     application = main_application(root)
@@ -417,7 +422,7 @@ def test_feature_validation_rejects_missing_main_application_registration(
     (root / "android/app/build.gradle").write_bytes(app_build)
     link = root / "node_modules/safe"
     link.parent.mkdir()
-    link.symlink_to(root / "local_modules/safe", target_is_directory=True)
+    make_directory_symlink(link, root / "local_modules/safe")
 
     code, _, stderr = invoke(root, ["validate", "safe"])
 
@@ -539,11 +544,21 @@ def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
     tmp_path: Path,
 ):
     root = plugin(tmp_path)
-    gradle = root / "android/gradlew"
-    gradle.write_text(
-        '#!/bin/sh\ncase "$1" in\n  --version|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n'
-    )
-    gradle.chmod(0o755)
+    gradle = gradle_wrapper_path(root)
+    if os.name == "nt":
+        gradle.write_text(
+            "@echo off\r\n"
+            'if "%1"=="--version" exit /b 0\r\n'
+            'if "%1"==":app:assembleDebug" exit /b 0\r\n'
+            "exit /b 1\r\n",
+            encoding="utf-8",
+        )
+    else:
+        gradle.write_text(
+            '#!/bin/sh\ncase "$1" in\n  --version|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
+            encoding="utf-8",
+        )
+        gradle.chmod(0o755)
 
     code, stdout, stderr = invoke(
         root,
@@ -554,13 +569,15 @@ def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
     assert 'Added and built feature "built"' in stdout
 
 
-def test_add_rejects_local_modules_symlink_that_escapes_plugin_root(tmp_path: Path):
+def test_add_rejects_local_modules_symlink_that_escapes_plugin_root(
+    tmp_path: Path, make_directory_symlink
+):
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()
     root = plugin(plugin_root)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (root / "local_modules").symlink_to(outside, target_is_directory=True)
+    make_directory_symlink(root / "local_modules", outside)
 
     code, _, stderr = invoke(
         root,

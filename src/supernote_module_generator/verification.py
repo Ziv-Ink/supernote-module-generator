@@ -11,6 +11,7 @@ from . import binding_codegen
 from .config import METADATA_FILE, native_class_prefix
 from .integration import marker
 from .models import SubprocessError, ValidationResult
+from .platform_tools import gradle_wrapper_command, gradle_wrapper_path
 from .project import (
     ManagedModule,
     android_settings,
@@ -235,8 +236,8 @@ def build_android(
     verbose: bool,
     stream: Optional[Callable[[str, str], None]] = None,
 ) -> Tuple[bool, Optional[SubprocessError], int]:
-    gradle = root / "android" / "gradlew"
-    command = [str(gradle), ":app:assembleDebug"] if gradle.stat().st_mode & 0o111 else ["sh", str(gradle), ":app:assembleDebug"]
+    gradle = gradle_wrapper_path(root)
+    command = gradle_wrapper_command(gradle, [":app:assembleDebug"])
     try:
         result = run_process(
             command,

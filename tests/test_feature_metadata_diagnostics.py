@@ -104,7 +104,7 @@ def test_wrong_kind_json_result_is_not_silently_treated_as_no_features(tmp_path:
 
 
 def test_escaping_managed_feature_symlink_is_rejected_without_following_it(
-    tmp_path: Path,
+    tmp_path: Path, make_directory_symlink
 ):
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()
@@ -112,7 +112,7 @@ def test_escaping_managed_feature_symlink_is_rejected_without_following_it(
     feature = _feature(root)
     outside = tmp_path / "outside-feature"
     feature.rename(outside)
-    feature.symlink_to(outside, target_is_directory=True)
+    make_directory_symlink(feature, outside)
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("outside stays untouched\n", encoding="utf-8")
 
