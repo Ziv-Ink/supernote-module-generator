@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import textwrap
 
 from supernote_module_generator.feature_model import (
@@ -126,6 +127,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
     assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
+    assert 'buildStagingDirectory file("${rootProject.projectDir}/.cxx/snv2")' in gradle
+    assert "? ['py', '-3']" in gradle
+    assert ": ['python3']" in gradle
+    assert "*supernotePythonCommand" in gradle
     assert 'optionPrefix = "supernoteFeatureRoot_"' in processor
     assert "toSortedMap()" in processor
     assert "catch (_: SupernoteSourceDiagnostic)" in processor
@@ -260,7 +265,7 @@ def test_activation_can_restore_previous_shared_component(tmp_path: Path):
 def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     tmp_path: Path,
 ):
-    compiler = shutil.which("c++")
+    compiler = shutil.which("c++") or shutil.which("clang++")
     assert compiler is not None
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_contract.cpp"
@@ -492,12 +497,15 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
         ),
         encoding="utf-8",
     )
-    executable = tmp_path / "runtime_contract"
+    executable = tmp_path / (
+        "runtime_contract.exe" if os.name == "nt" else "runtime_contract"
+    )
+    thread_flags = [] if os.name == "nt" else ["-pthread"]
     compiled = subprocess.run(
         [
             compiler,
             "-std=c++23",
-            "-pthread",
+            *thread_flags,
             str(generated / "src/runtime_services.cpp"),
             str(harness),
             "-I",
@@ -517,7 +525,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
 
 
 def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
-    compiler = shutil.which("c++")
+    compiler = shutil.which("c++") or shutil.which("clang++")
     assert compiler is not None
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_allocation_failure.cpp"
@@ -526,6 +534,7 @@ def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
             r"""
             #include "runtime_services.hpp"
 
+            #include <array>
             #include <atomic>
             #include <cstdlib>
             #include <memory>
@@ -596,12 +605,17 @@ def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    executable = tmp_path / "runtime_allocation_failure"
+    executable = tmp_path / (
+        "runtime_allocation_failure.exe"
+        if os.name == "nt"
+        else "runtime_allocation_failure"
+    )
+    thread_flags = [] if os.name == "nt" else ["-pthread"]
     compiled = subprocess.run(
         [
             compiler,
             "-std=c++23",
-            "-pthread",
+            *thread_flags,
             str(generated / "src/runtime_services.cpp"),
             str(harness),
             "-I",
@@ -639,7 +653,7 @@ def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: 
     environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(generated / "common_codegen.py"),
             "--plugin-root",
             str(tmp_path),
@@ -701,7 +715,7 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(generated / "common_codegen.py"),
             "--plugin-root",
             str(tmp_path),
@@ -772,7 +786,7 @@ std::int32_t pageCount(std::int32_t page) { return page; }
     environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(generated / "common_codegen.py"),
             "--plugin-root",
             str(tmp_path),

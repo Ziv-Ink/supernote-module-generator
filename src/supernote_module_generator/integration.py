@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import METADATA_FILES, gradle_project_name, normalize_backend
 from .errors import ConfigurationError, FilesystemError, GeneratorError
+from .platform_tools import host_command
 from .subprocesses import run_process
 
 LOCAL_MODULES_DIR = "local_modules"
@@ -189,10 +190,11 @@ def choose_package_manager(root: Path, requested: str | None, *, interactive: bo
 
 
 def _run_package_manager(command: list[str], root: Path, *, verbose: bool) -> subprocess.CompletedProcess[str]:
+    resolved_command = [host_command(command[0]), *command[1:]]
     if verbose:
-        print("Running: " + shlex.join(command))
+        print("Running: " + shlex.join(resolved_command))
     try:
-        result = run_process(command, cwd=root, timeout=600)
+        result = run_process(resolved_command, cwd=root, timeout=600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GeneratorError(f"Could not run {command[0]}: {exc}") from exc
     if verbose:

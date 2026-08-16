@@ -148,5 +148,6 @@ def test_marked_cpp_boundary_error_has_source_preflight_classification(tmp_path:
     assert code == 1
     assert result["error"]["kind"] == "invalid_source"
     assert result["error"]["phase"] == "preflight"
-    assert "android/src/main/cpp/Safe.cpp:2" in result["error"]["message"]
+    source_location = str(Path("android/src/main/cpp/Safe.cpp")) + ":2"
+    assert source_location in result["error"]["message"]
     assert "raw pointers are not supported" in result["error"]["message"]

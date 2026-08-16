@@ -101,8 +101,16 @@ val generateSupernoteBindings = tasks.register<Exec>("generateSupernoteBindings"
   outputs.dir(layout.buildDirectory.dir("generated/supernote"))
   outputs.file(file("../index.d.ts"))
   workingDir(projectDir.parentFile)
+  val pythonOverride = System.getenv("SUPERNOTE_PYTHON")
+  val pythonCommand = if (pythonOverride != null) {
+    listOf(pythonOverride)
+  } else if (System.getProperty("os.name").lowercase().contains("windows")) {
+    listOf("py", "-3")
+  } else {
+    listOf("python3")
+  }
   commandLine(
-    System.getenv("SUPERNOTE_PYTHON") ?: "python3",
+    *pythonCommand.toTypedArray(),
     "-B",
     file(".supernote-module/codegen.py").absolutePath,
     "--module-root",

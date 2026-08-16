@@ -5,6 +5,7 @@ from pathlib import Path
 from supernote_module_generator.platform_tools import (
     gradle_wrapper_command,
     gradle_wrapper_path,
+    host_command,
     ndk_compiler_path,
 )
 
@@ -56,3 +57,15 @@ def test_ndk_compiler_resolution_uses_windows_executable_suffix(tmp_path: Path):
         "clang",
         platform_name="posix",
     ) is None
+
+
+def test_windows_host_command_uses_discovered_command_shim(monkeypatch):
+    monkeypatch.setattr(
+        "supernote_module_generator.platform_tools.shutil.which",
+        lambda command: rf"C:\Program Files\nodejs\{command}.CMD",
+    )
+
+    assert host_command("npm", platform_name="nt") == (
+        r"C:\Program Files\nodejs\npm.CMD"
+    )
+    assert host_command("npm", platform_name="posix") == "npm"

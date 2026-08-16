@@ -161,6 +161,7 @@ android {{
         cmake {{
             path file('CMakeLists.txt')
             version '3.22.1'
+            buildStagingDirectory file("${{rootProject.projectDir}}/.cxx/snv2")
         }}
     }}
     buildFeatures {{
@@ -208,7 +209,12 @@ kotlin {{
     jvmToolchain(17)
 }}
 
-def supernotePython = System.getenv('SUPERNOTE_PYTHON') ?: 'python3'
+def supernotePythonOverride = System.getenv('SUPERNOTE_PYTHON')
+def supernotePythonCommand = supernotePythonOverride
+    ? [supernotePythonOverride]
+    : (System.getProperty('os.name').toLowerCase().contains('windows')
+        ? ['py', '-3']
+        : ['python3'])
 def supernoteCommonScript = file('common_codegen.py')
 def supernoteTypescriptOutputs = {json.dumps([
         f"${{supernotePluginRoot}}/local_modules/{entry.feature.npm_name}/index.d.ts"
@@ -229,7 +235,7 @@ def supernoteTypescriptOutputs = {json.dumps([
         outputs.dir(layout.buildDirectory.dir("generated/supernote/${{variantName}}"))
         outputs.files(supernoteTypescriptOutputs)
         commandLine(
-            supernotePython,
+            *supernotePythonCommand,
             supernoteCommonScript.absolutePath,
             '--plugin-root',
             supernotePluginRoot.absolutePath,
@@ -1095,16 +1101,21 @@ void RuntimeSession::remove_feature(SessionId feature_id) noexcept {
 
 void RuntimeSession::invalidate() noexcept {
   if (!active_.exchange(false, std::memory_order_acq_rel)) return;
-  decltype(features_) features;
   {
     std::lock_guard lock(mutex_);
-    features.swap(features_);
     plugin_class_loader_.reset();
     platform_context_.reset();
     scheduler_ = {};
   }
-  for (auto &[id, feature] : features) {
-    (void)id;
+  for (;;) {
+    std::shared_ptr<FeatureSession> feature;
+    {
+      std::lock_guard lock(mutex_);
+      if (features_.empty()) break;
+      auto current = features_.begin();
+      feature = std::move(current->second);
+      features_.erase(current);
+    }
     feature->close_runtime();
   }
 }
@@ -1298,20 +1309,23 @@ void FeatureSession::close_feature() noexcept { close(false); }
 void FeatureSession::close_runtime() noexcept { close(true); }
 
 void FeatureSession::close(bool runtime_teardown) noexcept {
-  decltype(pending_) pending;
-  decltype(services_) services;
   {
     std::lock_guard lock(mutex_);
     if (state() != FeatureState::ACTIVE) return;
     state_.store(FeatureState::CLOSING, std::memory_order_release);
-    pending.swap(pending_);
-    services.swap(services_);
   }
 
   auto runtime = runtime_.lock();
   if (!runtime_teardown && runtime) runtime->remove_feature(id_);
-  for (auto &[id, operation] : pending) {
-    (void)id;
+  for (;;) {
+    std::shared_ptr<PendingOperation> operation;
+    {
+      std::lock_guard lock(mutex_);
+      if (pending_.empty()) break;
+      auto current = pending_.begin();
+      operation = std::move(current->second);
+      pending_.erase(current);
+    }
     const auto outcome = runtime_teardown
         ? OperationWinner::CANCELLED_BY_RUNTIME
         : OperationWinner::CANCELLED_BY_FEATURE;
@@ -1325,8 +1339,15 @@ void FeatureSession::close(bool runtime_teardown) noexcept {
       runtime->schedule(std::move(rejection));
     }
   }
-  for (auto &[id, slot] : services) {
-    (void)id;
+  for (;;) {
+    std::shared_ptr<ServiceSlot> slot;
+    {
+      std::lock_guard lock(mutex_);
+      if (services_.empty()) break;
+      auto current = services_.begin();
+      slot = std::move(current->second);
+      services_.erase(current);
+    }
     std::shared_ptr<void> service;
     {
       std::lock_guard slot_lock(slot->mutex);

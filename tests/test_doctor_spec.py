@@ -273,7 +273,9 @@ def test_doctor_probes_the_daemon_java_home_reported_by_new_gradle(
     root = plugin(tmp_path)
     install_fake_sdk(tmp_path, monkeypatch)
     daemon_home = tmp_path / "jdk-11"
-    daemon_java = daemon_home / "bin/java"
+    daemon_java = daemon_home / "bin" / (
+        "java.exe" if os.name == "nt" else "java"
+    )
     daemon_java.parent.mkdir(parents=True)
     daemon_java.write_text("", encoding="utf-8")
     monkeypatch.setattr(

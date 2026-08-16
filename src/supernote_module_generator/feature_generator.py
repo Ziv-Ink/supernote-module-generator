@@ -13,6 +13,13 @@ from . import __version__
 from .feature_model import FeatureManifest, StarterFamily
 
 
+def _javascript_string(value: str) -> str:
+    """Render a deterministic single-quoted JavaScript string literal."""
+
+    body = json.dumps(value, ensure_ascii=False)[1:-1]
+    return "'" + body.replace(r'\"', '"').replace("'", r"\'") + "'"
+
+
 @dataclass(frozen=True)
 class FeatureConfig:
     output: Path
@@ -113,15 +120,16 @@ def stage_feature(
         _write(
             temporary,
             "index.js",
+            "/* global globalThis */\n"
             "export class SupernoteError extends Error {\n"
             "  constructor(code, message) {\n"
             "    super(message);\n"
             "    this.name = 'SupernoteError';\n"
-            "    Object.defineProperty(this, 'code', { value: code, enumerable: true });\n"
+            "    Object.defineProperty(this, 'code', {value: code, enumerable: true});\n"
             "  }\n"
             "}\n\n"
             "const ERROR_CONSTRUCTOR_PROPERTY = '__supernoteErrorConstructor';\n"
-            f"const INSTALL_ERROR = {json.dumps(config.public_name + ' is not installed in the Supernote V2 runtime')};\n\n"
+            f"const INSTALL_ERROR = {_javascript_string(config.public_name + ' is not installed in the Supernote V2 runtime')};\n\n"
             "function requireFeature() {\n"
             "  const runtime = globalThis."
             + global_name
@@ -129,7 +137,7 @@ def stage_feature(
             "  if (!runtime || typeof runtime.feature !== 'function') {\n"
             "    throw new Error(INSTALL_ERROR);\n"
             "  }\n"
-            f"  const value = runtime.feature({json.dumps(feature.feature_id)});\n"
+            f"  const value = runtime.feature({_javascript_string(feature.feature_id)});\n"
             "  if (value[ERROR_CONSTRUCTOR_PROPERTY] !== SupernoteError) {\n"
             "    Object.defineProperty(value, ERROR_CONSTRUCTOR_PROPERTY, {\n"
             "      configurable: true,\n"
@@ -144,11 +152,15 @@ def stage_feature(
             "  {},\n"
             "  {\n"
             "    get(_target, property) {\n"
-            "      if (property === ERROR_CONSTRUCTOR_PROPERTY) return undefined;\n"
+            "      if (property === ERROR_CONSTRUCTOR_PROPERTY) {\n"
+            "        return undefined;\n"
+            "      }\n"
             "      return requireFeature()[property];\n"
             "    },\n"
             "    has(_target, property) {\n"
-            "      if (property === ERROR_CONSTRUCTOR_PROPERTY) return false;\n"
+            "      if (property === ERROR_CONSTRUCTOR_PROPERTY) {\n"
+            "        return false;\n"
+            "      }\n"
             "      return property in requireFeature();\n"
             "    },\n"
             "    ownKeys() {\n"
@@ -157,12 +169,14 @@ def stage_feature(
             "      );\n"
             "    },\n"
             "    getOwnPropertyDescriptor(_target, property) {\n"
-            "      if (property === ERROR_CONSTRUCTOR_PROPERTY) return undefined;\n"
+            "      if (property === ERROR_CONSTRUCTOR_PROPERTY) {\n"
+            "        return undefined;\n"
+            "      }\n"
             "      const descriptor = Object.getOwnPropertyDescriptor(\n"
             "        requireFeature(),\n"
             "        property,\n"
             "      );\n"
-            "      return descriptor ? { ...descriptor, configurable: true } : undefined;\n"
+            "      return descriptor ? {...descriptor, configurable: true} : undefined;\n"
             "    },\n"
             "  },\n"
             ");\n\n"

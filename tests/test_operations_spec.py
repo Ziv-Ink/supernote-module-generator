@@ -77,7 +77,7 @@ def test_add_scaffolds_selected_families_without_backend_metadata(
     )
 
     assert code == 0, stderr
-    assert stdout.startswith('✓ Added feature "document"\n')
+    assert stdout.splitlines()[0].endswith('Added feature "document"')
     feature = root / "local_modules/document"
     metadata = json.loads((feature / ".supernote-module.json").read_text())
     assert "type" not in metadata

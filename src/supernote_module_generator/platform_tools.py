@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 from typing import List, Optional, Sequence
 
 
@@ -23,9 +24,23 @@ def gradle_wrapper_command(
     """Build a command that can execute the host's Gradle wrapper."""
 
     host = os.name if platform_name is None else platform_name
-    if host == "nt" or os.access(wrapper, os.X_OK):
+    executable = bool(wrapper.stat().st_mode & 0o111) if host == "posix" else True
+    if host == "nt" or executable:
         return [str(wrapper), *arguments]
     return ["sh", str(wrapper), *arguments]
+
+
+def host_command(
+    command: str,
+    *,
+    platform_name: Optional[str] = None,
+) -> str:
+    """Return the directly executable host spelling for a command."""
+
+    host = os.name if platform_name is None else platform_name
+    if host != "nt":
+        return command
+    return shutil.which(command) or command
 
 
 def ndk_compiler_path(
