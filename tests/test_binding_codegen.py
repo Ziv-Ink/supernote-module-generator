@@ -1433,8 +1433,9 @@ class CounterFactory { public: CounterFactory(); };
             self.assertIn("generated TypeScript name 'CounterFactory'", message)
             self.assertIn("object export 'Counter'", message)
             self.assertIn("export 'CounterFactory'", message)
-            self.assertIn("model/Counter.hpp:1", message)
-            self.assertIn("model/Counter.hpp:3", message)
+            relative_header = str(Path("model/Counter.hpp"))
+            self.assertIn(f"{relative_header}:1", message)
+            self.assertIn(f"{relative_header}:3", message)
 
     def test_v1_object_marker_and_alias_syntax_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -39,6 +39,26 @@ def registry(*names: str) -> PluginRuntimeRegistry:
     )
 
 
+def host_cxx_compiler():
+    candidates = [
+        os.environ.get("CXX"),
+        shutil.which("c++"),
+        shutil.which("clang++"),
+    ]
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles")
+        if program_files:
+            candidates.append(str(Path(program_files) / "LLVM/bin/clang++.exe"))
+    return next(
+        (
+            str(Path(candidate))
+            for candidate in candidates
+            if candidate and Path(candidate).is_file()
+        ),
+        None,
+    )
+
+
 def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
     for feature_count in (0, 1, 2, 32):
         generated = generate_plugin_runtime(
@@ -265,7 +285,7 @@ def test_activation_can_restore_previous_shared_component(tmp_path: Path):
 def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     tmp_path: Path,
 ):
-    compiler = shutil.which("c++") or shutil.which("clang++")
+    compiler = host_cxx_compiler()
     assert compiler is not None
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_contract.cpp"
@@ -525,7 +545,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
 
 
 def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
-    compiler = shutil.which("c++") or shutil.which("clang++")
+    compiler = host_cxx_compiler()
     assert compiler is not None
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_allocation_failure.cpp"
