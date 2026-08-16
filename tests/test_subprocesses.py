@@ -12,6 +12,23 @@ import pytest
 from supernote_module_generator.subprocesses import run_process
 
 
+def test_run_process_uses_the_resolved_host_command(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "supernote_module_generator.subprocesses.host_command",
+        lambda command: sys.executable if command == "python-shim" else command,
+    )
+
+    result = run_process(
+        ["python-shim", "-c", "print('resolved')"],
+        cwd=tmp_path,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "resolved\n"
+    assert result.args[0] == sys.executable
+
+
 def _is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)

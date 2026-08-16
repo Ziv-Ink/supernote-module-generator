@@ -9,6 +9,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional, Sequence
 
+from .platform_tools import host_command
+
 
 def _popen_options() -> dict[str, object]:
     if os.name == "posix":
@@ -98,8 +100,11 @@ def run_process(
     timeout: int,
     stream: Optional[Callable[[str, str], None]] = None,
 ) -> subprocess.CompletedProcess[str]:
+    resolved_command = list(command)
+    if resolved_command:
+        resolved_command[0] = host_command(resolved_command[0])
     process = subprocess.Popen(
-        list(command),
+        resolved_command,
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -123,7 +128,7 @@ def run_process(
             _stop_tree(process, graceful=True)
             raise
         return subprocess.CompletedProcess(
-            list(command), process.returncode, stdout, stderr
+            resolved_command, process.returncode, stdout, stderr
         )
 
     stdout_parts: List[str] = []
@@ -166,7 +171,7 @@ def run_process(
         for thread in threads:
             thread.join(timeout=2)
     return subprocess.CompletedProcess(
-        list(command),
+        resolved_command,
         return_code,
         "".join(stdout_parts),
         "".join(stderr_parts),
