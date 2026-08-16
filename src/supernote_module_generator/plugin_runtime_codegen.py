@@ -82,8 +82,12 @@ foreach(SUPERNOTE_NATIVE_ROOT IN LISTS SUPERNOTE_NATIVE_ROOTS)
       "${{SUPERNOTE_NATIVE_ROOT}}/*.cxx")
   list(APPEND SUPERNOTE_USER_SOURCES ${{SUPERNOTE_FEATURE_SOURCES}})
 endforeach()
+if(NOT DEFINED SUPERNOTE_GENERATED_ROOT)
+  set(SUPERNOTE_GENERATED_ROOT
+      "${{CMAKE_CURRENT_LIST_DIR}}/build/generated/supernote")
+endif()
 file(GLOB SUPERNOTE_GENERATED_BINDINGS CONFIGURE_DEPENDS
-    "${{CMAKE_CURRENT_LIST_DIR}}/build/generated/supernote/${{SUPERNOTE_VARIANT}}/jni/*.cpp")
+    "${{SUPERNOTE_GENERATED_ROOT}}/${{SUPERNOTE_VARIANT}}/jni/*.cpp")
 if(NOT SUPERNOTE_GENERATED_BINDINGS)
   message(FATAL_ERROR "Supernote generated JSI bindings are missing")
 endif()
@@ -160,7 +164,10 @@ android {{
         }}
         externalNativeBuild {{
             cmake {{
-                arguments '-DANDROID_STL=c++_shared'
+                arguments(
+                    '-DANDROID_STL=c++_shared',
+                    "-DSUPERNOTE_GENERATED_ROOT=${{layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}}",
+                )
             }}
         }}
     }}
@@ -253,6 +260,8 @@ def supernoteTypescriptOutputs = {json.dumps([
             supernotePluginRoot.absolutePath,
             '--runtime-root',
             projectDir.absolutePath,
+            '--build-root',
+            layout.buildDirectory.get().asFile.absolutePath,
             '--variant',
             variantName,
         )

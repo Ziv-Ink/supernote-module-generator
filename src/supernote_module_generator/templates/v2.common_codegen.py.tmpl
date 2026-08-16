@@ -34,17 +34,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plugin-root", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument("--build-root", type=Path)
     parser.add_argument("--variant", required=True)
     arguments = parser.parse_args()
     generate(
         arguments.plugin_root.resolve(),
         arguments.runtime_root.resolve(),
+        (
+            arguments.build_root.resolve()
+            if arguments.build_root is not None
+            else (arguments.runtime_root.resolve() / "build")
+        ),
         arguments.variant,
     )
     return 0
 
 
-def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
+def generate(
+    plugin_root: Path,
+    runtime_root: Path,
+    build_root: Path,
+    variant: str,
+) -> None:
     registry = json.loads(
         (runtime_root / "feature-registry.json").read_text(encoding="utf-8")
     )
@@ -54,8 +65,8 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
     if not isinstance(features, list):
         raise RuntimeError("feature registry has no feature list")
     manifest_root = (
-        runtime_root
-        / "build/generated/ksp"
+        build_root
+        / "generated/ksp"
         / variant
         / "resources/supernote/generated/manifests"
     )
@@ -73,7 +84,7 @@ def generate(plugin_root: Path, runtime_root: Path, variant: str) -> None:
     if unknown:
         raise RuntimeError("KSP emitted manifests for unknown features: " + ", ".join(unknown))
 
-    output_root = runtime_root / "build/generated/supernote" / variant
+    output_root = build_root / "generated/supernote" / variant
     semantic_registry = []
     generated_jni: dict[str, str] = {}
     generated_internal_headers: dict[str, str] = {}

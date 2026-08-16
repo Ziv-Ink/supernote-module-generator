@@ -154,6 +154,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
     assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
     assert 'file("${rootProject.projectDir}/.cxx/snv2")' in gradle
+    assert "-DSUPERNOTE_GENERATED_ROOT=${layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}" in gradle
+    assert "'--build-root'" in gradle
+    assert "layout.buildDirectory.get().asFile.absolutePath" in gradle
+    assert '"${SUPERNOTE_GENERATED_ROOT}/${SUPERNOTE_VARIANT}/jni/*.cpp"' in cmake
     assert "? ['py', '-3']" in gradle
     assert ": ['python3']" in gradle
     assert "*supernotePythonCommand" in gradle
