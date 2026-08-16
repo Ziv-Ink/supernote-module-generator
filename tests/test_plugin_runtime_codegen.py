@@ -149,7 +149,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
     assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
-    assert 'buildStagingDirectory file("${rootProject.projectDir}/.cxx/snv2")' in gradle
+    assert "def supernoteIsWindows" in gradle
+    assert "'supernote-v2/sn_supernote_runtime_" in gradle
+    assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
+    assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
+    assert 'file("${rootProject.projectDir}/.cxx/snv2")' in gradle
     assert "? ['py', '-3']" in gradle
     assert ": ['python3']" in gradle
     assert "*supernotePythonCommand" in gradle

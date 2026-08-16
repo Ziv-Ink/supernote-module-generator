@@ -139,6 +139,14 @@ def supernoteJvmRoots = [
 def supernoteNativeRoots = [
 {native_root_rows}
 ]
+def supernoteIsWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+def supernoteWindowsBuildRoot = new File(
+    System.getProperty('java.io.tmpdir'),
+    'supernote-v2/{component}',
+)
+if (supernoteIsWindows) {{
+    layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))
+}}
 
 android {{
     namespace 'supernote.generated.{component}'
@@ -161,7 +169,11 @@ android {{
         cmake {{
             path file('CMakeLists.txt')
             version '3.22.1'
-            buildStagingDirectory file("${{rootProject.projectDir}}/.cxx/snv2")
+            buildStagingDirectory(
+                supernoteIsWindows
+                    ? new File(supernoteWindowsBuildRoot, 'cxx')
+                    : file("${{rootProject.projectDir}}/.cxx/snv2")
+            )
         }}
     }}
     buildFeatures {{
@@ -212,7 +224,7 @@ kotlin {{
 def supernotePythonOverride = System.getenv('SUPERNOTE_PYTHON')
 def supernotePythonCommand = supernotePythonOverride
     ? [supernotePythonOverride]
-    : (System.getProperty('os.name').toLowerCase().contains('windows')
+    : (supernoteIsWindows
         ? ['py', '-3']
         : ['python3'])
 def supernoteCommonScript = file('common_codegen.py')
