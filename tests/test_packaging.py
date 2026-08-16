@@ -42,6 +42,7 @@ def test_release_license_and_manifest_are_present():
     assert "recursive-include maintainers *.md" in manifest
     assert "recursive-include architecture *.md" in manifest
     assert "recursive-include tests" in manifest
+    assert "recursive-include src/supernote_module_generator/templates *" in manifest
 
 
 def test_root_readme_is_the_self_contained_pypi_description():

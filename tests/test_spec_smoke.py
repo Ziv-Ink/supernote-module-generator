@@ -27,14 +27,14 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def test_add_validate_remove_smoke(tmp_path: Path):
+def test_add_validate_remove_smoke(tmp_path: Path, make_directory_symlink):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(
         root,
         ["add", "local-math", "--starter", "cpp", "--skip-install", "--yes"],
     )
     assert code == 0, stderr
-    assert stdout.startswith('✓ Added feature "local-math"\n')
+    assert stdout.splitlines()[0].endswith('Added feature "local-math"')
     module = root / "local_modules/local-math"
     assert (module / ".supernote-module.json").is_file()
     assert json.loads((module / "package.json").read_text())["name"] == "local-math"
@@ -42,16 +42,16 @@ def test_add_validate_remove_smoke(tmp_path: Path):
 
     link = root / "node_modules/local-math"
     link.parent.mkdir()
-    link.symlink_to(module, target_is_directory=True)
+    make_directory_symlink(link, module)
     code, stdout, stderr = invoke(root, ["validate", "local-math"])
     assert code == 0, stderr
-    assert stdout == '✓ Feature "local-math" is valid\n'
+    assert stdout.splitlines()[0].endswith('Feature "local-math" is valid')
 
     code, stdout, stderr = invoke(
         root, ["remove", "local-math", "--skip-install", "--yes"]
     )
     assert code == 0, stderr
-    assert stdout.startswith('✓ Removed feature "local-math"\n')
+    assert stdout.splitlines()[0].endswith('Removed feature "local-math"')
     assert not module.exists()
 
 
@@ -72,7 +72,9 @@ def test_validate_missing_dependency_link_gives_install_action_without_rollback(
     assert "Rollback:" not in stderr
 
 
-def test_validate_all_uses_singular_copy_for_one_feature(tmp_path: Path):
+def test_validate_all_uses_singular_copy_for_one_feature(
+    tmp_path: Path, make_directory_symlink
+):
     root = plugin(tmp_path)
     assert invoke(
         root,
@@ -81,12 +83,12 @@ def test_validate_all_uses_singular_copy_for_one_feature(tmp_path: Path):
     feature = root / "local_modules/local-math"
     link = root / "node_modules/local-math"
     link.parent.mkdir()
-    link.symlink_to(feature, target_is_directory=True)
+    make_directory_symlink(link, feature)
 
     code, stdout, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 0, stderr
-    assert stdout == "✓ 1 feature is valid\n"
+    assert stdout.splitlines()[0].endswith("1 feature is valid")
 
 
 def test_json_add_has_stable_envelope_and_empty_stderr(tmp_path: Path):

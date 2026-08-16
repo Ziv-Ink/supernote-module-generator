@@ -91,6 +91,10 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
     package = json.loads((feature / "package.json").read_text())
 
     assert "globalThis.__supernoteV2" in index
+    assert index.startswith("/* global globalThis */\n")
+    assert "if (property === ERROR_CONSTRUCTOR_PROPERTY) return" not in index
+    assert "{...descriptor, configurable: true}" in index
+    assert '"supernote:feature:' not in index
     assert "runtime.feature(" in index
     assert "new Proxy(" in index
     assert package["main"] == "index.js"

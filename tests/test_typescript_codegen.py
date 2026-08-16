@@ -59,6 +59,8 @@ def test_typescript_uses_only_public_common_semantics_and_exact_value_mappings()
     assert "hidden" not in text
     assert "export class SupernoteError extends Error" in text
     assert 'readonly code: SupernoteErrorCode;' in text
+    assert "| 'RESOURCE_EXHAUSTED'" in text
+    assert '| "RESOURCE_EXHAUSTED"' not in text
 
 
 def test_typescript_generates_public_object_factory_and_explicit_members_only():

@@ -141,6 +141,7 @@ def test_plain_default_stays_dimless_and_inline_when_enter_accepts_it():
     assert stderr.getvalue() == "JavaScript name [Math]: \n"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX byte reader")
 def test_utf8_keyboard_input_is_read_as_one_unicode_scalar():
     read_descriptor, write_descriptor = os.pipe()
     try:

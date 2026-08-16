@@ -35,6 +35,7 @@ from .naming import infer_android_namespace, infer_javascript_name
 from .operation_lock import plugin_operation_lock
 from .project import managed_modules, resolve_plugin_root
 from .rendering import Renderer, TerminalCapabilities
+from .subprocesses import run_process
 from .transaction import recover_pending
 from .workflows import ReturnToMenu
 
@@ -296,14 +297,7 @@ def _exception_result(command: str, exc: Exception, debug: bool) -> CommandResul
 
 def _startup_reconcile(root: Path, command: List[str]) -> bool:
     try:
-        result = subprocess.run(
-            command,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
+        result = run_process(command, cwd=root, timeout=600)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0

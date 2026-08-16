@@ -3,7 +3,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import textwrap
+
+import pytest
 
 from supernote_module_generator.feature_model import (
     FeatureManifest,
@@ -36,6 +39,48 @@ def registry(*names: str) -> PluginRuntimeRegistry:
         generator_version="2.0.0.dev0",
         features=(entry(name) for name in names),
     )
+
+
+def host_cxx_compiler():
+    candidates = [
+        os.environ.get("CXX"),
+        shutil.which("c++"),
+        shutil.which("clang++"),
+    ]
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles")
+        if program_files:
+            candidates.append(str(Path(program_files) / "LLVM/bin/clang++.exe"))
+    return next(
+        (
+            str(Path(candidate))
+            for candidate in candidates
+            if candidate and Path(candidate).is_file()
+        ),
+        None,
+    )
+
+
+def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
+    for feature_count in (0, 1, 2, 32):
+        generated = generate_plugin_runtime(
+            tmp_path / str(feature_count),
+            registry(*(f"feature{index}" for index in range(feature_count))),
+        )
+        gradle = (generated / "build.gradle").read_text()
+        root_options = [
+            line.strip()
+            for line in gradle.splitlines()
+            if line.strip().startswith("arg('supernoteFeatureRoot_")
+        ]
+
+        assert len(root_options) == feature_count
+        assert "supernoteFeatureRoots" not in gradle
+        for index, option in enumerate(root_options):
+            assert option.startswith(
+                f"arg('supernoteFeatureRoot_{index:08d}', "
+            )
+            assert "\\tlocal_modules/" in option
 
 
 def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Path):
@@ -97,7 +142,28 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "**/libreactnative.so" in gradle
     assert "local_modules/@local/alpha/android/src/main/java" in gradle
     assert "local_modules/@local/beta/android/src/main/java" in gradle
-    assert "supernoteFeatureRoots" in gradle
+    assert "supernoteFeatureRoots" not in gradle
+    assert "arg('supernoteFeatureRoot_00000000'" in gradle
+    assert "arg('supernoteFeatureRoot_00000001'" in gradle
+    assert "supernote:feature:" in gradle
+    assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
+    assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
+    assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
+    assert "def supernoteIsWindows" in gradle
+    assert "'supernote-v2/sn_supernote_runtime_" in gradle
+    assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
+    assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
+    assert 'file("${rootProject.projectDir}/.cxx/snv2")' in gradle
+    assert "-DSUPERNOTE_GENERATED_ROOT=${layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}" in gradle
+    assert "'--build-root'" in gradle
+    assert "layout.buildDirectory.get().asFile.absolutePath" in gradle
+    assert 'file(TO_CMAKE_PATH "${SUPERNOTE_GENERATED_ROOT}"' in cmake
+    assert '"${SUPERNOTE_GENERATED_ROOT}/${SUPERNOTE_VARIANT}/jni/*.cpp"' in cmake
+    assert "? ['py', '-3']" in gradle
+    assert ": ['python3']" in gradle
+    assert "*supernotePythonCommand" in gradle
+    assert 'optionPrefix = "supernoteFeatureRoot_"' in processor
+    assert "toSortedMap()" in processor
     assert "catch (_: SupernoteSourceDiagnostic)" in processor
     assert "throw SupernoteSourceDiagnostic()" in processor
     assert "throw IllegalArgumentException(message)" not in processor
@@ -230,8 +296,9 @@ def test_activation_can_restore_previous_shared_component(tmp_path: Path):
 def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     tmp_path: Path,
 ):
-    compiler = shutil.which("c++")
-    assert compiler is not None
+    compiler = host_cxx_compiler()
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the runtime contract")
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_contract.cpp"
     harness.write_text(
@@ -239,6 +306,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
             r"""
             #include "runtime_services.hpp"
 
+            #include <array>
             #include <atomic>
             #include <chrono>
             #include <condition_variable>
@@ -461,12 +529,15 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
         ),
         encoding="utf-8",
     )
-    executable = tmp_path / "runtime_contract"
+    executable = tmp_path / (
+        "runtime_contract.exe" if os.name == "nt" else "runtime_contract"
+    )
+    thread_flags = [] if os.name == "nt" else ["-pthread"]
     compiled = subprocess.run(
         [
             compiler,
             "-std=c++23",
-            "-pthread",
+            *thread_flags,
             str(generated / "src/runtime_services.cpp"),
             str(harness),
             "-I",
@@ -485,6 +556,128 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     assert executed.returncode == 0, executed.stderr
 
 
+def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
+    compiler = host_cxx_compiler()
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the allocation harness")
+    generated = generate_plugin_runtime(tmp_path, registry("alpha"))
+    harness = tmp_path / "runtime_allocation_failure.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            r"""
+            #include "runtime_services.hpp"
+
+            #include <array>
+            #include <atomic>
+            #include <cstdlib>
+            #include <memory>
+            #include <new>
+            #include <string_view>
+            #include <vector>
+
+            namespace {
+            std::atomic<bool> fail_next{false};
+            struct LargeCleanup {
+              std::array<unsigned char, 256> storage{};
+              void operator()() const noexcept {}
+            };
+            }
+
+            void* operator new(std::size_t size) {
+              if (fail_next.exchange(false, std::memory_order_acq_rel)) {
+                throw std::bad_alloc();
+              }
+              if (void* value = std::malloc(size)) return value;
+              throw std::bad_alloc();
+            }
+
+            void operator delete(void* value) noexcept { std::free(value); }
+            void operator delete(void* value, std::size_t) noexcept {
+              std::free(value);
+            }
+
+            int main(int argc, char** argv) {
+              if (argc != 2) return 2;
+              std::set_terminate([] { std::_Exit(86); });
+              using namespace supernote::runtime;
+              std::vector<RuntimeSession::JsTask> queue;
+              auto runtime = RuntimeSession::create(
+                  [&](RuntimeSession::JsTask task) {
+                    queue.push_back(std::move(task));
+                  });
+              auto cleanup = std::make_shared<DeferredDestruction>();
+              auto feature = FeatureSession::create(runtime, cleanup);
+              const std::string_view mode(argv[1]);
+
+              if (mode == "schedule") {
+                fail_next = true;
+                if (runtime->schedule([](void*) {})) return 10;
+              } else if (mode == "submit-large") {
+                fail_next = true;
+                if (cleanup->submit(LargeCleanup{})) return 12;
+              } else if (mode == "invalidate") {
+                fail_next = true;
+                runtime->invalidate();
+              } else if (mode == "close-feature") {
+                if (!feature->accept([](void*) {})) return 11;
+                fail_next = true;
+                feature->close_feature();
+              } else if (mode == "close-service") {
+                auto service = feature->service<int>(
+                    "cpp:Service", [] { return std::make_shared<int>(7); });
+                fail_next = true;
+                feature->close_feature();
+              } else {
+                return 3;
+              }
+              runtime->invalidate();
+              cleanup->drain_and_shutdown();
+              return 0;
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    executable = tmp_path / (
+        "runtime_allocation_failure.exe"
+        if os.name == "nt"
+        else "runtime_allocation_failure"
+    )
+    thread_flags = [] if os.name == "nt" else ["-pthread"]
+    compiled = subprocess.run(
+        [
+            compiler,
+            "-std=c++23",
+            *thread_flags,
+            str(generated / "src/runtime_services.cpp"),
+            str(harness),
+            "-I",
+            str(generated / "src"),
+            "-o",
+            str(executable),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    for mode in (
+        "schedule",
+        "submit-large",
+        "invalidate",
+        "close-feature",
+        "close-service",
+    ):
+        executed = subprocess.run(
+            [str(executable), mode],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert executed.returncode == 0, f"{mode}: {executed.stderr}"
+
+
 def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: Path):
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     feature = tmp_path / "local_modules/@local/alpha"
@@ -493,7 +686,7 @@ def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: 
     environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(generated / "common_codegen.py"),
             "--plugin-root",
             str(tmp_path),
@@ -555,7 +748,7 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(generated / "common_codegen.py"),
             "--plugin-root",
             str(tmp_path),
@@ -626,7 +819,7 @@ std::int32_t pageCount(std::int32_t page) { return page; }
     environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(generated / "common_codegen.py"),
             "--plugin-root",
             str(tmp_path),

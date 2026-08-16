@@ -271,7 +271,9 @@ def test_guided_remove_offers_build_cleanup_with_a_safe_no_default(tmp_path: Pat
     assert (build / "proof.txt").read_text(encoding="utf-8") == "keep"
 
 
-def test_guided_validate_offers_android_build_with_a_safe_no_default(tmp_path: Path):
+def test_guided_validate_offers_android_build_with_a_safe_no_default(
+    tmp_path: Path, make_directory_symlink
+):
     root = plugin(tmp_path)
     assert main(
         ["add", "local-safe", "--starter", "cpp", "--skip-install", "--yes"],
@@ -283,7 +285,7 @@ def test_guided_validate_offers_android_build_with_a_safe_no_default(tmp_path: P
     feature = root / "local_modules/local-safe"
     link = root / "node_modules/local-safe"
     link.parent.mkdir()
-    link.symlink_to(feature, target_is_directory=True)
+    make_directory_symlink(link, feature)
     stdout = TtyStringIO()
     stderr = TtyStringIO()
 
