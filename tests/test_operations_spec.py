@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -217,8 +218,56 @@ def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
     assert "structural postconditions" in stderr
     assert not (root / "local_modules/broken").exists()
     assert not (root / "android/.supernote-module/v2-runtime").exists()
+    assert not (root / "local_modules").exists()
+    assert not (root / "android/.supernote-module").exists()
     for path, content in originals.items():
         assert path.read_bytes() == content
+
+
+def test_non_utf8_dependency_failure_is_structured_and_restores_exact_parents(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path, npm_lock=True)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    node = tools / "node"
+    npm = tools / "npm"
+    npm_state = tools / "npm-state"
+    node.write_text("#!/bin/sh\necho v20.0.0\n", encoding="utf-8")
+    npm.write_text(
+        f"#!/bin/sh\nif [ -f {str(npm_state)!r} ]; then exit 0; fi\n"
+        f"touch {str(npm_state)!r}\n"
+        "printf 'valid diagnostic\\n\\377invalid diagnostic\\n' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    node.chmod(0o755)
+    npm.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
+
+    code, stdout, stderr = invoke(
+        root,
+        [
+            "--json",
+            "add",
+            "broken",
+            "--starter",
+            "cpp",
+            "--package-manager",
+            "npm",
+            "--yes",
+        ],
+    )
+
+    payload = json.loads(stdout)
+    assert code == 1
+    assert stderr == ""
+    assert payload["error"]["kind"] == "install_dependency_failed"
+    assert payload["error"]["phase"] == "install_dependency"
+    assert payload["error"]["subprocess"]["exit_code"] == 1
+    assert "valid diagnostic" in payload["error"]["subprocess"]["relevant_lines"]
+    assert not (root / "local_modules").exists()
+    assert not (root / "android/.supernote-module").exists()
 
 
 def test_remove_dependency_failure_restores_feature_runtime_and_parent(

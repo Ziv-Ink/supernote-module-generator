@@ -54,12 +54,14 @@ def install_fake_sdk(tmp_path: Path, monkeypatch) -> Path:
 
 def successful_run(command, **kwargs):
     executable = Path(command[0]).name
+    if executable == "sh" and len(command) > 1:
+        executable = Path(command[1]).name
     output = {
         "node": "v20.0.0\n",
         "npm": "10.0.0\n",
         "yarn": "1.22.0\n",
         "java": "openjdk 17.0.12\n",
-        "gradlew": "Gradle 8.0\n",
+        "gradlew": "Gradle 8.13\nJVM: 17.0.12\n",
         "cmake": "cmake version 3.22.1\n",
         "clang": "clang version 18.0.0\n",
         "clang++": "clang version 18.0.0\n",
@@ -146,6 +148,83 @@ def test_nonzero_tool_probe_fails_doctor(tmp_path: Path, monkeypatch):
     assert result.doctor is not None
     cmake = next(check for check in result.doctor.checks if check.id == "cmake")
     assert cmake.status == "failed"
+
+
+def test_doctor_fails_when_gradle_uses_java_older_than_path_java(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    install_fake_sdk(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "supernote_module_generator.doctor.shutil.which",
+        lambda name: f"/tools/{name}",
+    )
+
+    def run(command, **kwargs):
+        if any(Path(part).name == "gradlew" for part in command):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "Gradle 8.13\nJVM: 11.0.31\n",
+                "",
+            )
+        return successful_run(command, **kwargs)
+
+    result = DoctorService(root, renderer(), run=run).execute("plugin")
+
+    assert result.exit_code == 1
+    assert result.doctor is not None
+    shell_java = next(check for check in result.doctor.checks if check.id == "java")
+    gradle_java = next(
+        check for check in result.doctor.checks if check.id == "gradle_jvm"
+    )
+    assert shell_java.status == "passed"
+    assert shell_java.detected_version == "openjdk 17.0.12"
+    assert gradle_java.status == "failed"
+    assert gradle_java.detected_version == "11.0.31"
+    assert "JAVA_HOME" in gradle_java.message
+
+
+def test_doctor_probes_the_daemon_java_home_reported_by_new_gradle(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    install_fake_sdk(tmp_path, monkeypatch)
+    daemon_home = tmp_path / "jdk-11"
+    daemon_java = daemon_home / "bin/java"
+    daemon_java.parent.mkdir(parents=True)
+    daemon_java.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "supernote_module_generator.doctor.shutil.which",
+        lambda name: f"/tools/{name}",
+    )
+
+    def run(command, **kwargs):
+        if any(Path(part).name == "gradlew" for part in command):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "Gradle 8.13\n"
+                "Launcher JVM: 25.0.3\n"
+                f"Daemon JVM: {daemon_home} (from org.gradle.java.home)\n",
+                "",
+            )
+        if Path(command[0]) == daemon_java:
+            return subprocess.CompletedProcess(
+                command, 0, "openjdk 11.0.31\n", ""
+            )
+        return successful_run(command, **kwargs)
+
+    result = DoctorService(root, renderer(), run=run).execute("plugin")
+
+    assert result.exit_code == 1
+    assert result.doctor is not None
+    gradle_java = next(
+        check for check in result.doctor.checks if check.id == "gradle_jvm"
+    )
+    assert gradle_java.detected_version == "openjdk 11.0.31"
+    assert gradle_java.path == str(daemon_java)
+    assert gradle_java.status == "failed"
 
 
 def test_plain_doctor_emits_one_final_report_without_progress_noise(

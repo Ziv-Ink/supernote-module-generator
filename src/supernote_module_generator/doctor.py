@@ -27,6 +27,31 @@ def _version_tuple(value: Optional[str]) -> Tuple[int, ...]:
     return parts
 
 
+def _gradle_version(output: str) -> Optional[str]:
+    match = re.search(r"^Gradle\s+([^\s]+)", output, flags=re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _gradle_jvm_lines(output: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return an effective version and daemon Java home when Gradle reports them."""
+    legacy = re.search(r"^JVM:\s*([^\s]+)", output, flags=re.MULTILINE)
+    launcher = re.search(r"^Launcher JVM:\s*([^\s]+)", output, flags=re.MULTILINE)
+    daemon = re.search(r"^Daemon JVM:\s*(.+)$", output, flags=re.MULTILINE)
+    daemon_home = None
+    if daemon:
+        value = daemon.group(1).strip()
+        value = re.sub(r"\s+\((?:from|no JDK specified).*$", "", value)
+        if value and (
+            value.startswith(("/", "~", "."))
+            or re.match(r"^[A-Za-z]:[\\/]", value)
+        ):
+            daemon_home = value
+    return (
+        legacy.group(1) if legacy else launcher.group(1) if launcher else None,
+        daemon_home,
+    )
+
+
 class DoctorService:
     def __init__(
         self,
@@ -137,8 +162,10 @@ class DoctorService:
     def _required_issue_next_action(
         failed: Sequence[DoctorCheckResult],
     ) -> str:
-        if len(failed) == 1 and failed[0].id == "gradle_wrapper":
-            if failed[0].path is None:
+        failed_ids = {check.id for check in failed}
+        if failed_ids in ({"gradle_wrapper"}, {"gradle_wrapper", "gradle_jvm"}):
+            wrapper = next(check for check in failed if check.id == "gradle_wrapper")
+            if wrapper.path is None:
                 return (
                     "Restore `android/gradlew`, make it executable, then rerun "
                     "`supernote-module doctor`."
@@ -154,12 +181,16 @@ class DoctorService:
 
     def _probe(self, command: Sequence[str], timeout: int = 10) -> Tuple[bool, Optional[str], str]:
         try:
-            if self.renderer.mode == "verbose" and self.run is subprocess.run:
+            if self.run is subprocess.run:
                 result = run_process(
                     command,
                     cwd=self.cwd,
                     timeout=timeout,
-                    stream=self._verbose_stream,
+                    stream=(
+                        self._verbose_stream
+                        if self.renderer.mode == "verbose"
+                        else None
+                    ),
                 )
             else:
                 result = self.run(
@@ -290,9 +321,10 @@ class DoctorService:
             gradle = root / "android" / ("gradlew.bat" if os.name == "nt" else "gradlew")
             if gradle.is_file():
                 command = [str(gradle), "--version"] if os.access(gradle, os.X_OK) else ["sh", str(gradle), "--version"]
-                passed, version, _ = self._probe(command, timeout=120)
+                passed, _, gradle_output = self._probe(command, timeout=120)
+                version = _gradle_version(gradle_output)
             else:
-                passed, version = False, None
+                passed, version, gradle_output = False, None, ""
             gradle_exists = gradle.is_file()
             gradle_check = DoctorCheckResult(
                 "gradle_wrapper",
@@ -309,6 +341,11 @@ class DoctorService:
                     else "The project Gradle wrapper is missing."
                 ),
             )
+            gradle_jvm_check = self._gradle_jvm_check(
+                gradle_output,
+                wrapper_passed=passed,
+                shell_java=java_check,
+            )
         else:
             gradle_check = DoctorCheckResult(
                 "gradle_wrapper",
@@ -319,7 +356,83 @@ class DoctorService:
                 None,
                 "The project Gradle wrapper is unavailable outside a plugin root.",
             )
-        return [java_check, sdk_check, gradle_check]
+            gradle_jvm_check = DoctorCheckResult(
+                "gradle_jvm",
+                "Gradle JVM",
+                "required",
+                "failed",
+                None,
+                None,
+                "The Gradle JVM is unavailable outside a plugin root.",
+            )
+        return [java_check, sdk_check, gradle_check, gradle_jvm_check]
+
+    def _gradle_jvm_check(
+        self,
+        output: str,
+        *,
+        wrapper_passed: bool,
+        shell_java: DoctorCheckResult,
+    ) -> DoctorCheckResult:
+        if not wrapper_passed:
+            return DoctorCheckResult(
+                "gradle_jvm",
+                "Gradle JVM",
+                "required",
+                "failed",
+                None,
+                None,
+                "The Gradle JVM could not be inspected because the wrapper failed.",
+            )
+        reported_version, daemon_home = _gradle_jvm_lines(output)
+        detected = reported_version
+        path = daemon_home
+        if daemon_home:
+            executable = Path(daemon_home).expanduser() / "bin" / (
+                "java.exe" if os.name == "nt" else "java"
+            )
+            passed, detected, _ = self._probe([str(executable), "--version"])
+            if not passed:
+                return DoctorCheckResult(
+                    "gradle_jvm",
+                    "Gradle JVM",
+                    "required",
+                    "failed",
+                    detected,
+                    str(executable),
+                    "Gradle reported a daemon JVM that could not be executed.",
+                )
+            path = str(executable)
+        if not detected:
+            return DoctorCheckResult(
+                "gradle_jvm",
+                "Gradle JVM",
+                "required",
+                "failed",
+                None,
+                shell_java.path,
+                "Gradle did not report the JVM that will run the Android build.",
+            )
+        if _version_tuple(detected) < (17,):
+            return DoctorCheckResult(
+                "gradle_jvm",
+                "Gradle JVM",
+                "required",
+                "failed",
+                detected,
+                path,
+                "The effective Gradle JVM is older than Java 17; check "
+                "JAVA_HOME and org.gradle.java.home.",
+            )
+        return DoctorCheckResult(
+            "gradle_jvm",
+            "Gradle JVM",
+            "required",
+            "passed",
+            detected,
+            path,
+            "The effective Gradle JVM is Java 17 or newer.",
+        )
 
     def _native_checks(self) -> List[DoctorCheckResult]:
         cmake = self._tool_check("cmake", "CMake", "cmake")

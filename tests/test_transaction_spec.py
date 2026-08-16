@@ -28,6 +28,25 @@ def test_rollback_restores_files_and_removes_created_tree(tmp_path: Path):
     assert not (tmp_path / JOURNAL_NAME).exists()
 
 
+def test_rollback_removes_only_empty_generator_created_parent_directories(
+    tmp_path: Path,
+):
+    empty_parent = tmp_path / "local_modules"
+    preserved_parent = tmp_path / "android/.supernote-module"
+    transaction = Transaction(tmp_path, "add", ["local-math"])
+    transaction.track_created_directory(empty_parent)
+    transaction.track_created_directory(preserved_parent)
+    empty_parent.mkdir()
+    preserved_parent.mkdir(parents=True)
+    (preserved_parent / "user-file").write_text("keep", encoding="utf-8")
+
+    rollback = transaction.rollback()
+
+    assert rollback.status == "completed"
+    assert not empty_parent.exists()
+    assert (preserved_parent / "user-file").read_text(encoding="utf-8") == "keep"
+
+
 def test_startup_recovery_uses_persistent_journal(tmp_path: Path):
     path = tmp_path / "package.json"
     path.write_text("before", encoding="utf-8")

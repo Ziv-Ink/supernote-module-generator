@@ -220,6 +220,8 @@ def git_status(root: Path) -> str:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
             check=False,
         )

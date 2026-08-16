@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import METADATA_FILES, gradle_project_name, normalize_backend
 from .errors import ConfigurationError, FilesystemError, GeneratorError
+from .subprocesses import run_process
 
 LOCAL_MODULES_DIR = "local_modules"
 LEGACY_MODULES_DIRS = ("local-modules", "modules")
@@ -191,8 +192,8 @@ def _run_package_manager(command: list[str], root: Path, *, verbose: bool) -> su
     if verbose:
         print("Running: " + shlex.join(command))
     try:
-        result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False, timeout=600)
-    except OSError as exc:
+        result = run_process(command, cwd=root, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise GeneratorError(f"Could not run {command[0]}: {exc}") from exc
     if verbose:
         if result.stdout:

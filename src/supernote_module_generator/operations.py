@@ -147,16 +147,20 @@ class OperationService:
     ) -> Tuple[subprocess.CompletedProcess[str], int]:
         started = time.monotonic()
         try:
-            if self.renderer.mode == "verbose" and self.run is subprocess.run:
+            if self.run is subprocess.run:
                 result = run_process(
                     command,
                     cwd=cwd or self.root,
                     timeout=timeout,
-                    stream=lambda destination, content: _stream(
-                        self.renderer,
-                        destination,
-                        content,
-                    ),
+                    stream=(
+                        lambda destination, content: _stream(
+                            self.renderer,
+                            destination,
+                            content,
+                        )
+                    )
+                    if self.renderer.mode == "verbose"
+                    else None,
                 )
             else:
                 result = self.run(

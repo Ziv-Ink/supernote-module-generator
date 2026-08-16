@@ -332,6 +332,10 @@ class FeatureCliOperationService:
     def _snapshot_operation(
         self, transaction: Transaction, feature_paths: Iterable[Path]
     ) -> None:
+        transaction.track_created_directory(self.root / "local_modules")
+        transaction.track_created_directory(
+            (self.root / RUNTIME_RELATIVE_ROOT).parent
+        )
         paths = [
             *parent_mutation_targets(self.root),
             *integration_mutation_files(self.root),
@@ -414,9 +418,12 @@ class FeatureCliOperationService:
 
     def _run(self, command: list[str], *, phase: str) -> None:
         try:
-            if self.renderer.mode == "verbose" and self.run is subprocess.run:
+            if self.run is subprocess.run:
                 result = run_process(
-                    command, cwd=self.root, timeout=600, stream=self._stream
+                    command,
+                    cwd=self.root,
+                    timeout=600,
+                    stream=self._stream if self.renderer.mode == "verbose" else None,
                 )
             else:
                 result = self.run(

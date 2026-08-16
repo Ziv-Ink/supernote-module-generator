@@ -175,6 +175,34 @@ class Transaction:
         )
         self._persist()
 
+    def track_created_directory(self, path: Path) -> None:
+        """Remove a generator-created parent on rollback only when it is empty."""
+        canonical = path.resolve(strict=False)
+        if not _inside(self.root, canonical):
+            raise FilesystemError(
+                f"Generated directory escapes the plugin root: {canonical}"
+            )
+        if canonical.exists():
+            return
+        if any(
+            entry.get("kind") == "created_directory"
+            and entry.get("path") == str(canonical)
+            for entry in self._entries()
+        ):
+            return
+        self._entries().append(
+            {
+                "path": str(canonical),
+                "restore": str(
+                    self.state_dir / "unused" / str(len(self._entries()))
+                ),
+                "existed": False,
+                "kind": "created_directory",
+                "hash": None,
+            }
+        )
+        self._persist()
+
     def detach(self, destination: Path) -> None:
         destination = destination.resolve()
         if not _inside(self.root, destination):
@@ -306,6 +334,16 @@ def _rollback_data(
             failures.append(str(path))
             continue
         try:
+            if raw.get("kind") == "created_directory":
+                if path.is_dir() and not path.is_symlink():
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        # Never remove user content that appeared concurrently.
+                        pass
+                raw["restored"] = True
+                restored.append(str(path))
+                continue
             existed = bool(raw.get("existed"))
             expected = raw.get("hash")
             if existed and not restore.exists():
