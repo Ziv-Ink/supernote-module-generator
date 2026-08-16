@@ -6,12 +6,23 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 2.0.3 - 2026-08-16
+
 - Generate one KSP compiler option per feature so plugins with multiple V2
   features compile instead of passing an invalid newline-bearing option.
 - Allow native-only, JVM-only, and mixed feature sets by ignoring absent
   optional implementation roots when declaring Gradle task inputs.
 - Include generator templates explicitly in source distributions so every
   permitted build backend produces an installable, usable wheel.
+- Make generator-managed commands, Android toolchain diagnostics, and native
+  runtime tests portable across macOS, Linux, and Windows.
+- Resolve Windows command shims and Python launchers without requiring users to
+  provide POSIX command names.
+- Coordinate Gradle, KSP, common code generation, and CMake through one short
+  generated runtime build root, including normalized Windows paths.
+- Avoid allocation during generated runtime invalidation and feature teardown.
+- Harden subprocess, signal, transaction-lock, and non-UTF-8 failure handling.
+- Keep generated JavaScript and TypeScript compatible with strict lint rules.
 
 ## 2.0.2 - 2026-08-15
 
