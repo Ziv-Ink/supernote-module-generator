@@ -6,6 +6,8 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
 from supernote_module_generator.feature_model import (
     FeatureManifest,
     FeatureRegistryEntry,
@@ -286,7 +288,8 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     tmp_path: Path,
 ):
     compiler = host_cxx_compiler()
-    assert compiler is not None
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the runtime contract")
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_contract.cpp"
     harness.write_text(
@@ -546,7 +549,8 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
 
 def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
     compiler = host_cxx_compiler()
-    assert compiler is not None
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the allocation harness")
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     harness = tmp_path / "runtime_allocation_failure.cpp"
     harness.write_text(
