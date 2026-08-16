@@ -269,6 +269,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
             r"""
             #include "runtime_services.hpp"
 
+            #include <array>
             #include <atomic>
             #include <chrono>
             #include <condition_variable>
@@ -513,6 +514,121 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
         [str(executable)], capture_output=True, text=True, check=False, timeout=10
     )
     assert executed.returncode == 0, executed.stderr
+
+
+def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
+    compiler = shutil.which("c++")
+    assert compiler is not None
+    generated = generate_plugin_runtime(tmp_path, registry("alpha"))
+    harness = tmp_path / "runtime_allocation_failure.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            r"""
+            #include "runtime_services.hpp"
+
+            #include <atomic>
+            #include <cstdlib>
+            #include <memory>
+            #include <new>
+            #include <string_view>
+            #include <vector>
+
+            namespace {
+            std::atomic<bool> fail_next{false};
+            struct LargeCleanup {
+              std::array<unsigned char, 256> storage{};
+              void operator()() const noexcept {}
+            };
+            }
+
+            void* operator new(std::size_t size) {
+              if (fail_next.exchange(false, std::memory_order_acq_rel)) {
+                throw std::bad_alloc();
+              }
+              if (void* value = std::malloc(size)) return value;
+              throw std::bad_alloc();
+            }
+
+            void operator delete(void* value) noexcept { std::free(value); }
+            void operator delete(void* value, std::size_t) noexcept {
+              std::free(value);
+            }
+
+            int main(int argc, char** argv) {
+              if (argc != 2) return 2;
+              std::set_terminate([] { std::_Exit(86); });
+              using namespace supernote::runtime;
+              std::vector<RuntimeSession::JsTask> queue;
+              auto runtime = RuntimeSession::create(
+                  [&](RuntimeSession::JsTask task) {
+                    queue.push_back(std::move(task));
+                  });
+              auto cleanup = std::make_shared<DeferredDestruction>();
+              auto feature = FeatureSession::create(runtime, cleanup);
+              const std::string_view mode(argv[1]);
+
+              if (mode == "schedule") {
+                fail_next = true;
+                if (runtime->schedule([](void*) {})) return 10;
+              } else if (mode == "submit-large") {
+                fail_next = true;
+                if (cleanup->submit(LargeCleanup{})) return 12;
+              } else if (mode == "invalidate") {
+                fail_next = true;
+                runtime->invalidate();
+              } else if (mode == "close-feature") {
+                if (!feature->accept([](void*) {})) return 11;
+                fail_next = true;
+                feature->close_feature();
+              } else if (mode == "close-service") {
+                auto service = feature->service<int>(
+                    "cpp:Service", [] { return std::make_shared<int>(7); });
+                fail_next = true;
+                feature->close_feature();
+              } else {
+                return 3;
+              }
+              runtime->invalidate();
+              cleanup->drain_and_shutdown();
+              return 0;
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    executable = tmp_path / "runtime_allocation_failure"
+    compiled = subprocess.run(
+        [
+            compiler,
+            "-std=c++23",
+            "-pthread",
+            str(generated / "src/runtime_services.cpp"),
+            str(harness),
+            "-I",
+            str(generated / "src"),
+            "-o",
+            str(executable),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    for mode in (
+        "schedule",
+        "submit-large",
+        "invalidate",
+        "close-feature",
+        "close-service",
+    ):
+        executed = subprocess.run(
+            [str(executable), mode],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert executed.returncode == 0, f"{mode}: {executed.stderr}"
 
 
 def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: Path):

@@ -398,6 +398,15 @@ class DeferredDestruction {
   DeferredDestruction &operator=(const DeferredDestruction &) = delete;
 
   bool submit(std::function<void()> cleanup) noexcept;
+  template <typename Cleanup>
+  bool submit(Cleanup &&cleanup) noexcept {
+    try {
+      return submit(std::function<void()>(
+          std::forward<Cleanup>(cleanup)));
+    } catch (...) {
+      return false;
+    }
+  }
   void drain_and_shutdown() noexcept;
 
  private:
@@ -440,13 +449,11 @@ class ManagedRef {
     auto cleanup = cleanup_;
     cleanup_.reset();
     if (!value) return;
-    if (!cleanup || !cleanup->submit(
-        [value = std::move(value)]() mutable { value.reset(); })) {
-      // Component shutdown is the only rejected-admission case. At that
-      // boundary all generated work has already been drained, so inline
-      // release is safe and cannot run on a live JavaScript callback.
-      value.reset();
-    }
+    if (cleanup && cleanup->submit(
+        [value = std::move(value)]() mutable { value.reset(); })) return;
+    // Queue admission can fail during component shutdown or memory pressure.
+    // Inline release is the bounded fallback and cannot touch JSI.
+    value.reset();
   }
 
  private:
@@ -635,10 +642,9 @@ class FeatureSession : public std::enable_shared_from_this<FeatureSession> {
   void defer_release(std::shared_ptr<T> value) noexcept {
     if (!value) return;
     auto cleanup = cleanup_;
-    if (!cleanup || !cleanup->submit(
-        [value = std::move(value)]() mutable { value.reset(); })) {
-      value.reset();
-    }
+    if (cleanup && cleanup->submit(
+        [value = std::move(value)]() mutable { value.reset(); })) return;
+    value.reset();
   }
 
   SessionId id_;
@@ -1089,19 +1095,18 @@ void RuntimeSession::remove_feature(SessionId feature_id) noexcept {
 
 void RuntimeSession::invalidate() noexcept {
   if (!active_.exchange(false, std::memory_order_acq_rel)) return;
-  std::vector<std::shared_ptr<FeatureSession>> features;
+  decltype(features_) features;
   {
     std::lock_guard lock(mutex_);
-    for (auto &[id, feature] : features_) {
-      (void)id;
-      features.push_back(std::move(feature));
-    }
-    features_.clear();
+    features.swap(features_);
     plugin_class_loader_.reset();
     platform_context_.reset();
     scheduler_ = {};
   }
-  for (auto &feature : features) feature->close_runtime();
+  for (auto &[id, feature] : features) {
+    (void)id;
+    feature->close_runtime();
+  }
 }
 
 std::shared_ptr<void> RuntimeSession::plugin_class_loader() const noexcept {
@@ -1293,28 +1298,20 @@ void FeatureSession::close_feature() noexcept { close(false); }
 void FeatureSession::close_runtime() noexcept { close(true); }
 
 void FeatureSession::close(bool runtime_teardown) noexcept {
-  std::vector<std::shared_ptr<PendingOperation>> pending;
-  std::vector<std::shared_ptr<void>> services;
+  decltype(pending_) pending;
+  decltype(services_) services;
   {
     std::lock_guard lock(mutex_);
     if (state() != FeatureState::ACTIVE) return;
     state_.store(FeatureState::CLOSING, std::memory_order_release);
-    for (auto &[id, operation] : pending_) {
-      (void)id;
-      pending.push_back(std::move(operation));
-    }
-    pending_.clear();
-    for (auto &[id, slot] : services_) {
-      (void)id;
-      std::lock_guard slot_lock(slot->mutex);
-      if (slot->value) services.push_back(std::move(slot->value));
-    }
-    services_.clear();
+    pending.swap(pending_);
+    services.swap(services_);
   }
 
   auto runtime = runtime_.lock();
   if (!runtime_teardown && runtime) runtime->remove_feature(id_);
-  for (auto &operation : pending) {
+  for (auto &[id, operation] : pending) {
+    (void)id;
     const auto outcome = runtime_teardown
         ? OperationWinner::CANCELLED_BY_RUNTIME
         : OperationWinner::CANCELLED_BY_FEATURE;
@@ -1328,7 +1325,15 @@ void FeatureSession::close(bool runtime_teardown) noexcept {
       runtime->schedule(std::move(rejection));
     }
   }
-  for (auto &service : services) defer_release(std::move(service));
+  for (auto &[id, slot] : services) {
+    (void)id;
+    std::shared_ptr<void> service;
+    {
+      std::lock_guard slot_lock(slot->mutex);
+      service = std::move(slot->value);
+    }
+    defer_release(std::move(service));
+  }
   runtime_.reset();
   state_.store(FeatureState::INACTIVE, std::memory_order_release);
 }
