@@ -6,6 +6,17 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 2.0.4 - 2026-08-17
+
+- Correct CLI help so `--yes` is described as applying defaults only to
+  omitted choices and `--skip-install` remains an explicit override.
+- Distinguish the local feature `--package-version` from the complete plugin's
+  `versionCode` and `versionName` in `PluginConfig.json`.
+- Align Update and Remove help with their actual confirmation and dependency
+  refresh behavior.
+- Document the supported Java 17 through 23 Gradle range, Java 17
+  recommendation, and Android NDK Clang checks in Doctor help.
+
 ## 2.0.3 - 2026-08-16
 
 - Generate one KSP compiler option per feature so plugins with multiple V2
