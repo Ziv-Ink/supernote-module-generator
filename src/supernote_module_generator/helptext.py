@@ -62,7 +62,7 @@ Options:
       --description <TEXT>        Package description; use "" to omit.
       --javascript-name <NAME>    JavaScript feature name.
       --android-namespace <NAME>  Java-style Android namespace.
-      --package-version <VERSION> Initial semantic version [default: 0.1.0].
+      --package-version <VERSION> Local feature package version [default: 0.1.0].
       --package-manager <npm|yarn>
                                       Package manager for local linking.
       --skip-install              Do not install the local dependency.
@@ -85,11 +85,15 @@ Interactive behavior:
 
 Non-interactive behavior:
   Input is never requested. PACKAGE is always required. Without --yes,
-  --starter and every other output-affecting decision are required. Repeat
-  --starter to select both families. With --yes, the C/C++ starter is selected,
-  the description is omitted, the version is 0.1.0, names are derived
-  when valid, and installation is enabled. Conflicting lockfiles require
-  --package-manager.
+  --starter and every initial feature-metadata decision are required. Repeat
+  --starter to select both families. With --yes, omitted choices use documented
+  defaults: C/C++ starter, empty description, version 0.1.0, derived names, and
+  dependency installation unless --skip-install is present. Explicit options
+  still override those defaults. Conflicting lockfiles require --package-manager.
+
+Version boundary:
+  --package-version belongs to this local feature package. It does not change
+  versionCode or versionName in the plugin root's PluginConfig.json.
 
 Name inference:
   Use the unscoped package name, remove an initial react-native-, local-, or
@@ -131,7 +135,7 @@ Options:
                                      Package manager when refresh is required.
       --skip-install             Skip a required dependency refresh.
       --build                    Run an Android build after verification.
-  -y, --yes                      Accept the displayed update plan.
+  -y, --yes                      Update without asking for confirmation.
   -h, --help                     Show help.
 
 Output options:
@@ -143,9 +147,10 @@ Output options:
       --debug                    Include internal diagnostics and tracebacks.
 
 Behavior:
-  Update shows what will be replaced, preserved, and changed in the parent
-  plugin. Confirmation defaults to Yes. Dependencies are refreshed only when
-  package metadata or the local link changes. Update always targets one feature.
+  Without --yes, interactive Update shows what will be preserved and
+  regenerated; confirmation defaults to Yes. Dependencies are refreshed only
+  when the parent dependency entry or installed local link needs repair. Update
+  always targets one feature.
 
 Examples:
   supernote-module update
@@ -233,10 +238,10 @@ Output options:
       --debug                    Include internal diagnostics and tracebacks.
 
 Confirmation:
-  Interactive removal always requires the exact package name. Removing all
-  requires REMOVE ALL. --yes is accepted only with an unambiguous target.
-  Build output is preserved by default. --yes never enables its deletion;
-  pass --delete-build-files explicitly when that cleanup is intended.
+  Without --yes, interactive removal requires the exact package name; removing
+  all requires REMOVE ALL. --yes bypasses that prompt only when the target is
+  unambiguous. Build output is preserved by default. --yes never enables its
+  deletion; pass --delete-build-files explicitly when cleanup is intended.
 
 Recovery:
   Implementation source is retained until parent changes, dependency refresh,
@@ -277,9 +282,10 @@ Output options:
       --debug     Include internal diagnostics and tracebacks.
 
 Behavior:
-  Doctor checks the JavaScript, Android, Kotlin/KSP, C23/C++23, NDK, CMake,
-  Gradle, and JSI requirements used by the plugin-level V2 runtime. It also
-  reports the target-device runtime boundary that cannot be proven locally.
+  Doctor checks JavaScript, Kotlin/KSP, Gradle, Java 17 through 23 (Java 17 is
+  recommended), Android SDK/NDK tools, NDK Clang with C23/C++23, CMake, and JSI
+  requirements used by the plugin-level V2 runtime. It also reports the target-
+  device runtime boundary that cannot be proven locally.
 
 Examples:
   supernote-module doctor
