@@ -146,6 +146,33 @@ def test_add_help_preserves_multiline_example(tmp_path: Path):
     ) in stdout
 
 
+def test_help_describes_defaults_as_overridable_and_versions_as_separate():
+    add = COMMAND_HELP["add"]
+    normalized = " ".join(add.split())
+
+    assert "omitted choices use documented" in normalized
+    assert "unless --skip-install is present" in normalized
+    assert "Explicit options still override those defaults" in normalized
+    assert "Local feature package version" in normalized
+    assert "versionCode or versionName" in normalized
+    assert "With --yes, the C/C++ starter is selected" not in normalized
+
+
+def test_help_matches_update_remove_and_doctor_behavior():
+    update = " ".join(COMMAND_HELP["update"].split())
+    remove = " ".join(COMMAND_HELP["remove"].split())
+    doctor = " ".join(COMMAND_HELP["doctor"].split())
+
+    assert "Update without asking for confirmation" in update
+    assert "parent dependency entry or installed local link" in update
+    assert "Accept the displayed update plan" not in update
+    assert "Without --yes, interactive removal requires" in remove
+    assert "--yes bypasses that prompt only when the target is" in remove
+    assert "Java 17 through 23" in doctor
+    assert "Java 17 is" in doctor and "recommended" in doctor
+    assert "NDK Clang with C23/C++23" in doctor
+
+
 def test_version_is_exact_and_works_outside_plugin(tmp_path: Path):
     assert invoke(["--version"], tmp_path) == (
         0,
