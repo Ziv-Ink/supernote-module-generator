@@ -1789,6 +1789,8 @@ def _wrapper(
 ) -> str:
     method_rows = []
     for route in item.methods:
+        if not route.javascript_public:
+            continue
         if route.static:
             continue
         if route.execution is ExecutionMode.ASYNC:
@@ -1884,7 +1886,9 @@ def _wrapper(
             + "\n    }"
         )
     property_names = [
-        route.public_name for route in item.methods if not route.static
+        route.public_name
+        for route in item.methods
+        if route.javascript_public and not route.static
     ] + [field.public_name for field in item.fields]
     names = "\n".join(
         "    names.push_back(facebook::jsi::PropNameID::forAscii(runtime, "
@@ -2231,7 +2235,7 @@ def _registration(
     functions.extend(
         (route.public_name, route, False, False)
         for route in item.methods
-        if route.static
+        if route.javascript_public and route.static
     )
     semantic = SemanticType.object_ref(item.named_type.type_id)
     is_type = _jvm_type_guard_host_function(

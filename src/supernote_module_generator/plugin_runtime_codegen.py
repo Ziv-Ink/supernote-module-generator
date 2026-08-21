@@ -472,10 +472,12 @@ class BoundedExecutor {
 
   WorkHandle submit(Task task);
   void set_thread_initializer(ThreadInitializer initializer);
+  std::size_t thread_count() const noexcept;
   void shutdown() noexcept;
 
  private:
   struct State;
+  void ensure_started();
   std::shared_ptr<State> state_;
 };
 
@@ -496,6 +498,7 @@ class DeferredDestruction {
       return false;
     }
   }
+  std::size_t thread_count() const noexcept;
   void drain_and_shutdown() noexcept;
 
  private:
@@ -783,6 +786,8 @@ class ProcessServices {
   void complete_jvm_async(SessionId completion_id, void *environment,
                           void *result, std::string error_code,
                           std::string failure) noexcept;
+  std::size_t thread_count() const noexcept;
+  void shutdown() noexcept;
 
  private:
   BoundedExecutor workers_;
@@ -921,12 +926,15 @@ struct BoundedExecutor::State {
     Task task;
   };
 
-  explicit State(std::size_t capacity) : capacity(capacity) {}
+  State(std::size_t worker_count, std::size_t capacity)
+      : worker_count(worker_count), capacity(capacity) {}
   std::mutex mutex;
   std::condition_variable ready;
   std::deque<Item> queue;
   std::vector<std::thread> workers;
+  std::size_t worker_count;
   std::size_t capacity;
+  std::atomic<std::size_t> live_workers{0};
   std::uint64_t next_id = 1;
   ThreadInitializer thread_initializer;
   bool stopped = false;
@@ -951,12 +959,23 @@ CancellationToken BoundedExecutor::WorkHandle::token() const noexcept {
 
 BoundedExecutor::BoundedExecutor(std::size_t worker_count,
                                  std::size_t queue_capacity)
-    : state_(std::make_shared<State>(queue_capacity)) {
+    : state_(std::make_shared<State>(worker_count, queue_capacity)) {
   if (worker_count == 0 || queue_capacity == 0) {
     throw std::invalid_argument("executor size and capacity must be positive");
   }
-  for (std::size_t index = 0; index < worker_count; ++index) {
+}
+
+void BoundedExecutor::ensure_started() {
+  auto state = state_;
+  std::lock_guard lock(state->mutex);
+  if (state->stopped) {
+    throw std::runtime_error("executor is stopped");
+  }
+  if (!state->workers.empty()) return;
+  state->workers.reserve(state->worker_count);
+  for (std::size_t index = 0; index < state->worker_count; ++index) {
     state_->workers.emplace_back([state = state_] {
+      state->live_workers.fetch_add(1, std::memory_order_acq_rel);
       bool thread_initialized = false;
       std::function<void()> thread_cleanup;
       while (true) {
@@ -1000,6 +1019,7 @@ BoundedExecutor::BoundedExecutor(std::size_t worker_count,
       if (thread_cleanup) {
         try { thread_cleanup(); } catch (...) {}
       }
+      state->live_workers.fetch_sub(1, std::memory_order_acq_rel);
     });
   }
 }
@@ -1008,6 +1028,7 @@ BoundedExecutor::~BoundedExecutor() { shutdown(); }
 
 BoundedExecutor::WorkHandle BoundedExecutor::submit(Task task) {
   if (!task) return {};
+  ensure_started();
   auto control = std::make_shared<WorkHandle::Control>();
   auto state = state_;
   {
@@ -1049,6 +1070,13 @@ void BoundedExecutor::set_thread_initializer(
   state->thread_initializer = std::move(initializer);
 }
 
+std::size_t BoundedExecutor::thread_count() const noexcept {
+  auto state = state_;
+  return state
+      ? state->live_workers.load(std::memory_order_acquire)
+      : 0;
+}
+
 void BoundedExecutor::shutdown() noexcept {
   auto state = state_;
   if (!state) return;
@@ -1071,30 +1099,11 @@ struct DeferredDestruction::State {
   std::condition_variable ready;
   std::deque<std::function<void()>> queue;
   std::thread worker;
+  std::atomic<std::size_t> live_workers{0};
   bool stopping = false;
 };
 
-DeferredDestruction::DeferredDestruction() : state_(std::make_shared<State>()) {
-  state_->worker = std::thread([state = state_] {
-    while (true) {
-      std::function<void()> cleanup;
-      {
-        std::unique_lock lock(state->mutex);
-        state->ready.wait(lock, [&] {
-          return state->stopping || !state->queue.empty();
-        });
-        if (state->queue.empty() && state->stopping) return;
-        cleanup = std::move(state->queue.front());
-        state->queue.pop_front();
-      }
-      try {
-        cleanup();
-      } catch (...) {
-        // Destructors/cleanup never cross into JSI and never stop the facility.
-      }
-    }
-  });
-}
+DeferredDestruction::DeferredDestruction() : state_(std::make_shared<State>()) {}
 
 DeferredDestruction::~DeferredDestruction() { drain_and_shutdown(); }
 
@@ -1105,6 +1114,29 @@ bool DeferredDestruction::submit(std::function<void()> cleanup) noexcept {
     {
       std::lock_guard lock(state->mutex);
       if (state->stopping) return false;
+      if (!state->worker.joinable()) {
+        state->worker = std::thread([state] {
+          state->live_workers.fetch_add(1, std::memory_order_acq_rel);
+          while (true) {
+            std::function<void()> queued_cleanup;
+            {
+              std::unique_lock worker_lock(state->mutex);
+              state->ready.wait(worker_lock, [&] {
+                return state->stopping || !state->queue.empty();
+              });
+              if (state->queue.empty() && state->stopping) break;
+              queued_cleanup = std::move(state->queue.front());
+              state->queue.pop_front();
+            }
+            try {
+              queued_cleanup();
+            } catch (...) {
+              // Cleanup never crosses into JSI and never stops the facility.
+            }
+          }
+          state->live_workers.fetch_sub(1, std::memory_order_acq_rel);
+        });
+      }
       state->queue.push_back(std::move(cleanup));
     }
     state->ready.notify_one();
@@ -1112,6 +1144,13 @@ bool DeferredDestruction::submit(std::function<void()> cleanup) noexcept {
   } catch (...) {
     return false;
   }
+}
+
+std::size_t DeferredDestruction::thread_count() const noexcept {
+  auto state = state_;
+  return state
+      ? state->live_workers.load(std::memory_order_acquire)
+      : 0;
 }
 
 void DeferredDestruction::drain_and_shutdown() noexcept {
@@ -1488,10 +1527,7 @@ ProcessServices::ProcessServices()
                256),
       cleanup_(std::make_shared<DeferredDestruction>()) {}
 
-ProcessServices::~ProcessServices() {
-  workers_.shutdown();
-  cleanup_->drain_and_shutdown();
-}
+ProcessServices::~ProcessServices() { shutdown(); }
 
 BoundedExecutor &ProcessServices::workers() noexcept { return workers_; }
 
@@ -1548,6 +1584,20 @@ void ProcessServices::complete_jvm_async(
   } catch (...) {
     // Native-async completion must never unwind through JNI/coroutine code.
   }
+}
+
+std::size_t ProcessServices::thread_count() const noexcept {
+  return workers_.thread_count() + cleanup_->thread_count();
+}
+
+void ProcessServices::shutdown() noexcept {
+  workers_.shutdown();
+  {
+    std::lock_guard lock(jvm_async_mutex_);
+    jvm_async_completions_.clear();
+  }
+  cleanup_->drain_and_shutdown();
+  java_vm_.store(nullptr, std::memory_order_release);
 }
 
 ProcessServices &process_services() noexcept {
@@ -1938,17 +1988,25 @@ extern "C" JNIEXPORT void JNICALL
 Java_supernote_generated_runtime_SupernoteV3Module_nativeInvalidate(
     JNIEnv *, jobject, jlong session_id) {{
   std::shared_ptr<supernote::runtime::RuntimeSession> session;
+  bool last_session = false;
   {{
     std::lock_guard lock(g_mutex);
     auto found = g_sessions.find(static_cast<std::uint64_t>(session_id));
     if (found == g_sessions.end()) return;
     session = std::move(found->second);
     g_sessions.erase(found);
+    last_session = g_sessions.empty();
   }}
   __android_log_print(
       ANDROID_LOG_INFO, kLogTag, "invalidating runtime session %llu",
       static_cast<unsigned long long>(session_id));
   session->invalidate();
+  if (last_session) {{
+    supernote::runtime::process_services().shutdown();
+    __android_log_print(
+        ANDROID_LOG_INFO, kLogTag,
+        "stopped process services for runtime generation");
+  }}
 }}
 
 extern "C" __attribute__((visibility("hidden"))) jboolean

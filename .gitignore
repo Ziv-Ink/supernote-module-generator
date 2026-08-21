@@ -5,3 +5,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Device-test fixtures, plans, generated Android outputs, and raw diagnostics
+# stay local. Curated timestamped records are added explicitly after review.
+plugin-testing/*

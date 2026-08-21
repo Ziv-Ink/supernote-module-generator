@@ -1,5 +1,3 @@
-from contextlib import redirect_stdout
-import io
 import json
 from pathlib import Path
 import re
@@ -10,15 +8,12 @@ from supernote_module_generator import binding_codegen
 from supernote_module_generator.semantic import (
     DeclarationRole,
     ExecutionMode,
-    SemanticClassKind,
+    MemberScope,
+    SemanticDeclarationKind,
     SemanticType,
 )
+from supernote_module_generator.typescript_codegen import render_typescript
 from supernote_module_generator.source_models import SupernoteMarker
-
-V3_LEGACY_CLASS_MARKER_REMOVED = (
-    "superseded by the V3 Object/Value marker contract; concrete C++ "
-    "object-route coverage returns in Phase 5"
-)
 
 class BindingCodegenScannerTests(unittest.TestCase):
     def make_module(
@@ -410,8 +405,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 source,
             )
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_v2_async_object_method_retains_receiver_for_physical_work(self):
+    def test_v3_async_object_method_retains_receiver_for_physical_work(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
@@ -419,7 +413,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 """#include <cstddef>
 #include <cstdint>
 #include <vector>
-// @SupernotePluginExport
+// @SupernotePluginObject
 class Document {
 public:
   Document();
@@ -438,27 +432,22 @@ public:
 
             self.assertIn('getPropertyAsFunction(runtime, "Promise")', source)
             self.assertIn(
-                "supernote::runtime::ManagedRef<Document> instance_", source
+                "supernote::runtime::ManagedRef<::Document> instance", source
             )
             self.assertIn(
                 "supernote::runtime::process_services().cleanup()", source
             )
-            self.assertIn("auto operation_receiver = native_instance", source)
-            self.assertIn(
-                "operation_receiver = std::move(operation_receiver)", source
-            )
-            self.assertIn("operation_receiver->load(supernote_input_0)", source)
-            self.assertIn("weak_feature = feature_session_", source)
-            self.assertIn("feature_session->accept_factory", source)
-            self.assertNotIn(
-                "async C++ object-method lowering is recognized", source
-            )
+            self.assertIn("native_instance = this->managed_ref()", source)
+            self.assertIn("retained_input_state = std::make_shared<std::tuple<", source)
+            self.assertIn("native_instance = std::move(native_instance)", source)
+            self.assertIn("native_instance->load(supernote_input_0)", source)
+            self.assertIn("operation->set_retained_state(retained_input_state)", source)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_cpp_class_source_and_semantic_models_use_explicit_member_intent(self):
-        source = """// @SupernotePluginExport
+        source = """// @SupernotePluginObject
 class Document {
 public:
+  // @SupernoteConstructor
   Document(std::string path);
 
   // @SupernotePluginExport
@@ -481,7 +470,7 @@ private:
             self.assertEqual(1, len(classes))
             item = classes[0]
             self.assertEqual("Document", item.cpp_name)
-            self.assertEqual(DeclarationRole.EXPORTED, item.intent.role)
+            self.assertEqual(DeclarationRole.ORDINARY, item.intent.role)
             self.assertEqual(1, len(item.constructors))
             self.assertEqual("std::string", item.constructors[0].parameters[0].type_spelling)
             self.assertEqual(["pageCount", "rebuild"], [method.cpp_name for method in item.methods])
@@ -491,18 +480,17 @@ private:
             self.assertEqual(ExecutionMode.ASYNC, item.methods[1].intent.execution)
 
             semantic = binding_codegen.scan_cpp_semantic_model(module)
-            self.assertEqual(1, len(semantic.classes))
-            document = semantic.classes[0]
-            self.assertEqual(SemanticClassKind.JS_OBJECT, document.kind)
+            self.assertEqual(1, len(semantic.declarations))
+            document = semantic.declarations[0]
+            self.assertEqual(SemanticDeclarationKind.OBJECT, document.kind)
             self.assertEqual(SemanticType.STRING, document.constructor.parameters[0].type)
             self.assertEqual(["pageCount", "rebuild"], [method.name for method in document.methods])
             self.assertTrue(document.methods[0].capabilities.javascript_public)
             self.assertFalse(document.methods[1].capabilities.javascript_public)
             self.assertEqual(ExecutionMode.ASYNC, document.methods[1].execution)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_cpp_class_constructor_selection_and_implicit_default(self):
-        selected = """// @SupernotePluginExport
+        selected = """// @SupernotePluginObject
 class Document {
 public:
   Document(std::string path);
@@ -517,10 +505,10 @@ public:
             self.assertTrue(item.constructors[1].selected)
             self.assertTrue(item.constructors[1].explicit)
             self.assertTrue(item.constructors[1].noexcept)
-            semantic = binding_codegen.scan_cpp_semantic_model(module).classes[0]
+            semantic = binding_codegen.scan_cpp_semantic_model(module).declarations[0]
             self.assertEqual(SemanticType.INT64, semantic.constructor.parameters[0].type)
 
-        implicit = """// @SupernotePluginExport
+        implicit = """// @SupernotePluginObject
 struct Page {
   // @SupernotePluginExport
   void refresh();
@@ -531,33 +519,34 @@ struct Page {
             self.write_object_header(module, implicit)
             item = binding_codegen.scan_cpp_class_source_model(module)[0]
             self.assertTrue(item.constructors[0].implicit)
-            semantic = binding_codegen.scan_cpp_semantic_model(module).classes[0]
-            self.assertEqual((), semantic.constructor.parameters)
+            semantic = binding_codegen.scan_cpp_semantic_model(module).declarations[0]
+            self.assertIsNone(semantic.constructor)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_cpp_class_rejects_ambiguous_or_missing_creation_paths(self):
         cases = (
             (
                 "ambiguous",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Document {
 public:
+  // @SupernoteConstructor
   Document(std::string path);
+  // @SupernoteConstructor
   Document(std::int64_t handle);
 };
 """,
-                "multiple eligible constructors require exactly one "
-                "SupernoteConstructor selection",
+                "an object may select at most one SupernoteConstructor",
             ),
             (
                 "missing",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Document {
 private:
+  // @SupernoteConstructor
   Document();
 };
 """,
-                "requires at least one eligible public constructor",
+                "SupernoteConstructor must mark a public constructor",
             ),
         )
         for name, source, diagnostic in cases:
@@ -570,45 +559,11 @@ private:
                 ):
                     binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_cpp_internal_class_projects_as_feature_service(self):
-        source = """// @SupernotePluginInternal
-class IndexService {
-public:
-  IndexService();
-
-  // @SupernotePluginInternal
-  std::int32_t rebuild();
-
-  void ordinaryHelper();
-};
-"""
-        with tempfile.TemporaryDirectory() as directory:
-            module = self.make_module(Path(directory), backend="jsi")
-            self.write_object_header(module, source)
-            service = binding_codegen.scan_cpp_semantic_model(module).classes[0]
-            self.assertEqual(SemanticClassKind.INTERNAL_SERVICE, service.kind)
-            self.assertFalse(service.capabilities.javascript_public)
-            self.assertEqual(["rebuild"], [method.name for method in service.methods])
-            self.assertFalse(service.methods[0].capabilities.javascript_public)
-
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_cpp_class_rejects_invalid_marked_members_and_containment(self):
         cases = (
             (
-                "unmarked-class",
-                """class Document {
-public:
-  Document();
-  // @SupernotePluginExport
-  void refresh();
-};
-""",
-                "requires a marked top-level",
-            ),
-            (
                 "private-method",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Document {
 public:
   Document();
@@ -619,42 +574,6 @@ private:
 """,
                 "generated method must be public",
             ),
-            (
-                "field",
-                """// @SupernotePluginExport
-class Document {
-public:
-  Document();
-  // @SupernotePluginExport
-  std::int32_t pageCount;
-};
-""",
-                "properties, fields",
-            ),
-            (
-                "static",
-                """// @SupernotePluginExport
-class Document {
-public:
-  Document();
-  // @SupernotePluginExport
-  static void refresh();
-};
-""",
-                "static methods are deferred",
-            ),
-            (
-                "export-on-internal-service",
-                """// @SupernotePluginInternal
-class Service {
-public:
-  Service();
-  // @SupernotePluginExport
-  void refresh();
-};
-""",
-                "may contain only SupernotePluginInternal",
-            ),
         )
         for name, source, diagnostic in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -666,35 +585,34 @@ public:
                 ):
                     binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_cpp_class_and_member_marker_targets_fail_closed(self):
         cases = (
             (
-                "class-role-conflict",
-                """// @SupernotePluginExport
+                "object-with-reachability-marker",
+                """// @SupernotePluginObject
 // @SupernotePluginInternal
 class Document { public: Document(); };
 """,
-                "SupernotePluginExport and SupernotePluginInternal cannot mark one declaration",
+                "classes require exactly one of SupernotePluginObject or SupernotePluginValue",
             ),
             (
                 "async-class",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 // @SupernotePluginAsync
 class Document { public: Document(); };
 """,
-                "SupernotePluginAsync cannot mark a class",
+                "classes require exactly one of SupernotePluginObject or SupernotePluginValue",
             ),
             (
                 "constructor-on-class",
                 """// @SupernoteConstructor
 class Document { public: Document(); };
 """,
-                "SupernoteConstructor is valid only on a constructor",
+                "classes require exactly one of SupernotePluginObject or SupernotePluginValue",
             ),
             (
                 "async-only-method",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Document {
 public:
   Document();
@@ -706,7 +624,7 @@ public:
             ),
             (
                 "constructor-on-method",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Document {
 public:
   Document();
@@ -717,19 +635,8 @@ public:
                 "SupernoteConstructor is valid only on a constructor",
             ),
             (
-                "constructor-on-service",
-                """// @SupernotePluginInternal
-class Service {
-public:
-  // @SupernoteConstructor
-  Service();
-};
-""",
-                "SupernoteConstructor does not apply to a SupernotePluginInternal",
-            ),
-            (
                 "two-selected-constructors",
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Document {
 public:
   // @SupernoteConstructor
@@ -738,7 +645,7 @@ public:
   Document(std::int64_t handle);
 };
 """,
-                "multiple eligible constructors require exactly one",
+                "an object may select at most one SupernoteConstructor",
             ),
         )
         for name, source, diagnostic in cases:
@@ -751,61 +658,15 @@ public:
                 ):
                     binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_v2_sync_class_lowers_to_retained_hostobject_machinery(self):
+    def test_v3_sync_class_lowers_to_retained_hostobject_machinery(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                "// @SupernotePluginExport\nclass Page { public: Page(); };\n",
+                "// @SupernotePluginObject\nclass Page { public: Page(); };\n",
             )
-            objects = binding_codegen.scan_bindings(module).objects
-            self.assertEqual(["Page"], [item.js_name for item in objects])
-
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_object_lowering_fails_closed_for_routes_not_implemented_yet(self):
-        cases = (
-            (
-                "service",
-                "// @SupernotePluginInternal\n"
-                "class Service { public: Service(); };\n",
-                "FeatureSession service route is not implemented yet",
-            ),
-            (
-                "internal-method",
-                """// @SupernotePluginExport
-class Page {
-public:
-  Page();
-  // @SupernotePluginInternal
-  void rebuild();
-};
-""",
-                "receiver-aware internal route is not implemented yet",
-            ),
-            (
-                "async-method",
-                """// @SupernotePluginExport
-class Page {
-public:
-  Page();
-  // @SupernotePluginExport
-  // @SupernotePluginAsync
-  void refresh();
-};
-""",
-                "async HostObject lowering is not implemented yet",
-            ),
-        )
-        for name, source, diagnostic in cases:
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
-                module = self.make_module(Path(directory), backend="jsi")
-                self.write_object_header(module, source)
-                with self.assertRaisesRegex(
-                    binding_codegen.CodegenError,
-                    re.escape(diagnostic),
-                ):
-                    binding_codegen.scan_bindings(module)
+            declarations = binding_codegen.scan_cpp_semantic_model(module).declarations
+            self.assertEqual(["Page"], [item.name for item in declarations])
 
     def test_rejects_marker_in_preprocessor_conditional(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1069,14 +930,14 @@ std::int64_t identity(std::int64_t value) { return value; }
             self.assertIn("supernote_throw_type_error", generated)
             self.assertIn("supernote_throw_range_error", generated)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_jsi_hostobject_uses_initial_numeric_and_bytes_conversions(self):
         source = """#include <cstddef>
 #include <cstdint>
 #include <vector>
-// @SupernotePluginExport
+// @SupernotePluginObject
 class Page {
 public:
+  // @SupernoteConstructor
   Page(std::int64_t handle, std::vector<std::byte> seed);
   // @SupernotePluginExport
   std::vector<std::byte> render(std::int32_t page, float scale);
@@ -1085,23 +946,24 @@ public:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
-            binding_codegen.generate(module)
-            generated = (
-                module
-                / "android/build/generated/supernote/jni/generated_bindings.cpp"
-            ).read_text(encoding="utf-8")
-            declarations = (module / "index.d.ts").read_text(encoding="utf-8")
+            api = binding_codegen.scan_cpp_semantic_model(module)
+            generated = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="LocalTest",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
+            declarations = render_typescript("LocalTest", api)
 
             self.assertIn(
-                "create(handle: bigint, seed: Uint8Array): Page;",
+                "create: SupernoteCallable<[handle: bigint, seed: Uint8Array], Page>;",
                 declarations,
             )
             self.assertIn(
-                "render(page: number, scale: number): Uint8Array;",
+                "render: SupernoteCallable<[page: number, scale: number], Uint8Array>;",
                 declarations,
             )
-            self.assertIn("std::make_shared<Page>", generated)
-            self.assertIn("asBigInt(runtime).asInt64(runtime)", generated)
+            self.assertIn("std::make_shared<::Page>", generated)
+            self.assertIn("bigint.asInt64(runtime)", generated)
             self.assertIn("native_instance->render(", generated)
             self.assertIn("supernote_make_uint8_array(runtime", generated)
 
@@ -1287,9 +1149,8 @@ public:
                 generated,
             )
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_jsi_object_scans_constructor_methods_and_access_control(self):
-        source = """// @SupernotePluginExport
+        source = """// @SupernotePluginObject
 class Counter {
 public:
   Counter(bool enabled, double initial, std::string label);
@@ -1311,26 +1172,26 @@ protected:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
-            bindings = binding_codegen.scan_bindings(module)
-            self.assertEqual(["add"], [item.js_name for item in bindings.exports])
-            self.assertEqual(["Counter"], [item.js_name for item in bindings.objects])
-            item = bindings.objects[0]
+            exports = binding_codegen.scan_sources(module)
+            objects = binding_codegen.scan_cpp_class_source_model(module)
+            self.assertEqual(["add"], [item.js_name for item in exports])
+            self.assertEqual(["Counter"], [item.cpp_name for item in objects])
+            item = objects[0]
             self.assertEqual(
                 ["bool", "double", "std::string"],
-                [parameter.cpp_type for parameter in item.constructor.parameters],
+                [parameter.type_spelling for parameter in item.constructors[0].parameters],
             )
             self.assertEqual(
                 ["enabled", "value", "label", "increment"],
-                [method.js_name for method in item.methods],
+                [method.cpp_name for method in item.methods],
             )
             self.assertTrue(item.methods[0].const)
             self.assertTrue(item.methods[1].const)
             self.assertTrue(item.methods[1].noexcept)
             self.assertTrue(item.methods[2].noexcept)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_jsi_object_uses_source_struct_name_and_zero_argument_constructor(self):
-        source = """// @SupernotePluginExport
+        source = """// @SupernotePluginObject
 struct NativeDocument {
   NativeDocument();
   // @SupernotePluginExport
@@ -1342,19 +1203,17 @@ private:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source, relative="NativeDocument.hxx")
-            item = binding_codegen.scan_bindings(module).objects[0]
+            item = binding_codegen.scan_cpp_class_source_model(module)[0]
             self.assertEqual("NativeDocument", item.cpp_name)
-            self.assertEqual("NativeDocument", item.js_name)
-            self.assertEqual((), item.constructor.parameters)
-            self.assertEqual(["pageCount"], [method.js_name for method in item.methods])
+            self.assertEqual((), item.constructors[0].parameters)
+            self.assertEqual(["pageCount"], [method.cpp_name for method in item.methods])
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_class_default_private_and_struct_default_public(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class PrivateByDefault {
   PrivateByDefault();
 public:
@@ -1362,7 +1221,7 @@ public:
   // @SupernotePluginExport
   double value();
 };
-// @SupernotePluginExport
+// @SupernotePluginObject
 struct PublicByDefault {
   PublicByDefault();
   // @SupernotePluginExport
@@ -1371,25 +1230,24 @@ struct PublicByDefault {
 """,
                 relative="access.hh",
             )
-            objects = binding_codegen.scan_bindings(module).objects
-            self.assertEqual(["PrivateByDefault", "PublicByDefault"], [item.js_name for item in objects])
-            self.assertEqual(1, len(objects[0].constructor.parameters))
-            self.assertEqual(0, len(objects[1].constructor.parameters))
+            objects = binding_codegen.scan_cpp_class_source_model(module)
+            self.assertEqual(["PrivateByDefault", "PublicByDefault"], [item.cpp_name for item in objects])
+            self.assertEqual(
+                ["private", "public"],
+                [item.access for item in objects[0].constructors],
+            )
+            self.assertEqual(1, len(objects[0].constructors[1].parameters))
+            self.assertEqual(0, len(objects[1].constructors[0].parameters))
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_object_rejects_unsupported_public_method_and_static_method(self):
+    def test_object_rejects_unsupported_types_and_accepts_static_methods(self):
         cases = {
             "unsupported-return": (
                 "int unsupported();",
-                "marked method must use one canonical V3 result type",
+                "unsupported marked C\\+\\+ type 'int'",
             ),
             "unsupported-parameter": (
                 "double evaluate(int value);",
-                "argument 1 must use one named canonical V3 value type",
-            ),
-            "static": (
-                "static double evaluate();",
-                "static methods are deferred",
+                "unsupported marked C\\+\\+ type 'int'",
             ),
         }
         for name, (method, diagnostic) in cases.items():
@@ -1397,15 +1255,24 @@ struct PublicByDefault {
                 module = self.make_module(Path(directory), backend="jsi")
                 self.write_object_header(
                     module,
-                    "// @SupernotePluginExport\nclass Example {\npublic:\n"
+                    "// @SupernotePluginObject\nclass Example {\npublic:\n"
                     "  Example();\n"
                     f"  // @SupernotePluginExport\n  {method}\n"
                     "};\n",
                 )
                 with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
-                    binding_codegen.scan_bindings(module)
+                    binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            self.write_object_header(
+                module,
+                "// @SupernotePluginObject\nclass Example {\npublic:\n"
+                "  // @SupernotePluginExport\n  static double evaluate();\n};\n",
+            )
+            item = binding_codegen.scan_cpp_semantic_model(module).declarations[0]
+            self.assertEqual(MemberScope.STATIC, item.methods[0].member_scope)
+
     def test_object_rejects_method_and_constructor_overloads(self):
         cases = {
             "method": (
@@ -1415,8 +1282,9 @@ struct PublicByDefault {
                 "duplicate generated method name 'value'",
             ),
             "constructor": (
-                "Example();\n  Example(double value);",
-                "multiple eligible constructors require exactly one",
+                "// @SupernoteConstructor\n  Example();\n"
+                "  // @SupernoteConstructor\n  Example(double value);",
+                "an object may select at most one SupernoteConstructor",
             ),
         }
         for name, (members, diagnostic) in cases.items():
@@ -1424,68 +1292,82 @@ struct PublicByDefault {
                 module = self.make_module(Path(directory), backend="jsi")
                 self.write_object_header(
                     module,
-                    "// @SupernotePluginExport\nclass Example {\npublic:\n  "
+                    "// @SupernotePluginObject\nclass Example {\npublic:\n  "
                     + members
                     + "\n};\n",
                 )
                 with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
-                    binding_codegen.scan_bindings(module)
+                    binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_object_export_name_collisions_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
-class add { public: add(); };
+                """// @SupernotePluginObject
+class add {
+public:
+  // @SupernoteConstructor
+  add();
+};
 """,
             )
-            with self.assertRaisesRegex(binding_codegen.CodegenError, "collides with free-function"):
-                binding_codegen.scan_bindings(module)
+            api = binding_codegen.scan_cpp_semantic_model(module)
+            with self.assertRaisesRegex(ValueError, "collid|duplicate"):
+                render_typescript("LocalTest", api)
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
-class Thing { public: Thing(); };
+                """// @SupernotePluginObject
+class Thing {
+public:
+  // @SupernoteConstructor
+  Thing();
+};
 """,
                 relative="First.hpp",
             )
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
-class Thing { public: Thing(); };
+                """// @SupernotePluginObject
+class Thing {
+public:
+  // @SupernoteConstructor
+  Thing();
+};
 """,
                 relative="Second.hpp",
             )
             with self.assertRaisesRegex(
                 binding_codegen.CodegenError,
-                re.escape("duplicate exported C++ object name"),
+                re.escape("duplicate marked C++ type definition"),
             ):
-                binding_codegen.scan_bindings(module)
+                binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_object_typescript_factory_name_collision_is_rejected(self):
+    def test_v3_object_named_factory_does_not_collide_with_another_object(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
-class Counter { public: Counter(); };
-// @SupernotePluginExport
-class CounterFactory { public: CounterFactory(); };
+                """// @SupernotePluginObject
+class Counter {
+public:
+  // @SupernoteConstructor
+  Counter();
+};
+// @SupernotePluginObject
+class CounterFactory {
+public:
+  // @SupernoteConstructor
+  CounterFactory();
+};
 """,
             )
-            with self.assertRaises(binding_codegen.CodegenError) as raised:
-                binding_codegen.scan_bindings(module)
-            message = str(raised.exception)
-            self.assertIn("generated TypeScript name 'CounterFactory'", message)
-            self.assertIn("object export 'Counter'", message)
-            self.assertIn("export 'CounterFactory'", message)
-            relative_header = str(Path("model/Counter.hpp"))
-            self.assertIn(f"{relative_header}:1", message)
-            self.assertIn(f"{relative_header}:3", message)
+            api = binding_codegen.scan_cpp_semantic_model(module)
+            declarations = render_typescript("LocalTest", api)
+            self.assertIn("export interface Counter {", declarations)
+            self.assertIn("export interface CounterFactory {", declarations)
 
     def test_v1_object_marker_and_alias_syntax_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1502,120 +1384,110 @@ class NativeCounter { public: NativeCounter(); };
             ):
                 binding_codegen.scan_bindings(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_object_typescript_module_interface_collision_is_rejected(self):
+    def test_v3_object_name_no_longer_collides_with_legacy_module_interface(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
-class LocalTestModule { public: LocalTestModule(); };
+                """// @SupernotePluginObject
+class LocalTestModule {
+public:
+  // @SupernoteConstructor
+  LocalTestModule();
+};
 """,
             )
-            with self.assertRaises(binding_codegen.CodegenError) as raised:
-                binding_codegen.scan_bindings(module)
-            message = str(raised.exception)
-            self.assertIn("generated TypeScript name 'LocalTestModule'", message)
-            self.assertIn("generated module interface 'LocalTestModule'", message)
-            self.assertIn("export 'LocalTestModule'", message)
+            api = binding_codegen.scan_cpp_semantic_model(module)
+            declarations = render_typescript("LocalTest", api)
+            self.assertIn("export interface LocalTestModule {", declarations)
+            self.assertIn("export interface LocalTestFeature {", declarations)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_generated_object_header_includes_are_unique(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class First { public: First(); };
-// @SupernotePluginExport
+// @SupernotePluginObject
 class Second { public: Second(); };
 """,
                 relative="model/Objects.hpp",
             )
             self.write_object_header(
                 module,
-                """// @SupernotePluginExport
+                """// @SupernotePluginObject
 class Third { public: Third(); };
 """,
                 relative="other/Third.hh",
             )
-            binding_codegen.generate(module)
-            generated = (
-                module
-                / "android/build/generated/supernote/jni/generated_bindings.cpp"
-            ).read_text(encoding="utf-8")
+            generated = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="LocalTest",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
             self.assertEqual(1, generated.count('#include "model/Objects.hpp"'))
             self.assertEqual(1, generated.count('#include "other/Third.hh"'))
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_object_annotation_location_backend_and_malformed_diagnostics(self):
         cases = (
             (
-                "jsi",
                 "Counter.cpp",
-                "// @SupernotePluginExport\nclass Counter { public: Counter(); };\n",
-                "supported top-level function definition",
+                "// @SupernotePluginObject\nclass Counter { public: Counter(); };\n",
+                "SupernotePluginObject and SupernotePluginValue are valid only on type declarations",
             ),
             (
-                "jni",
                 "Counter.hpp",
-                "// @SupernotePluginExport\nclass Counter { public: Counter(); };\n",
-                "require the JSI frontend",
-            ),
-            (
-                "jsi",
-                "Counter.hpp",
-                "// @SupernotePluginExport(bad)\nclass Counter { public: Counter(); };\n",
+                "// @SupernotePluginObject(bad)\nclass Counter { public: Counter(); };\n",
                 "malformed Supernote marker",
             ),
         )
-        for backend, relative, source, diagnostic in cases:
-            with self.subTest(backend=backend, relative=relative), tempfile.TemporaryDirectory() as directory:
-                module = self.make_module(Path(directory), backend=backend)
+        for relative, source, diagnostic in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                module = self.make_module(Path(directory), backend="jsi")
                 self.write_object_header(module, source, relative=relative)
                 with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
-                    binding_codegen.scan_bindings(module)
+                    binding_codegen.scan_cpp_semantic_model(module)
 
     def test_object_marker_lexer_defenses_and_conditional_diagnostic(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                'const char *text = "// @SupernotePluginExport";\n'
-                "/* // @SupernotePluginExport */\n"
-                "// Documentation mentions @SupernotePluginExport here.\n",
+                'const char *text = "// @SupernotePluginObject";\n'
+                "/* // @SupernotePluginObject */\n"
+                "// Documentation mentions @SupernotePluginObject here.\n",
             )
-            self.assertEqual((), binding_codegen.scan_bindings(module).objects)
+            self.assertEqual([], binding_codegen.scan_cpp_class_source_model(module))
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
                 module,
-                "#if 0\n// @SupernotePluginExport\n"
+                "#if 0\n// @SupernotePluginObject\n"
                 "class Hidden { public: Hidden(); };\n#endif\n",
             )
             with self.assertRaisesRegex(
                 binding_codegen.CodegenError,
                 "preprocessor conditional",
             ):
-                binding_codegen.scan_bindings(module)
+                binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_object_rejects_templates_inheritance_and_nested_exports(self):
         cases = {
             "template": (
-                "template <typename T>\n// @SupernotePluginExport\n"
+                "template <typename T>\n// @SupernotePluginObject\n"
                 "class Example { public: Example(); };\n",
                 "declaration prefix before the class marker",
             ),
             "inheritance": (
-                "// @SupernotePluginExport\n"
+                "// @SupernotePluginObject\n"
                 "class Example : public Base { public: Example(); };\n",
                 "inheritance is not supported",
             ),
             "nested": (
-                "class Outer {\n// @SupernotePluginExport\n"
+                "class Outer {\n// @SupernotePluginObject\n"
                 "class Example { public: Example(); };\n};\n",
-                "requires a marked top-level",
+                "marked C\\+\\+ types must be at global or named-namespace brace depth",
             ),
         }
         for name, (source, diagnostic) in cases.items():
@@ -1623,11 +1495,10 @@ class Third { public: Third(); };
                 module = self.make_module(Path(directory), backend="jsi")
                 self.write_object_header(module, source)
                 with self.assertRaisesRegex(binding_codegen.CodegenError, diagnostic):
-                    binding_codegen.scan_bindings(module)
+                    binding_codegen.scan_cpp_semantic_model(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_object_ignores_destructor_copy_constructor_and_public_fields(self):
-        source = """// @SupernotePluginExport
+        source = """// @SupernotePluginObject
 class Example {
 public:
   Example();
@@ -1642,13 +1513,12 @@ public:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
-            item = binding_codegen.scan_bindings(module).objects[0]
-            self.assertEqual((), item.constructor.parameters)
-            self.assertEqual(["value"], [method.js_name for method in item.methods])
+            item = binding_codegen.scan_cpp_class_source_model(module)[0]
+            self.assertTrue(item.constructors[0].implicit is False)
+            self.assertEqual(["value"], [method.cpp_name for method in item.methods])
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_constructor_containing_class_name_is_not_mistaken_for_copy(self):
-        source = """// @SupernotePluginExport
+        source = """// @SupernotePluginObject
 class Example {
 public:
   Example();
@@ -1658,8 +1528,12 @@ public:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
-            item = binding_codegen.scan_bindings(module).objects[0]
-            self.assertEqual((), item.constructor.parameters)
+            item = binding_codegen.scan_cpp_class_source_model(module)[0]
+            self.assertEqual(2, len(item.constructors))
+            self.assertEqual(
+                "std::vector<Example>&",
+                item.constructors[1].parameters[0].type_spelling,
+            )
 
     def test_free_function_annotation_in_header_remains_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1677,13 +1551,13 @@ public:
             ):
                 binding_codegen.scan_bindings(module)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_object_manifest_typescript_hostobject_and_lifetime_generation(self):
         source = """#pragma once
 #include <string>
-// @SupernotePluginExport
+// @SupernotePluginObject
 class Counter {
 public:
+  // @SupernoteConstructor
   Counter(double initial);
   // @SupernotePluginExport
   double value() const noexcept;
@@ -1697,47 +1571,36 @@ private:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
-            binding_codegen.generate(module)
-            manifest = json.loads((module / "android/build/generated/supernote/exports.json").read_text())
-            declarations = (module / "index.d.ts").read_text()
-            generated = (module / "android/build/generated/supernote/jni/generated_bindings.cpp").read_text()
-            self.assertEqual("Counter", manifest["objects"][0]["cpp_name"])
-            self.assertEqual("double", manifest["objects"][0]["constructor"]["parameters"][0]["type"])
-            self.assertTrue(manifest["objects"][0]["methods"][0]["const"])
+            api = binding_codegen.scan_cpp_semantic_model(module)
+            manifest = api.manifest()
+            declarations = render_typescript("LocalTest", api)
+            generated = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="LocalTest",
+                feature_id="supernote:feature:0123456789abcdef",
+            )
+            counter = manifest["types"][0]
+            self.assertEqual("Counter", counter["name"])
+            self.assertEqual("float64", counter["constructor"]["parameters"][0]["type"]["name"])
             self.assertIn("export interface Counter {", declarations)
-            self.assertIn("value(): number;", declarations)
-            self.assertIn("create(initial: number): Counter;", declarations)
-            self.assertIn("Counter: CounterFactory;", declarations)
+            self.assertIn("value: SupernoteCallable<[], number>;", declarations)
+            self.assertIn("create: SupernoteCallable<[initial: number], Counter>;", declarations)
+            self.assertIn("Counter: SupernoteTypeCompanion<Counter>", declarations)
             self.assertIn('#include "model/Counter.hpp"', generated)
-            self.assertIn("public facebook::jsi::HostObject", generated)
-            self.assertIn("std::shared_ptr<Counter> instance_", generated)
-            self.assertIn("std::make_shared<Counter>", generated)
+            self.assertIn("public supernote::runtime::CppObjectHandle<::Counter>", generated)
+            self.assertIn("ManagedRef<::Counter>", generated)
+            self.assertIn("std::make_shared<::Counter>", generated)
             self.assertIn("Object::createFromHostObject", generated)
             self.assertIn("getPropertyNames", generated)
             self.assertIn("properties.push_back", generated)
-            self.assertNotIn("return {\n", generated)
             self.assertIn('property_name == "increment"', generated)
-            self.assertIn("[native_instance = std::move(native_instance)]", generated)
-            self.assertNotIn("[this]", generated)
-            self.assertNotIn("this->", generated)
-            self.assertIn("LocalTest.Counter.increment: expected 1 argument", generated)
+            self.assertIn("native_instance->increment", generated)
             self.assertNotIn("resetInternalCache", declarations)
             self.assertNotIn('property_name == "resetInternalCache"', generated)
-            self.assertEqual(
-                ["add"],
-                [
-                    item.js_name
-                    for item in binding_codegen.generate(module, check=True)
-                ],
-            )
-            self.write_object_header(module, source.replace("increment", "increase"))
-            with self.assertRaisesRegex(binding_codegen.CodegenError, "generated bindings are stale"):
-                binding_codegen.generate(module, check=True)
 
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
     def test_selected_constructor_drives_generated_factory(self):
         source = """#include <string>
-// @SupernotePluginExport
+// @SupernotePluginObject
 class Document {
 public:
   Document(double handle);
@@ -1748,18 +1611,16 @@ public:
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
-            binding_codegen.generate(module)
-            declarations = (module / "index.d.ts").read_text()
-            generated = (
-                module
-                / "android/build/generated/supernote/jni/generated_bindings.cpp"
-            ).read_text()
-            self.assertIn("create(path: string): Document;", declarations)
-            self.assertIn(
-                "std::make_shared<Document>(arguments[0].asString(runtime).utf8(runtime))",
-                generated,
+            api = binding_codegen.scan_cpp_semantic_model(module)
+            declarations = render_typescript("LocalTest", api)
+            generated = binding_codegen.render_v2_feature_jsi(
+                module,
+                module_name="LocalTest",
+                feature_id="supernote:feature:0123456789abcdef",
             )
-            self.assertNotIn("create(handle: number): Document;", declarations)
+            self.assertIn("create: SupernoteCallable<[path: string], Document>;", declarations)
+            self.assertIn("std::make_shared<::Document>", generated)
+            self.assertNotIn("[handle: number]", declarations)
 
     def test_modules_without_objects_emit_empty_manifest_array(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1767,26 +1628,6 @@ public:
             binding_codegen.generate(module)
             manifest = json.loads((module / "android/build/generated/supernote/exports.json").read_text())
             self.assertEqual([], manifest["objects"])
-
-    @unittest.skip(V3_LEGACY_CLASS_MARKER_REMOVED)
-    def test_cli_summary_counts_native_objects_separately(self):
-        with tempfile.TemporaryDirectory() as directory:
-            module = self.make_module(Path(directory), backend="jsi", source="")
-            self.write_object_header(
-                module,
-                """// @SupernotePluginExport
-class Counter { public: Counter(); };
-""",
-            )
-            output = io.StringIO()
-            with redirect_stdout(output):
-                result = binding_codegen.main(["--module-root", str(module)])
-            self.assertEqual(0, result)
-            self.assertIn(
-                "Generated 0 free-function exports and 1 native-object exports",
-                output.getvalue(),
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

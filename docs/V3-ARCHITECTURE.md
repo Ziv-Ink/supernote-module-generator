@@ -97,6 +97,12 @@ supported Kotlin `suspend` implementations use the generated coroutine route.
 Once accepted, both use the same pending-operation, exactly-once completion,
 error, cancellation, and teardown lifecycle.
 
+Worker and deferred-destruction services start lazily. When the final session
+for one generated runtime generation is invalidated, that generation explicitly
+stops and joins its workers, clears pending JVM completions, and drains cleanup.
+This cleanup does not depend on the native library's static destructor because
+PluginHost may retain loaded generations in one process.
+
 Feature-only teardown rejects pending Promises while the runtime is healthy.
 Runtime teardown performs no JSI work and drops later completions. Physical work
 is cooperatively cancelled, never forcibly terminated, and teardown never waits

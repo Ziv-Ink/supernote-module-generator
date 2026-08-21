@@ -1,0 +1,22 @@
+V3 full-capability identity/lifetime stress resource summary
+Device: SN100C10004301
+PluginHost PID: 7126 before and after
+
+Before:
+  PSS: 111866 KB
+  RSS: 219716 KB (dumpsys meminfo)
+  Threads: 55
+
+After all completion markers:
+  PSS: 127654 KB
+  RSS: 235852 KB (dumpsys meminfo)
+  VmRSS: 229440 KB (/proc/7126/status)
+  Threads: 54
+
+Delta:
+  PSS: +15788 KB
+  RSS: +16136 KB
+  Threads: -1
+
+One before/after sample is not sufficient to classify a leak. The workload
+completed in the same PID with zero PluginHost/runtime error-pattern lines.

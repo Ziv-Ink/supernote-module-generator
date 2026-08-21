@@ -60,6 +60,7 @@ class JvmCallableRoute:
     owner_type_id: Optional[str]
     static: bool
     suspend: bool
+    javascript_public: bool
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,11 @@ def _callable(
         owner.type_id,
         static,
         suspend,
+        (
+            semantic.capabilities.javascript_public
+            if isinstance(semantic, SemanticBinding)
+            else True
+        ),
     )
 
 
@@ -280,6 +286,7 @@ def _value_constructor(
         owner.type_id,
         True,
         False,
+        True,
     ), tuple(item.name for item in ordered_fields)
 
 

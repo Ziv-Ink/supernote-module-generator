@@ -150,6 +150,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "runtime_bootstrap.cpp" in cmake
     assert "runtime_registration_bridge.c" in cmake
     assert services.count("static ProcessServices services") == 1
+    assert "void BoundedExecutor::ensure_started()" in services
+    assert "DeferredDestruction::DeferredDestruction()" in services
+    assert "ProcessServices::thread_count() const noexcept" in services
+    assert "ProcessServices::shutdown() noexcept" in services
     assert "class FeatureCallScope" in services_header
     assert "claim_internal_completion" in services_header
     assert "set_retained_state" in services_header
@@ -222,6 +226,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "TypeScript" not in processor
     assert "nativeInstall" in bootstrap
     assert "nativeInvalidate" in bootstrap
+    assert "last_session = g_sessions.empty()" in bootstrap
+    assert "process_services().shutdown()" in bootstrap
+    assert "stopped process services for runtime generation" in bootstrap
     assert "nativeRunJsTask" not in bootstrap
     assert "RegisterNatives" in bootstrap
     assert "register_coroutine_bridge(env, class_loader)" in bootstrap
@@ -429,6 +436,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   },
                   std::make_shared<int>(7));
               auto cleanup = std::make_shared<DeferredDestruction>();
+              if (cleanup->thread_count() != 0) return 39;
               auto feature = FeatureSession::create(runtime, cleanup);
               std::atomic<int> resolved{0};
               std::atomic<int> rejected{0};
@@ -584,6 +592,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               detached_runtime->invalidate();
 
               BoundedExecutor executor(1, 2);
+              if (executor.thread_count() != 0) return 40;
               std::atomic<int> worker_initialized{0};
               std::atomic<int> worker_cleaned{0};
               executor.set_thread_initializer([&] {
@@ -605,6 +614,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                 std::unique_lock lock(mutex);
                 ready.wait(lock, [&] { return started; });
               }
+              if (executor.thread_count() != 1) return 41;
               auto second = executor.submit(
                   [&](CancellationToken) { second_ran = true; });
               if (!first.accepted() || !second.accepted() || !second.cancel()) return 7;
@@ -616,8 +626,10 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               executor.shutdown();
               if (second_ran || !second.token().is_cancelled()) return 8;
               if (worker_initialized != 1 || worker_cleaned != 1) return 20;
+              if (executor.thread_count() != 0) return 42;
 
               std::atomic<int> jvm_completions{0};
+              if (process_services().thread_count() != 0) return 43;
               auto completion_id = process_services().register_jvm_async_completion(
                   [&](void *, void *, std::string code, std::string message) {
                     if (code == "IMPLEMENTATION_ERROR" && message == "failed") {
@@ -656,6 +668,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               if (destroyed_future.wait_for(std::chrono::seconds(2)) !=
                   std::future_status::ready) return 10;
               if (destroyed_future.get() == releasing_thread) return 11;
+              if (cleanup->thread_count() != 1) return 44;
 
               std::promise<std::thread::id> callback_destroyed;
               auto callback_destroyed_future = callback_destroyed.get_future();
@@ -695,6 +708,9 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   std::future_status::ready) return 21;
               allow_blocking_release.set_value();
               cleanup->drain_and_shutdown();
+              if (cleanup->thread_count() != 0) return 45;
+              process_services().shutdown();
+              if (process_services().thread_count() != 0) return 46;
               return 0;
             }
             """

@@ -1,0 +1,34 @@
+V3 reload-probe worker lifecycle fix verification
+Device: SN100C10004301
+PluginHost PID: 14490 for the baseline, all 25 cycles, and idle check
+Package SHA-256: f12e76ecf9e370337460677f69e04e5f7ad8b4a4f6193d144d2ee2aad456f400
+Generated runtime: 7a1b606af789
+
+Checkpoint       Threads   VmRSS KB
+Start                 39      241800
+Cycle 1               40      264932
+Cycle 5               41      351464
+Cycle 10              41      257848
+Cycle 15              41      318420
+Cycle 20              41      315932
+Cycle 25              41      260756
+Delayed idle          40      260732
+
+All 25 unique JavaScript markers passed through bundle revision 26, native
+generation remained 1, and PluginHost PID remained 14490. The diagnostic log
+contains 26 pass markers (the initial launch plus 25 replacements), exactly 25
+"stopped process services for runtime generation" markers, and zero matched
+PluginHost/runtime error lines.
+
+The original generated runtime eagerly created one four-thread BoundedExecutor
+and one DeferredDestruction thread in every uniquely loaded runtime generation.
+Those per-DSO static services could not reach their C++ static destructor while
+PluginHost retained the generation, explaining the measured five-thread linear
+increment. The fix makes both services lazy and explicitly shuts down the last
+session's process services from nativeInvalidate. The fixed device run changed
+from 39 to 41 threads during the stress and settled at 40 after idle, compared
+with the pre-fix change from 55 to 181 that remained at 181 after idle.
+
+The remaining one-thread difference is ordinary PluginHost/React fluctuation:
+the final inventory contains two active React contexts, not repeated groups of
+V3 worker threads. RSS fluctuated and is not classified as a leak by this test.

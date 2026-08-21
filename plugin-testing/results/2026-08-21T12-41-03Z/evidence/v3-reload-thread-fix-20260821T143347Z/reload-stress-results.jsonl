@@ -1,0 +1,27 @@
+{"kind":"reload_stress_start","cycles":25,"pluginHostPid":"14490","startedAt":"2026-08-21T14:24:13.426Z","resources":{"threads":39,"vmRssKb":241800}}
+{"kind":"reload_stress_cycle","cycle":1,"revision":2,"marker":"V3_RELOAD_PROBE_PASS bundle=2 native=1","pluginHostPid":"14490","durationMs":17490,"resources":{"threads":40,"vmRssKb":264932}}
+{"kind":"reload_stress_cycle","cycle":2,"revision":3,"marker":"V3_RELOAD_PROBE_PASS bundle=3 native=1","pluginHostPid":"14490","durationMs":17717}
+{"kind":"reload_stress_cycle","cycle":3,"revision":4,"marker":"V3_RELOAD_PROBE_PASS bundle=4 native=1","pluginHostPid":"14490","durationMs":18108}
+{"kind":"reload_stress_cycle","cycle":4,"revision":5,"marker":"V3_RELOAD_PROBE_PASS bundle=5 native=1","pluginHostPid":"14490","durationMs":18573}
+{"kind":"reload_stress_cycle","cycle":5,"revision":6,"marker":"V3_RELOAD_PROBE_PASS bundle=6 native=1","pluginHostPid":"14490","durationMs":18989,"resources":{"threads":41,"vmRssKb":351464}}
+{"kind":"reload_stress_cycle","cycle":6,"revision":7,"marker":"V3_RELOAD_PROBE_PASS bundle=7 native=1","pluginHostPid":"14490","durationMs":19395}
+{"kind":"reload_stress_cycle","cycle":7,"revision":8,"marker":"V3_RELOAD_PROBE_PASS bundle=8 native=1","pluginHostPid":"14490","durationMs":19713}
+{"kind":"reload_stress_cycle","cycle":8,"revision":9,"marker":"V3_RELOAD_PROBE_PASS bundle=9 native=1","pluginHostPid":"14490","durationMs":20176}
+{"kind":"reload_stress_cycle","cycle":9,"revision":10,"marker":"V3_RELOAD_PROBE_PASS bundle=10 native=1","pluginHostPid":"14490","durationMs":20695}
+{"kind":"reload_stress_cycle","cycle":10,"revision":11,"marker":"V3_RELOAD_PROBE_PASS bundle=11 native=1","pluginHostPid":"14490","durationMs":21078,"resources":{"threads":41,"vmRssKb":257848}}
+{"kind":"reload_stress_cycle","cycle":11,"revision":12,"marker":"V3_RELOAD_PROBE_PASS bundle=12 native=1","pluginHostPid":"14490","durationMs":21530}
+{"kind":"reload_stress_cycle","cycle":12,"revision":13,"marker":"V3_RELOAD_PROBE_PASS bundle=13 native=1","pluginHostPid":"14490","durationMs":22043}
+{"kind":"reload_stress_cycle","cycle":13,"revision":14,"marker":"V3_RELOAD_PROBE_PASS bundle=14 native=1","pluginHostPid":"14490","durationMs":22388}
+{"kind":"reload_stress_cycle","cycle":14,"revision":15,"marker":"V3_RELOAD_PROBE_PASS bundle=15 native=1","pluginHostPid":"14490","durationMs":22725}
+{"kind":"reload_stress_cycle","cycle":15,"revision":16,"marker":"V3_RELOAD_PROBE_PASS bundle=16 native=1","pluginHostPid":"14490","durationMs":23137,"resources":{"threads":41,"vmRssKb":318420}}
+{"kind":"reload_stress_cycle","cycle":16,"revision":17,"marker":"V3_RELOAD_PROBE_PASS bundle=17 native=1","pluginHostPid":"14490","durationMs":23672}
+{"kind":"reload_stress_cycle","cycle":17,"revision":18,"marker":"V3_RELOAD_PROBE_PASS bundle=18 native=1","pluginHostPid":"14490","durationMs":24010}
+{"kind":"reload_stress_cycle","cycle":18,"revision":19,"marker":"V3_RELOAD_PROBE_PASS bundle=19 native=1","pluginHostPid":"14490","durationMs":24468}
+{"kind":"reload_stress_cycle","cycle":19,"revision":20,"marker":"V3_RELOAD_PROBE_PASS bundle=20 native=1","pluginHostPid":"14490","durationMs":24814}
+{"kind":"reload_stress_cycle","cycle":20,"revision":21,"marker":"V3_RELOAD_PROBE_PASS bundle=21 native=1","pluginHostPid":"14490","durationMs":25251,"resources":{"threads":41,"vmRssKb":315932}}
+{"kind":"reload_stress_cycle","cycle":21,"revision":22,"marker":"V3_RELOAD_PROBE_PASS bundle=22 native=1","pluginHostPid":"14490","durationMs":25757}
+{"kind":"reload_stress_cycle","cycle":22,"revision":23,"marker":"V3_RELOAD_PROBE_PASS bundle=23 native=1","pluginHostPid":"14490","durationMs":26084}
+{"kind":"reload_stress_cycle","cycle":23,"revision":24,"marker":"V3_RELOAD_PROBE_PASS bundle=24 native=1","pluginHostPid":"14490","durationMs":26693}
+{"kind":"reload_stress_cycle","cycle":24,"revision":25,"marker":"V3_RELOAD_PROBE_PASS bundle=25 native=1","pluginHostPid":"14490","durationMs":26691}
+{"kind":"reload_stress_cycle","cycle":25,"revision":26,"marker":"V3_RELOAD_PROBE_PASS bundle=26 native=1","pluginHostPid":"14490","durationMs":26738,"resources":{"threads":41,"vmRssKb":260756}}
+{"kind":"reload_stress_complete","cycles":25,"pluginHostPid":"14490","startedAt":"2026-08-21T14:24:13.426Z","completedAt":"2026-08-21T14:33:31.783Z"}

@@ -25,7 +25,6 @@ from supernote_module_generator.internal_codegen import render_cpp_internal_faca
 from supernote_module_generator.semantic import (
     DeclarationRole,
     ExecutionMode,
-    SemanticClassKind,
     SemanticModelError,
     SemanticType,
     SourceProvenance,
@@ -45,14 +44,6 @@ from supernote_module_generator.source_models import (
 
 
 FEATURE_ID = "supernote:feature:0123456789abcdef"
-LEGACY_CLASS_MARKER_REMOVED = pytest.mark.skip(
-    reason=(
-        "superseded by the V3 Object/Value marker contract; concrete JVM "
-        "object-route coverage returns in Phase 6"
-    )
-)
-
-
 def provenance(identity: str, language: JvmLanguage, path: str, line: int):
     return SourceProvenance(identity, language.value, path, line, 1)
 
@@ -385,7 +376,6 @@ def test_kotlin_and_java_canonical_type_tables_are_exact():
     }
 
 
-@LEGACY_CLASS_MARKER_REMOVED
 def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     owner_name = "com.example.Document"
     first = constructor(
@@ -427,13 +417,13 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
         owner_name,
         "Document",
         JvmOwnerForm.CLASS,
-        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        intent(DeclarationTarget.CLASS, SupernoteMarker.OBJECT),
         (first, selected),
         (method, hidden),
     )
-    semantic = project_jvm_owners((owner,)).classes[0]
+    semantic = project_jvm_owners((owner,)).declarations[0]
 
-    assert semantic.kind is SemanticClassKind.JS_OBJECT
+    assert semantic.kind.value == "object"
     assert semantic.constructor.parameters[0].type is SemanticType.STRING
     assert [item.name for item in semantic.methods] == ["pageCount", "hiddenCache"]
     assert semantic.methods[1].capabilities.role is DeclarationRole.INTERNAL
@@ -443,15 +433,14 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
         feature_id=FEATURE_ID,
         module_name="Documents",
     )
-    assert "GeneratedJvmObject0HostObject" in generated
+    assert "GeneratedV3JvmObject0HostObject" in generated
     assert "Object::createFromHostObject" in generated
     assert 'property == "pageCount"' in generated
     assert 'property == "hiddenCache"' not in generated
     assert "method_route_1_" not in generated
-    assert "std::shared_ptr<JvmOwner> owner_" in generated
+    assert "ManagedJvmRef managed_" in generated
 
 
-@LEGACY_CLASS_MARKER_REMOVED
 def test_java_export_object_has_distinct_instance_and_worker_async_routes():
     owner_name = "com.example.JavaDocument"
     selected = constructor(
@@ -459,6 +448,7 @@ def test_java_export_object_has_distinct_instance_and_worker_async_routes():
         JvmLanguage.JAVA,
         "(J)V",
         (JvmParameterSource("long", "handle"),),
+        SupernoteMarker.CONSTRUCTOR,
     )
     value = declaration(
         owner_name,
@@ -489,7 +479,7 @@ def test_java_export_object_has_distinct_instance_and_worker_async_routes():
         owner_name,
         "JavaDocument",
         JvmOwnerForm.CLASS,
-        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        intent(DeclarationTarget.CLASS, SupernoteMarker.OBJECT),
         (selected,),
         (value, load),
     )
@@ -501,16 +491,15 @@ def test_java_export_object_has_distinct_instance_and_worker_async_routes():
         module_name="Documents",
     )
 
-    assert semantic.classes[0].kind is SemanticClassKind.JS_OBJECT
+    assert semantic.declarations[0].kind.value == "object"
     assert "Object::createFromHostObject" in generated
     assert "CallStaticObjectMethodA" in generated
     assert 'property == "value"' in generated
     assert 'property == "load"' in generated
     assert "process_services().workers().submit" in generated
-    assert "auto owner = owner_" in generated
+    assert "auto owner = owner_;" in generated
 
 
-@LEGACY_CLASS_MARKER_REMOVED
 def test_blocking_jvm_async_object_method_retains_global_receiver():
     owner_name = "com.example.Document"
     load = declaration(
@@ -530,7 +519,7 @@ def test_blocking_jvm_async_object_method_retains_global_receiver():
         owner_name,
         "Document",
         JvmOwnerForm.CLASS,
-        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        intent(DeclarationTarget.CLASS, SupernoteMarker.OBJECT),
         (constructor(owner_name, JvmLanguage.KOTLIN),),
         (load,),
     )
@@ -543,14 +532,14 @@ def test_blocking_jvm_async_object_method_retains_global_receiver():
 
     assert 'getPropertyAsFunction(runtime, "Promise")' in generated
     assert "auto owner = owner_;" in generated
-    assert "auto invoke = [route, owner]" in generated
+    assert "retained_input_state = std::make_shared<std::tuple<" in generated
+    assert "operation->set_retained_state(retained_input_state)" in generated
     assert "process_services().workers().submit" in generated
     assert "jvm_arguments[0].l" in generated
-    assert "owner->value.get()" in generated
+    assert "owner.get()" in generated
     assert "CallStaticObjectMethodA" in generated
 
 
-@LEGACY_CLASS_MARKER_REMOVED
 def test_suspend_jvm_object_method_retains_receiver_until_job_finishes():
     owner_name = "com.example.Document"
     load = declaration(
@@ -571,7 +560,7 @@ def test_suspend_jvm_object_method_retains_receiver_until_job_finishes():
         owner_name,
         "Document",
         JvmOwnerForm.CLASS,
-        intent(DeclarationTarget.CLASS, SupernoteMarker.EXPORT),
+        intent(DeclarationTarget.CLASS, SupernoteMarker.OBJECT),
         (constructor(owner_name, JvmLanguage.KOTLIN),),
         (load,),
     )
@@ -584,61 +573,11 @@ def test_suspend_jvm_object_method_retains_receiver_until_job_finishes():
 
     assert 'property == "loadPage"' in generated
     assert "auto owner = owner_;" in generated
-    assert "operation, weak_feature, route, cancel_route, completion_id, owner" in generated
-    assert "owner->value.get()" in generated
+    assert "completion_id" in generated
+    assert "retained_input_state = std::make_shared<std::tuple<" in generated
+    assert "owner.get()" in generated
     assert "Lkotlinx/coroutines/Job;" in generated
     assert "operation->set_cancel_hook" in generated
-
-
-@LEGACY_CLASS_MARKER_REMOVED
-def test_internal_jvm_class_is_a_hidden_feature_service():
-    owner_name = "com.example.IndexService"
-    method = declaration(
-        owner_name,
-        JvmLanguage.JAVA,
-        "rebuild",
-        "()V",
-        (),
-        "void",
-        SupernoteMarker.INTERNAL,
-        target=DeclarationTarget.METHOD,
-    )
-    owner = JvmOwnerSource(
-        provenance(jvm_owner_identity(owner_name), JvmLanguage.JAVA, "IndexService.java", 2),
-        JvmLanguage.JAVA,
-        owner_name,
-        "IndexService",
-        JvmOwnerForm.CLASS,
-        intent(DeclarationTarget.CLASS, SupernoteMarker.INTERNAL),
-        (constructor(owner_name, JvmLanguage.JAVA),),
-        (method,),
-    )
-    semantic = project_jvm_owners((owner,)).classes[0]
-
-    assert semantic.kind is SemanticClassKind.INTERNAL_SERVICE
-    assert semantic.capabilities.javascript_public is False
-    assert semantic.methods[0].capabilities.role is DeclarationRole.INTERNAL
-    manifest = JvmSourceManifest(FEATURE_ID, "2.0.0.dev0", (owner,))
-    api = project_jvm_owners((owner,))
-    generated = render_jvm_feature_jsi(
-        manifest,
-        api,
-        feature_id=FEATURE_ID,
-        module_name="Documents",
-    )
-    header, _ = render_cpp_internal_facade(
-        Path("/does/not/need/native/sources"),
-        module_name="Documents",
-        feature_id=FEATURE_ID,
-        jvm_manifest=manifest,
-        jvm_semantic=api,
-    )
-
-    assert "struct IndexService final" in header
-    assert "static void rebuild();" in header
-    assert "IndexService::rebuild" in generated
-    assert "feature->service<JvmOwner>" in generated
-    assert 'exports.setProperty(runtime, "rebuild"' not in generated
 
 
 def test_internal_jvm_functions_share_cpp_facade_across_sync_worker_and_suspend():
