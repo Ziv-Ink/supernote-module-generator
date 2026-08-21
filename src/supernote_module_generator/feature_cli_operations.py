@@ -1,4 +1,4 @@
-"""Transactional public CLI operations for V2 logical features."""
+"""Transactional public CLI operations for V3 logical features."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -11,7 +11,11 @@ from typing import Callable, Iterable, Optional
 
 from .errors import ConfigurationError, GeneratorError, SubprocessFailure
 from .feature_generator import FeatureConfig
-from .feature_operations import FeatureOperationService, FeatureRecord
+from .feature_operations import (
+    LEGACY_RUNTIME_RELATIVE_ROOT,
+    FeatureOperationService,
+    FeatureRecord,
+)
 from .feature_workflows import (
     FeatureAddDecisions,
     FeatureRemoveDecisions,
@@ -341,6 +345,7 @@ class FeatureCliOperationService:
             *parent_mutation_targets(self.root),
             *integration_mutation_files(self.root),
             self.root / RUNTIME_RELATIVE_ROOT,
+            self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
             *feature_paths,
         ]
         transaction.snapshot(paths)
@@ -480,7 +485,7 @@ class FeatureCliOperationService:
         if not success:
             assert error is not None
             raise SubprocessFailure(
-                "Gradle could not build the V2 plugin runtime.",
+                "Gradle could not build the V3 plugin runtime.",
                 kind="build_failed",
                 phase="build",
                 subprocess=error.to_dict(),

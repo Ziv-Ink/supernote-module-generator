@@ -1,4 +1,4 @@
-"""Language-neutral feature ownership and plugin runtime registry for V2."""
+"""Language-neutral feature ownership and plugin runtime registry for V3."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,16 +8,23 @@ from pathlib import PurePosixPath
 import re
 from typing import Dict, Iterable, Tuple
 
-from .semantic import ExecutionMode, SemanticApi
+from .semantic import (
+    ExecutionMode,
+    SemanticApi,
+    SemanticObjectDeclaration,
+)
+from .v3_schemas import (
+    FEATURE_MANIFEST_KIND,
+    FEATURE_MANIFEST_SCHEMA_VERSION,
+    PLUGIN_REGISTRY_KIND,
+    PLUGIN_REGISTRY_SCHEMA_VERSION,
+)
 
-
-FEATURE_MANIFEST_SCHEMA_VERSION = 2
-PLUGIN_REGISTRY_SCHEMA_VERSION = 1
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class FeatureModelError(ValueError):
-    """Raised when V2 ownership/build metadata violates its contract."""
+    """Raised when V3 ownership/build metadata violates its contract."""
 
 
 class StarterFamily(str, Enum):
@@ -112,7 +119,7 @@ class FeatureManifest:
     def manifest(self) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "kind": "supernote_feature",
+            "kind": FEATURE_MANIFEST_KIND,
             "feature_id": self.feature_id,
             "npm_name": self.npm_name,
             "public_name": self.public_name,
@@ -135,11 +142,19 @@ class FeatureRequirements:
         bindings = list(api.functions)
         for semantic_class in api.classes:
             bindings.extend(semantic_class.methods)
+        for declaration in api.declarations:
+            if isinstance(declaration, SemanticObjectDeclaration):
+                bindings.extend(declaration.methods)
         languages = {
             source.language
             for source in (
                 [binding.source for binding in bindings]
                 + [semantic_class.source for semantic_class in api.classes]
+                + [
+                    projection.source
+                    for declaration in api.declarations
+                    for projection in declaration.projections
+                ]
             )
         }
         unknown = languages - {"cpp", "kotlin", "java"}
@@ -158,6 +173,10 @@ class FeatureRequirements:
         ) or any(
             semantic_class.capabilities.javascript_public
             for semantic_class in api.classes
+        ) or any(
+            isinstance(declaration, SemanticObjectDeclaration)
+            and declaration.constructor is not None
+            for declaration in api.declarations
         )
         asynchronous = any(
             binding.execution is ExecutionMode.ASYNC for binding in bindings
@@ -265,7 +284,7 @@ class PluginRuntimeRegistry:
     def manifest(self) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "kind": "supernote_plugin_runtime_registry",
+            "kind": PLUGIN_REGISTRY_KIND,
             "plugin_id": self.plugin_id,
             "component_name": self.component_name,
             "generator_version": self.generator_version,

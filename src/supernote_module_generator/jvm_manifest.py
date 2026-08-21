@@ -8,23 +8,25 @@ from pathlib import Path
 from typing import Any
 
 from .semantic import SourceProvenance
+from .v3_schemas import (
+    JVM_SOURCE_MANIFEST_KIND as JVM_MANIFEST_KIND,
+    JVM_SOURCE_MANIFEST_SCHEMA_VERSION as JVM_MANIFEST_SCHEMA_VERSION,
+)
 from .source_models import (
     DeclarationTarget,
     JvmConstructorSource,
     JvmDeclarationSource,
     JvmInjectedDependency,
+    JvmFieldSource,
     JvmLanguage,
     JvmOwnerForm,
     JvmOwnerSource,
     JvmParameterSource,
+    JvmTypeSource,
     MarkerOccurrence,
     SourceIntent,
     SupernoteMarker,
 )
-
-
-JVM_MANIFEST_SCHEMA_VERSION = 1
-JVM_MANIFEST_KIND = "supernote_jvm_source_manifest"
 
 
 class JvmManifestError(ValueError):
@@ -66,6 +68,12 @@ class JvmSourceManifest:
                     declaration.jvm_descriptor,
                 )
                 _validate_identity(declaration.provenance, declaration.adapter_identity, expected)
+            for source_field in owner.fields:
+                expected = jvm_field_identity(owner.owner_class, source_field.name)
+                if source_field.provenance.declaration_id != expected:
+                    raise JvmManifestError("JVM field identity is not deterministic")
+                if source_field.accessor_identity != jvm_field_accessor_identity(expected):
+                    raise JvmManifestError("JVM field accessor identity is not deterministic")
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -147,6 +155,15 @@ def jvm_adapter_identity(declaration_id: str) -> str:
     return f"supernote.jvm.adapter.{digest}"
 
 
+def jvm_field_identity(owner_class: str, name: str) -> str:
+    return f"jvm:{owner_class}#field:{name}"
+
+
+def jvm_field_accessor_identity(declaration_id: str) -> str:
+    digest = hashlib.sha256(declaration_id.encode("utf-8")).hexdigest()[:20]
+    return f"supernote.jvm.field.{digest}"
+
+
 def _owner_manifest(owner: JvmOwnerSource) -> dict[str, object]:
     return {
         "source": owner.provenance.manifest(),
@@ -168,6 +185,16 @@ def _owner_manifest(owner: JvmOwnerSource) -> dict[str, object]:
                 owner.declarations, key=lambda value: value.provenance.declaration_id
             )
         ],
+        "fields": [
+            _field_manifest(item)
+            for item in owner.fields
+        ],
+        "enum_constants": list(owner.enum_constants),
+        "is_data": owner.is_data,
+        "is_record": owner.is_record,
+        "is_final": owner.is_final,
+        "type_parameter_count": owner.type_parameter_count,
+        "supertypes": list(owner.supertypes),
     }
 
 
@@ -198,6 +225,23 @@ def _declaration_manifest(source: JvmDeclarationSource) -> dict[str, object]:
         "language": source.language.value,
         "is_suspend": source.is_suspend,
         "is_static": source.is_static,
+        "result_type_arguments": [
+            _type_manifest(item) for item in source.result_type_arguments
+        ],
+    }
+
+
+def _field_manifest(source: JvmFieldSource) -> dict[str, object]:
+    return {
+        "source": source.provenance.manifest(),
+        "owner_declaration_id": source.owner_declaration_id,
+        "name": source.name,
+        "type": _type_manifest(source.type),
+        "markers": _intent_manifest(source.intent),
+        "visibility": source.visibility,
+        "mutable": source.mutable,
+        "is_static": source.is_static,
+        "accessor_identity": source.accessor_identity,
     }
 
 
@@ -207,6 +251,15 @@ def _parameter_manifest(source: JvmParameterSource) -> dict[str, object]:
         "name": source.name,
         "nullable": source.nullable,
         "injected": source.injected.value if source.injected is not None else None,
+        "type_arguments": [_type_manifest(item) for item in source.type_arguments],
+    }
+
+
+def _type_manifest(source: JvmTypeSource) -> dict[str, object]:
+    return {
+        "jvm_type": source.jvm_type,
+        "nullable": source.nullable,
+        "arguments": [_type_manifest(item) for item in source.arguments],
     }
 
 
@@ -228,7 +281,9 @@ def _parse_owner(raw: Any, index: int) -> JvmOwnerSource:
         value,
         {
             "source", "language", "owner_class", "source_name", "form",
-            "markers", "constructors", "declarations", "visibility",
+            "markers", "constructors", "declarations", "visibility", "fields",
+            "enum_constants", "is_data", "is_record", "is_final",
+            "type_parameter_count", "supertypes",
         },
         label,
     )
@@ -273,6 +328,30 @@ def _parse_owner(raw: Any, index: int) -> JvmOwnerSource:
             for item_index, item in enumerate(_list(value["declarations"], f"{label}.declarations"))
         ),
         visibility=_string(value["visibility"], f"{label}.visibility"),
+        fields=tuple(
+            _parse_field(item, owner_id, f"{label}.fields[{item_index}]")
+            for item_index, item in enumerate(
+                _list(value["fields"], f"{label}.fields")
+            )
+        ),
+        enum_constants=tuple(
+            _string(item, f"{label}.enum_constants[{item_index}]")
+            for item_index, item in enumerate(
+                _list(value["enum_constants"], f"{label}.enum_constants")
+            )
+        ),
+        is_data=_bool(value["is_data"], f"{label}.is_data"),
+        is_record=_bool(value["is_record"], f"{label}.is_record"),
+        is_final=_bool(value["is_final"], f"{label}.is_final"),
+        type_parameter_count=_integer(
+            value["type_parameter_count"], f"{label}.type_parameter_count"
+        ),
+        supertypes=tuple(
+            _string(item, f"{label}.supertypes[{item_index}]")
+            for item_index, item in enumerate(
+                _list(value["supertypes"], f"{label}.supertypes")
+            )
+        ),
     )
 
 
@@ -314,6 +393,7 @@ def _parse_declaration(
             "jvm_descriptor", "parameters", "result_jvm_type",
             "result_nullable", "markers", "visibility", "adapter_identity",
             "language", "is_suspend", "is_static",
+            "result_type_arguments",
         },
         label,
     )
@@ -347,6 +427,15 @@ def _parse_declaration(
         language=language,
         is_suspend=_bool(value["is_suspend"], f"{label}.is_suspend"),
         is_static=_bool(value["is_static"], f"{label}.is_static"),
+        result_type_arguments=tuple(
+            _parse_type(item, f"{label}.result_type_arguments[{index}]")
+            for index, item in enumerate(
+                _list(
+                    value["result_type_arguments"],
+                    f"{label}.result_type_arguments",
+                )
+            )
+        ),
     )
 
 
@@ -371,7 +460,7 @@ def _validate_identity(
 
 def _parse_parameter(raw: Any, label: str) -> JvmParameterSource:
     value = _object(raw, label)
-    _keys(value, {"jvm_type", "name", "nullable", "injected"}, label)
+    _keys(value, {"jvm_type", "name", "nullable", "injected", "type_arguments"}, label)
     injected_raw = value["injected"]
     injected = None if injected_raw is None else _enum(JvmInjectedDependency, injected_raw, f"{label}.injected")
     return JvmParameterSource(
@@ -379,6 +468,52 @@ def _parse_parameter(raw: Any, label: str) -> JvmParameterSource:
         name=_string(value["name"], f"{label}.name"),
         nullable=_bool(value["nullable"], f"{label}.nullable"),
         injected=injected,
+        type_arguments=tuple(
+            _parse_type(item, f"{label}.type_arguments[{index}]")
+            for index, item in enumerate(
+                _list(value["type_arguments"], f"{label}.type_arguments")
+            )
+        ),
+    )
+
+
+def _parse_type(raw: Any, label: str) -> JvmTypeSource:
+    value = _object(raw, label)
+    _keys(value, {"jvm_type", "nullable", "arguments"}, label)
+    return JvmTypeSource(
+        _string(value["jvm_type"], f"{label}.jvm_type"),
+        _bool(value["nullable"], f"{label}.nullable"),
+        tuple(
+            _parse_type(item, f"{label}.arguments[{index}]")
+            for index, item in enumerate(
+                _list(value["arguments"], f"{label}.arguments")
+            )
+        ),
+    )
+
+
+def _parse_field(raw: Any, owner_id: str, label: str) -> JvmFieldSource:
+    value = _object(raw, label)
+    _keys(
+        value,
+        {
+            "source", "owner_declaration_id", "name", "type", "markers",
+            "visibility", "mutable", "is_static", "accessor_identity",
+        },
+        label,
+    )
+    if _string(value["owner_declaration_id"], f"{label}.owner_declaration_id") != owner_id:
+        raise JvmManifestError(f"{label}.owner_declaration_id does not match owner")
+    return JvmFieldSource(
+        _parse_provenance(value["source"], f"{label}.source"),
+        owner_id,
+        _string(value["name"], f"{label}.name"),
+        _parse_type(value["type"], f"{label}.type"),
+        _parse_intent(value["markers"], DeclarationTarget.FIELD, f"{label}.markers"),
+        _string(value["visibility"], f"{label}.visibility"),
+        _bool(value["mutable"], f"{label}.mutable"),
+        _bool(value["is_static"], f"{label}.is_static"),
+        _string(value["accessor_identity"], f"{label}.accessor_identity"),
     )
 
 

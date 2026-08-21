@@ -84,11 +84,16 @@ def test_native_codegen_is_self_contained_and_checkable(tmp_path):
     codegen_root = module / "android/.supernote-module"
     support_root = codegen_root / "supernote_codegen"
     expected_support = {
-        "__init__.py",
-        "cpp_projection.py",
+            "__init__.py",
+            "conversion.py",
+            "cpp_projection.py",
+            "cpp_routes.py",
+            "cpp_object_binding_codegen.py",
         "lowering.py",
         "semantic.py",
+        "semantic_types.py",
         "source_models.py",
+        "v3_schemas.py",
     }
     assert {path.name for path in support_root.iterdir()} == expected_support
 

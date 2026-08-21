@@ -24,9 +24,14 @@ from .validation import package_path, validate_config
 
 
 CODEGEN_SUPPORT_MODULES = (
+    "conversion.py",
+    "v3_schemas.py",
     "semantic.py",
+    "semantic_types.py",
     "source_models.py",
     "cpp_projection.py",
+    "cpp_routes.py",
+    "cpp_object_binding_codegen.py",
     "lowering.py",
 )
 

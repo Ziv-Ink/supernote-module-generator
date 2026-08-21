@@ -1,4 +1,6 @@
+import copy
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -43,6 +45,12 @@ from supernote_module_generator.source_models import (
 
 
 FEATURE_ID = "supernote:feature:0123456789abcdef"
+LEGACY_CLASS_MARKER_REMOVED = pytest.mark.skip(
+    reason=(
+        "superseded by the V3 Object/Value marker contract; concrete JVM "
+        "object-route coverage returns in Phase 6"
+    )
+)
 
 
 def provenance(identity: str, language: JvmLanguage, path: str, line: int):
@@ -183,6 +191,53 @@ def test_manifest_round_trip_is_deterministic_versioned_and_backend_specific(
     assert declaration_raw["is_suspend"] is True
     assert "javascript_name" not in declaration_raw
     assert "jsi" not in json.dumps(raw).lower()
+
+
+def test_seeded_manifest_mutation_fuzz_rejects_every_invalid_shape(tmp_path: Path):
+    seed = 0x4A56_4D33
+    rng = random.Random(seed)
+    baseline = JvmSourceManifest(
+        FEATURE_ID, "2.0.0.dev0", (ordinary_kotlin_owner(),)
+    ).manifest()
+    path = tmp_path / "fuzzed-jvm-source.json"
+
+    for iteration in range(2_048):
+        raw = copy.deepcopy(baseline)
+        mutation = rng.randrange(12)
+        if mutation == 0:
+            raw = []
+        elif mutation == 1:
+            raw.pop("kind")
+        elif mutation == 2:
+            raw["unexpected"] = iteration
+        elif mutation == 3:
+            raw["schema_version"] = "3"
+        elif mutation == 4:
+            raw["kind"] = "guessed-kind"
+        elif mutation == 5:
+            raw["feature_id"] = "wrong-feature"
+        elif mutation == 6:
+            raw["frontend_version"] = ""
+        elif mutation == 7:
+            raw["owners"] = {}
+        elif mutation == 8:
+            raw["owners"][0]["unexpected"] = True
+        elif mutation == 9:
+            raw["owners"][0]["language"] = "scala"
+        elif mutation == 10:
+            raw["owners"][0]["source"]["declaration_id"] = "jvm:wrong.Owner"
+        else:
+            raw["owners"][0]["declarations"][0][
+                "adapter_identity"
+            ] = "non-deterministic"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        try:
+            read_jvm_manifest(path, expected_feature_id=FEATURE_ID)
+        except JvmManifestError:
+            continue
+        pytest.fail(
+            f"seed={seed} iteration={iteration} accepted invalid manifest: {raw!r}"
+        )
 
 
 def test_projection_maps_kotlin_suspend_to_common_semantics_without_losing_route_facts():
@@ -330,6 +385,7 @@ def test_kotlin_and_java_canonical_type_tables_are_exact():
     }
 
 
+@LEGACY_CLASS_MARKER_REMOVED
 def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     owner_name = "com.example.Document"
     first = constructor(
@@ -395,6 +451,7 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
     assert "std::shared_ptr<JvmOwner> owner_" in generated
 
 
+@LEGACY_CLASS_MARKER_REMOVED
 def test_java_export_object_has_distinct_instance_and_worker_async_routes():
     owner_name = "com.example.JavaDocument"
     selected = constructor(
@@ -453,6 +510,7 @@ def test_java_export_object_has_distinct_instance_and_worker_async_routes():
     assert "auto owner = owner_" in generated
 
 
+@LEGACY_CLASS_MARKER_REMOVED
 def test_blocking_jvm_async_object_method_retains_global_receiver():
     owner_name = "com.example.Document"
     load = declaration(
@@ -492,6 +550,7 @@ def test_blocking_jvm_async_object_method_retains_global_receiver():
     assert "CallStaticObjectMethodA" in generated
 
 
+@LEGACY_CLASS_MARKER_REMOVED
 def test_suspend_jvm_object_method_retains_receiver_until_job_finishes():
     owner_name = "com.example.Document"
     load = declaration(
@@ -531,6 +590,7 @@ def test_suspend_jvm_object_method_retains_receiver_until_job_finishes():
     assert "operation->set_cancel_hook" in generated
 
 
+@LEGACY_CLASS_MARKER_REMOVED
 def test_internal_jvm_class_is_a_hidden_feature_service():
     owner_name = "com.example.IndexService"
     method = declaration(
@@ -659,6 +719,7 @@ def test_internal_jvm_functions_share_cpp_facade_across_sync_worker_and_suspend(
     assert "claim_internal_completion" in generated
     assert generated.count("feature->accept({}, std::move(callback))") == 2
     assert "operation->take_internal_completion()" in generated
+    assert "operation->set_retained_state(retained_input_state)" in generated
     assert "[operation, weak_feature, callback" not in generated
     assert "deliver_internal_callback" in generated
     assert "FeatureCallScope" in generated
@@ -696,10 +757,17 @@ def test_manifest_rejects_incompatible_or_guessed_boundary_data(
 
 
 @pytest.mark.parametrize(
-    "unsupported",
-    ["kotlin.Int?", "kotlin.collections.List", "java.lang.Integer", "java.nio.ByteBuffer"],
+    ("unsupported", "diagnostic"),
+    [
+        ("kotlin.Int?", "unsupported marked"),
+        ("kotlin.collections.List", "List requires exactly one"),
+        ("java.lang.Integer", "primitive spelling"),
+        ("java.nio.ByteBuffer", "unsupported marked"),
+    ],
 )
-def test_projection_rejects_noncanonical_jvm_types(unsupported: str):
+def test_projection_rejects_noncanonical_jvm_types(
+    unsupported: str, diagnostic: str
+):
     owner = ordinary_kotlin_owner()
     language = (
         JvmLanguage.JAVA if unsupported.startswith("java.") else JvmLanguage.KOTLIN
@@ -724,7 +792,7 @@ def test_projection_rejects_noncanonical_jvm_types(unsupported: str):
         (),
         (source,),
     )
-    with pytest.raises(JvmProjectionError, match="unsupported marked"):
+    with pytest.raises(JvmProjectionError, match=diagnostic):
         project_jvm_owners((bad_owner,))
 
 

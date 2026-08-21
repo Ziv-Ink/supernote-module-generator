@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from supernote_module_generator.feature_model import (
+    FEATURE_MANIFEST_KIND,
     FEATURE_MANIFEST_SCHEMA_VERSION,
     FeatureManifest,
     FeatureModelError,
@@ -56,7 +57,7 @@ def test_feature_manifest_is_language_neutral_and_starters_are_bookkeeping():
     value = manifest.manifest()
 
     assert value["schema_version"] == FEATURE_MANIFEST_SCHEMA_VERSION
-    assert value["kind"] == "supernote_feature"
+    assert value["kind"] == FEATURE_MANIFEST_KIND
     assert value["implementation_roots"] == {
         "native": "android/src/main/cpp",
         "jvm": "android/src/main/java",
@@ -114,12 +115,12 @@ def test_plugin_registry_has_one_stable_component_and_deterministic_order():
     )
     left = PluginRuntimeRegistry.create(
         plugin_id="com.example.plugin",
-        generator_version="2.0.0.dev0",
+        generator_version="3.0.0.dev0",
         features=(second, first),
     )
     right = PluginRuntimeRegistry.create(
         plugin_id="com.example.plugin",
-        generator_version="2.0.0.dev0",
+        generator_version="3.0.0.dev0",
         features=(first, second),
     )
 
@@ -135,10 +136,10 @@ def test_removing_one_registry_entry_preserves_component_and_other_feature():
     alpha = FeatureRegistryEntry.create(feature("alpha"), SemanticApi())
     beta = FeatureRegistryEntry.create(feature("beta"), SemanticApi())
     full = PluginRuntimeRegistry.create(
-        plugin_id="plugin", generator_version="2.0.0.dev0", features=(alpha, beta)
+        plugin_id="plugin", generator_version="3.0.0.dev0", features=(alpha, beta)
     )
     reduced = PluginRuntimeRegistry.create(
-        plugin_id="plugin", generator_version="2.0.0.dev0", features=(beta,)
+        plugin_id="plugin", generator_version="3.0.0.dev0", features=(beta,)
     )
 
     assert full.component_name == reduced.component_name
@@ -167,6 +168,6 @@ def test_registry_rejects_duplicate_feature_public_identity():
     with pytest.raises(FeatureModelError, match="duplicate feature public name"):
         PluginRuntimeRegistry.create(
             plugin_id="plugin",
-            generator_version="2.0.0.dev0",
+            generator_version="3.0.0.dev0",
             features=(alpha, duplicate),
         )

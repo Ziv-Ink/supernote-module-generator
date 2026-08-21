@@ -111,7 +111,19 @@ def object_method(
 
 
 def test_initial_semantic_types_are_exact_and_stable():
-    assert [item.value for item in SemanticType] == [
+    assert [
+        item.value
+        for item in (
+            SemanticType.VOID,
+            SemanticType.BOOL,
+            SemanticType.INT32,
+            SemanticType.INT64,
+            SemanticType.FLOAT32,
+            SemanticType.FLOAT64,
+            SemanticType.STRING,
+            SemanticType.BYTES,
+        )
+    ] == [
         "void",
         "bool",
         "int32",
@@ -175,7 +187,7 @@ def test_source_intent_validates_composable_source_located_markers_and_targets()
         (
             DeclarationTarget.CLASS,
             (SupernoteMarker.EXPORT, SupernoteMarker.ASYNC),
-            "cannot mark a class",
+            "classes require exactly one",
         ),
         (
             DeclarationTarget.FUNCTION,
@@ -269,8 +281,10 @@ def test_semantic_api_is_backend_neutral_deterministic_and_validated():
         source,
     )
     manifest = SemanticApi((binding,)).manifest()
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 3
+    assert manifest["kind"] == "supernote_v3_semantic_manifest"
     assert manifest["classes"] == []
+    assert manifest["types"] == []
     assert manifest["functions"][0]["binding_id"] == "api:function:loadPage"
     assert manifest["functions"][0]["source_declaration_id"] == source.declaration_id
     assert "jniDescriptor" not in manifest["functions"][0]
@@ -451,7 +465,7 @@ def test_jvm_source_model_keeps_owner_constructor_adapter_and_injection_facts():
         "com.example.DocumentApi",
         "DocumentApi",
         JvmOwnerForm.CLASS,
-        intent(DeclarationTarget.CLASS, SupernoteMarker.INTERNAL),
+        intent(DeclarationTarget.CLASS),
         (constructor,),
         (declaration,),
     )
@@ -512,7 +526,7 @@ def test_jvm_source_model_rejects_impossible_suspend_and_owner_forms():
             "Example",
             "Example",
             JvmOwnerForm.KOTLIN_OBJECT,
-            intent(DeclarationTarget.CLASS, SupernoteMarker.INTERNAL),
+            intent(DeclarationTarget.CLASS),
             (),
             (),
         )

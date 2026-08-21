@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from .binding_codegen import (
     Parameter,
@@ -16,6 +16,9 @@ from .binding_codegen import (
     _jsi_value_helpers,
 )
 from .jvm_manifest import JvmSourceManifest
+from .jvm_object_binding_codegen import render_jvm_object_bindings
+from .jvm_object_runtime_codegen import render_jvm_object_runtime
+from .jvm_routes import JvmRouteError, plan_jvm_routes
 from .internal_codegen import internal_header_path, internal_namespace
 from .semantic import (
     DeclarationRole,
@@ -26,12 +29,16 @@ from .semantic import (
     SemanticClassKind,
     SemanticType,
 )
+from .semantic_types import SemanticTypeKind
 from .source_models import (
     JvmConstructorSource,
     JvmDeclarationSource,
     JvmOwnerForm,
     JvmOwnerSource,
 )
+
+if TYPE_CHECKING:
+    from .cross_family_codegen import CrossFamilyRenderer
 
 
 class JvmCodegenError(ValueError):
@@ -74,6 +81,8 @@ def render_jvm_feature_jsi(
     *,
     feature_id: str,
     module_name: str,
+    conversion_digest: str | None = None,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> str:
     if manifest.feature_id != feature_id:
         raise JvmCodegenError("JVM manifest and feature identity disagree")
@@ -101,6 +110,7 @@ def render_jvm_feature_jsi(
                 module_name=module_name,
                 feature_suffix=suffix,
                 helper_prefix=f"internal_service_{index}",
+                cross_family=cross_family,
             )
             internal_helpers.extend(helpers)
             internal_facades.extend(facades)
@@ -108,8 +118,31 @@ def render_jvm_feature_jsi(
         wrapper, registration = _render_object(owner, item, index, module_name)
         object_wrappers.append(wrapper)
         object_registrations.append(registration)
+    try:
+        v3_jvm_routes = plan_jvm_routes(semantic, manifest.owners)
+        v3_wrappers, v3_registrations = render_jvm_object_bindings(
+            v3_jvm_routes,
+            feature_id=feature_id,
+            module_name=module_name,
+        )
+    except JvmRouteError as exc:
+        raise JvmCodegenError(str(exc)) from exc
+    object_wrappers.extend(v3_wrappers)
+    object_registrations.extend(v3_registrations)
+    has_v3_jvm_objects = bool(v3_jvm_routes.objects) or any(
+        item.kind.value not in {"void", "scalar"}
+        for route in v3_jvm_routes.functions
+        for item in (*route.parameters, route.result)
+    )
     registrations: list[str] = []
-    has_async = False
+    has_async = any(
+        route.execution is ExecutionMode.ASYNC
+        for route in v3_jvm_routes.functions
+    ) or any(
+        route.execution is ExecutionMode.ASYNC
+        for item in v3_jvm_routes.objects
+        for route in item.methods
+    )
     for owner in manifest.owners:
         if owner.intent.role is not DeclarationRole.ORDINARY:
             continue
@@ -125,9 +158,21 @@ def render_jvm_feature_jsi(
                     module_name=module_name,
                     feature_suffix=suffix,
                     helper_name=f"internal_function_{len(internal_helpers)}",
+                    cross_family=cross_family,
                 )
                 internal_helpers.append(helper)
                 internal_facades.append(facade)
+                continue
+            if any(
+                item.kind.value not in {"void", "scalar"}
+                for item in (
+                    *(parameter.type for parameter in binding.parameters),
+                    binding.result,
+                )
+            ):
+                # Recursive V3 JVM routes own object/value/enum/array/nullable
+                # conversion.  The retained scalar renderer must not guess
+                # descriptors for those types.
                 continue
             if binding.execution is ExecutionMode.ASYNC:
                 if declaration.is_suspend:
@@ -163,7 +208,30 @@ def render_jvm_feature_jsi(
     )
     if has_async:
         helpers += "\n\n" + _jsi_async_helpers()
-    return f'''#include <jni.h>
+    if conversion_digest is not None and (
+        len(conversion_digest) != 64
+        or any(value not in "0123456789abcdef" for value in conversion_digest)
+    ):
+        raise JvmCodegenError("invalid V3 conversion-plan digest")
+    digest_comment = (
+        ""
+        if conversion_digest is None
+        else (
+            f"// Supernote V3 conversion plan SHA-256: {conversion_digest}\n"
+            "#include <supernote/conversion.hpp>\n"
+        )
+    )
+    object_runtime = render_jvm_object_runtime()
+    v3_registry_setup = (
+        "  auto object_registry = std::make_shared<JvmObjectRegistry>();\n"
+        "  exports.setProperty(\n"
+        "      runtime, kJvmObjectRegistryProperty,\n"
+        "      Object::createFromHostObject(\n"
+        "          runtime, std::make_shared<JvmObjectRegistryOwner>(object_registry)));\n"
+        if has_v3_jvm_objects
+        else ""
+    )
+    return digest_comment + f'''#include <jni.h>
 #include <jsi/jsi.h>
 
 #include <android/log.h>
@@ -173,12 +241,17 @@ def render_jvm_feature_jsi(
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
+#include <list>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -188,10 +261,12 @@ def render_jvm_feature_jsi(
 namespace supernote::generated::jvm_feature_{suffix} {{
 namespace {{
 
-constexpr char kLogTag[] = "SupernoteV2Jvm";
+constexpr char kLogTag[] = "SupernoteV3Jvm";
 constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV2FeatureRegistry_63f6999c8c67";
+    "__supernoteV3FeatureRegistry_63f6999c8c67";
 constexpr char kFeatureId[] = {json.dumps(feature_id)};
+constexpr char kJvmObjectRegistryProperty[] =
+    "__supernoteV3JvmObjectRegistry_2cfbc9ce6375";
 
 {helpers}
 
@@ -332,6 +407,8 @@ std::shared_ptr<void> retain_global(JNIEnv *env, jobject value) {{
   }});
 }}
 
+{object_runtime}
+
 struct JvmRoute {{
   std::shared_ptr<void> adapter_class;
   jmethodID method{{nullptr}};
@@ -455,6 +532,7 @@ void require_no_implementation_exception(JNIEnv *env) {{
 
 }}  // namespace
 
+{cross_family.render_helpers() if cross_family is not None else ""}
 {chr(10).join(internal_helpers)}
 
 void register_jvm_feature(
@@ -468,7 +546,7 @@ void register_jvm_feature(
   using facebook::jsi::Value;
 
   auto exports = feature_registry.getPropertyAsObject(runtime, kFeatureId);
-{chr(10).join(registrations)}
+{v3_registry_setup}{chr(10).join(registrations)}
 {chr(10).join(object_registrations)}
 }}
 
@@ -490,6 +568,7 @@ def _render_internal_function(
     module_name: str,
     feature_suffix: str,
     helper_name: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> tuple[str, str]:
     if source.is_suspend:
         return _render_internal_suspend_route(
@@ -499,9 +578,14 @@ def _render_internal_function(
             feature_suffix=feature_suffix,
             helper_name=helper_name,
             facade_name=binding.name,
+            cross_family=cross_family,
         )
     helper = _render_internal_blocking_helper(
-        owner, source, binding, helper_name=helper_name
+        owner,
+        source,
+        binding,
+        helper_name=helper_name,
+        cross_family=cross_family,
     )
     if binding.execution is ExecutionMode.ASYNC:
         facade = _render_internal_blocking_async_facade(
@@ -509,6 +593,7 @@ def _render_internal_function(
             feature_suffix=feature_suffix,
             helper_name=helper_name,
             facade_name=binding.name,
+            cross_family=cross_family,
         )
     else:
         facade = _render_internal_sync_facade(
@@ -516,6 +601,7 @@ def _render_internal_function(
             feature_suffix=feature_suffix,
             helper_name=helper_name,
             facade_name=binding.name,
+            cross_family=cross_family,
         )
     return helper, facade
 
@@ -527,6 +613,7 @@ def _render_internal_service(
     module_name: str,
     feature_suffix: str,
     helper_prefix: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> tuple[list[str], list[str]]:
     del module_name
     declarations = {
@@ -552,10 +639,15 @@ def _render_internal_service(
                 feature_suffix=feature_suffix,
                 helper_name=helper_name,
                 facade_name=facade_name,
+                cross_family=cross_family,
             )
         else:
             helper = _render_internal_blocking_helper(
-                owner, source, binding, helper_name=helper_name
+                owner,
+                source,
+                binding,
+                helper_name=helper_name,
+                cross_family=cross_family,
             )
             if binding.execution is ExecutionMode.ASYNC:
                 facade = _render_internal_blocking_async_facade(
@@ -563,6 +655,7 @@ def _render_internal_service(
                     feature_suffix=feature_suffix,
                     helper_name=helper_name,
                     facade_name=facade_name,
+                    cross_family=cross_family,
                 )
             else:
                 facade = _render_internal_sync_facade(
@@ -570,6 +663,7 @@ def _render_internal_service(
                     feature_suffix=feature_suffix,
                     helper_name=helper_name,
                     facade_name=facade_name,
+                    cross_family=cross_family,
                 )
         helpers.append(helper)
         facades.append(facade)
@@ -582,15 +676,27 @@ def _render_internal_blocking_helper(
     binding: SemanticBinding,
     *,
     helper_name: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> str:
     takes_owner = owner.form is JvmOwnerForm.CLASS
-    result_type = _internal_cpp_type(binding.result)
-    parameters = _internal_parameters(binding)
+    result_type = _internal_cpp_type(binding.result, cross_family)
+    parameters = _internal_parameters(binding, cross_family)
     signature_tail = f", {parameters}" if parameters else ""
-    descriptor = _adapter_descriptor(binding, owner if takes_owner else None)
+    descriptor = (
+        cross_family.descriptor(
+            binding, owner.owner_class if takes_owner else None
+        )
+        if cross_family is not None
+        else _adapter_descriptor(binding, owner if takes_owner else None)
+    )
     route_key = f"jvm-route:{source.provenance.declaration_id}"
     owner_setup = _render_internal_owner_setup(owner) if takes_owner else ""
-    invocation = _worker_invocation(binding, takes_owner)
+    invocation = (
+        cross_family.worker_invocation(binding, takes_owner)
+        if cross_family is not None
+        else _worker_invocation(binding, takes_owner)
+    )
+    release_before_call = "" if cross_family is not None else "  feature.reset();\n"
     return f'''static {result_type} {helper_name}(
     std::shared_ptr<supernote::runtime::FeatureSession> feature{signature_tail}) {{
   auto route = feature->service<LazyJvmRoute>(
@@ -600,7 +706,7 @@ def _render_internal_blocking_helper(
             {json.dumps(descriptor)});
       }});
 {owner_setup}  auto resolved = route->get(feature);
-  feature.reset();
+{release_before_call}
   AttachedEnv attached;
   auto *env = attached.get();
   if (env == nullptr) {{
@@ -631,9 +737,10 @@ def _render_internal_sync_facade(
     feature_suffix: str,
     helper_name: str,
     facade_name: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> str:
-    result_type = _internal_cpp_type(binding.result)
-    parameters = _internal_parameters(binding)
+    result_type = _internal_cpp_type(binding.result, cross_family)
+    parameters = _internal_parameters(binding, cross_family)
     arguments = ", ".join(item.name for item in binding.parameters)
     call_tail = f", {arguments}" if arguments else ""
     invoke = (
@@ -672,9 +779,10 @@ def _render_internal_blocking_async_facade(
     feature_suffix: str,
     helper_name: str,
     facade_name: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> str:
-    parameters = _internal_parameters(binding)
-    callback = _internal_callback_type(binding.result)
+    parameters = _internal_parameters(binding, cross_family)
+    callback = _internal_callback_type(binding.result, cross_family)
     signature = f"{parameters}, {callback} completion" if parameters else f"{callback} completion"
     captures = ", ".join(
         f"{item.name} = std::move({item.name})" for item in binding.parameters
@@ -682,7 +790,18 @@ def _render_internal_blocking_async_facade(
     capture_tail = f", {captures}" if captures else ""
     arguments = ", ".join(item.name for item in binding.parameters)
     call_tail = f", {arguments}" if arguments else ""
-    result_type = _internal_result_type(binding.result)
+    result_type = _internal_result_type(binding.result, cross_family)
+    retained_types = ", ".join(
+        _internal_cpp_type(item.type, cross_family)
+        for item in binding.parameters
+    )
+    retained_values = ", ".join(item.name for item in binding.parameters)
+    retained_state = (
+        "  auto retained_input_state = std::make_shared<std::tuple<\n"
+        f"      {retained_types}>>({retained_values});\n"
+        if retained_types
+        else "  auto retained_input_state = std::make_shared<std::tuple<>>();\n"
+    )
     if binding.result is SemanticType.VOID:
         invoke = (
             f"route::{helper_name}(std::move(feature){call_tail});\n"
@@ -706,11 +825,13 @@ def _render_internal_blocking_async_facade(
   }}
   auto callback = std::make_shared<decltype(completion)>(
       std::move(completion));
+{retained_state.rstrip()}
   auto operation = feature->accept({{}}, std::move(callback));
   if (!operation) {{
     throw supernote::Error(
         supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
   }}
+  operation->set_retained_state(retained_input_state);
   std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
   auto work = supernote::runtime::process_services().workers().submit(
       [operation, weak_feature{capture_tail}](
@@ -784,6 +905,7 @@ def _render_internal_suspend_route(
     feature_suffix: str,
     helper_name: str,
     facade_name: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> tuple[str, str]:
     if binding.execution is not ExecutionMode.ASYNC:
         raise _error(
@@ -791,25 +913,42 @@ def _render_internal_suspend_route(
             "a Kotlin suspend implementation requires SupernotePluginAsync intent",
         )
     takes_owner = owner.form is JvmOwnerForm.CLASS
-    parameters = _internal_parameters(binding)
+    parameters = _internal_parameters(binding, cross_family)
     signature_tail = f", {parameters}" if parameters else ""
     route_key = f"jvm-route:{source.provenance.declaration_id}"
     cancel_key = "jvm-route:supernote-coroutine-cancel"
     owner_setup = _render_internal_owner_setup(owner) if takes_owner else ""
     offset = 1 if takes_owner else 0
     argument_count = len(binding.parameters) + offset + 1
-    argument_rows = []
-    if takes_owner:
-        argument_rows.append(
-            "  jvm_arguments[0].l = static_cast<jobject>(owner->value.get());"
+    argument_rows = (
+        cross_family.suspend_worker_arguments(binding, takes_owner).splitlines()
+        if cross_family is not None
+        else [
+            f"jvalue jvm_arguments[{max(1, argument_count)}]{{}};",
+            *(
+                ["jvm_arguments[0].l = static_cast<jobject>(owner->value.get());"]
+                if takes_owner
+                else []
+            ),
+            *(
+                line.strip()
+                for line in _owned_argument_lines(
+                    binding.parameters, offset, ""
+                )
+            ),
+            f"jvm_arguments[{argument_count - 1}].j = static_cast<jlong>(completion_id);",
+        ]
+    )
+    descriptor = (
+        cross_family.suspend_descriptor(
+            binding, owner.owner_class if takes_owner else None
         )
-    argument_rows.extend(
-        _owned_argument_lines(binding.parameters, offset, "  ")
+        if cross_family is not None
+        else _suspend_adapter_descriptor(
+            binding, owner if takes_owner else None
+        )
     )
-    argument_rows.append(
-        f"  jvm_arguments[{argument_count - 1}].j = "
-        "static_cast<jlong>(completion_id);"
-    )
+    release_before_call = "" if cross_family is not None else "  feature.reset();\n"
     helper = f'''static std::pair<std::shared_ptr<void>, std::shared_ptr<JvmRoute>>
 {helper_name}(
     std::shared_ptr<supernote::runtime::FeatureSession> feature,
@@ -818,7 +957,7 @@ def _render_internal_suspend_route(
       {json.dumps(route_key)}, [] {{
         return std::make_shared<LazyJvmRoute>(
             {json.dumps(_adapter_class(source.adapter_identity))},
-            {json.dumps(_suspend_adapter_descriptor(binding, owner if takes_owner else None))});
+            {json.dumps(descriptor)});
       }});
   auto cancel_route = feature->service<LazyJvmRoute>(
       {json.dumps(cancel_key)}, [] {{
@@ -828,20 +967,19 @@ def _render_internal_suspend_route(
       }});
 {owner_setup}  auto resolved = route->get(feature);
   auto cancel_resolved = cancel_route->get(feature);
-  feature.reset();
+{release_before_call}
   AttachedEnv attached;
   auto *env = attached.get();
   if (env == nullptr) {{
     throw std::runtime_error("cannot attach to JavaVM");
   }}
   LocalFrame frame(env);
-  jvalue jvm_arguments[{max(1, argument_count)}]{{}};
-{chr(10).join(argument_rows)}
+{chr(10).join('  ' + line for line in argument_rows)}
   auto local_job = env->CallStaticObjectMethodA(
       static_cast<jclass>(resolved->adapter_class.get()),
       resolved->method, jvm_arguments);
-  if (env->ExceptionCheck() || local_job == nullptr) {{
-    clear_exception(env);
+  if (env->ExceptionCheck()) require_no_implementation_exception(env);
+  if (local_job == nullptr) {{
     throw std::runtime_error(
         "cannot launch generated Kotlin coroutine adapter");
   }}
@@ -852,6 +990,7 @@ def _render_internal_suspend_route(
         feature_suffix=feature_suffix,
         helper_name=helper_name,
         facade_name=facade_name,
+        cross_family=cross_family,
     )
     return helper, facade
 
@@ -862,9 +1001,10 @@ def _render_internal_suspend_facade(
     feature_suffix: str,
     helper_name: str,
     facade_name: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> str:
-    parameters = _internal_parameters(binding)
-    callback_type = _internal_callback_type(binding.result)
+    parameters = _internal_parameters(binding, cross_family)
+    callback_type = _internal_callback_type(binding.result, cross_family)
     signature = (
         f"{parameters}, {callback_type} completion"
         if parameters
@@ -876,8 +1016,21 @@ def _render_internal_suspend_facade(
     capture_tail = f", {captures}" if captures else ""
     arguments = ", ".join(item.name for item in binding.parameters)
     call_tail = f", {arguments}" if arguments else ""
-    result_type = _internal_result_type(binding.result)
-    decode = _internal_suspend_decode(binding.result, result_type)
+    result_type = _internal_result_type(binding.result, cross_family)
+    decode = _internal_suspend_decode(
+        binding.result, result_type, cross_family
+    )
+    retained_types = ", ".join(
+        _internal_cpp_type(item.type, cross_family)
+        for item in binding.parameters
+    )
+    retained_values = ", ".join(item.name for item in binding.parameters)
+    retained_state = (
+        "  auto retained_input_state = std::make_shared<std::tuple<\n"
+        f"      {retained_types}>>({retained_values});\n"
+        if retained_types
+        else "  auto retained_input_state = std::make_shared<std::tuple<>>();\n"
+    )
     return f'''void {facade_name}({signature}) {{
   auto feature = supernote::runtime::current_feature_session();
   if (!feature ||
@@ -891,11 +1044,13 @@ def _render_internal_suspend_facade(
   }}
   auto callback = std::make_shared<decltype(completion)>(
       std::move(completion));
+{retained_state.rstrip()}
   auto operation = feature->accept({{}}, std::move(callback));
   if (!operation) {{
     throw supernote::Error(
         supernote::ErrorCode::FEATURE_CLOSED, "feature is closed");
   }}
+  operation->set_retained_state(retained_input_state);
   std::weak_ptr<supernote::runtime::FeatureSession> weak_feature = feature;
   namespace route = supernote::generated::jvm_feature_{feature_suffix};
   const auto completion_id =
@@ -1005,10 +1160,46 @@ def _render_internal_suspend_facade(
 def _internal_suspend_decode(
     result: SemanticType,
     result_type: str,
+    cross_family: "CrossFamilyRenderer | None" = None,
 ) -> str:
     indent = " " * 16
     if result is SemanticType.VOID:
         return f"{indent}outcome = {result_type}::success();"
+    if cross_family is not None:
+        expression = cross_family.suspend_result_expression(
+            result,
+            expression="result",
+            feature="conversion_feature",
+            budget="cross_budget",
+        )
+        lines = [
+                f"{indent}auto *env = static_cast<JNIEnv *>(environment);",
+                f"{indent}if (env == nullptr) {{",
+                f'{indent}  throw std::runtime_error("Kotlin coroutine result has no JNI environment");',
+                f"{indent}}}",
+        ]
+        if result.kind is not SemanticTypeKind.NULLABLE:
+            lines.extend(
+                [
+                    f"{indent}if (result == nullptr) {{",
+                    f'{indent}  throw std::runtime_error("Kotlin coroutine returned null");',
+                    f"{indent}}}",
+                ]
+            )
+        lines.extend(
+            [
+                f"{indent}auto conversion_feature = weak_feature.lock();",
+                f"{indent}if (!conversion_feature ||",
+                f"{indent}    conversion_feature->state() !=",
+                f"{indent}        supernote::runtime::FeatureState::ACTIVE) {{",
+                f'{indent}  throw std::runtime_error("feature closed before coroutine result conversion");',
+                f"{indent}}}",
+                f"{indent}route::LocalFrame frame(env);",
+                f"{indent}supernote::conversion::Budget cross_budget;",
+                f"{indent}outcome = {result_type}::success({expression});",
+            ]
+        )
+        return "\n".join(lines)
     lines = [
         f"{indent}auto *env = static_cast<JNIEnv *>(environment);",
         f"{indent}auto object = static_cast<jobject>(result);",
@@ -1069,27 +1260,37 @@ def _internal_suspend_decode(
     return "\n".join(lines)
 
 
-def _internal_parameters(binding: SemanticBinding) -> str:
+def _internal_parameters(
+    binding: SemanticBinding, cross_family: "CrossFamilyRenderer | None" = None
+) -> str:
     return ", ".join(
-        f"{_internal_cpp_type(item.type)} {item.name}"
+        f"{_internal_cpp_type(item.type, cross_family)} {item.name}"
         for item in binding.parameters
     )
 
 
-def _internal_cpp_type(value: SemanticType) -> str:
+def _internal_cpp_type(
+    value: SemanticType, cross_family: "CrossFamilyRenderer | None" = None
+) -> str:
+    if cross_family is not None:
+        return cross_family.cpp_type(value)
     return "void" if value is SemanticType.VOID else _CPP_TYPES[value]
 
 
-def _internal_result_type(value: SemanticType) -> str:
+def _internal_result_type(
+    value: SemanticType, cross_family: "CrossFamilyRenderer | None" = None
+) -> str:
     return (
         "supernote::Result<void>"
         if value is SemanticType.VOID
-        else f"supernote::Result<{_CPP_TYPES[value]}>"
+        else f"supernote::Result<{_internal_cpp_type(value, cross_family)}>"
     )
 
 
-def _internal_callback_type(value: SemanticType) -> str:
-    return f"std::function<void({_internal_result_type(value)})>"
+def _internal_callback_type(
+    value: SemanticType, cross_family: "CrossFamilyRenderer | None" = None
+) -> str:
+    return f"std::function<void({_internal_result_type(value, cross_family)})>"
 
 
 def _render_function(
@@ -1120,6 +1321,9 @@ def _render_function(
         owner_setup = _render_owner_setup(owner)
     validations = _validations(binding, f"{module_name}.{binding.name}")
     invocation = _invocation(binding, takes_owner)
+    preflight = _scalar_preflight_statements(
+        binding, f"{module_name}.{binding.name}"
+    )
     return (
         "  {\n"
         + "\n".join(setup)
@@ -1156,6 +1360,7 @@ def _render_function(
         "            supernote_throw_error(runtime, \"INTERNAL\", error.what());\n"
         "          }\n"
         "        });\n"
+        f"{preflight}\n"
         f"    exports.setProperty(runtime, {json.dumps(binding.name)}, "
         "std::move(function));\n"
         "  }"
@@ -1241,6 +1446,9 @@ def _render_async_function(
         implementation_name="Kotlin/Java",
         implementation_exception_type="JvmImplementationFailure",
     )
+    preflight = _scalar_preflight_statements(
+        binding, f"{module_name}.{binding.name}"
+    )
     return (
         "  {\n"
         + "\n".join(setup)
@@ -1248,6 +1456,8 @@ def _render_async_function(
         + invoker
         + "\n"
         + f"    auto function = {function};\n"
+        + preflight
+        + "\n"
         + f"    exports.setProperty(runtime, {json.dumps(binding.name)}, "
         + "std::move(function));\n"
         + "  }"
@@ -1390,6 +1600,9 @@ def _render_suspend_function(
             "std::move(function));\n  }"
         )
     )
+    preflight = _scalar_preflight_statements(
+        binding, diagnostic, indent="    "
+    )
     return f'''{opening}
 {chr(10).join(setup)}
     auto function = Function::createFromHostFunction(
@@ -1527,8 +1740,10 @@ def _render_suspend_function(
                         auto local_job = env->CallStaticObjectMethodA(
                             static_cast<jclass>(resolved->adapter_class.get()),
                             resolved->method, jvm_arguments);
-                        if (env->ExceptionCheck() || local_job == nullptr) {{
-                          clear_exception(env);
+                        if (env->ExceptionCheck()) {{
+                          require_no_implementation_exception(env);
+                        }}
+                        if (local_job == nullptr) {{
                           throw std::runtime_error(
                               "cannot launch generated Kotlin coroutine adapter");
                         }}
@@ -1573,6 +1788,7 @@ def _render_suspend_function(
           return promise.callAsConstructor(
               runtime, &executor_argument, static_cast<std::size_t>(1));
         }});
+{preflight}
 {closing}'''
 
 
@@ -1634,12 +1850,19 @@ def _render_async_object_method(
         implementation_name="Kotlin/Java",
         implementation_exception_type="JvmImplementationFailure",
     )
+    preflight = _scalar_preflight_statements(
+        method,
+        f"{module_name}.{item.name}.{method.name}",
+        indent="      ",
+    )
     return f'''    if (property == {json.dumps(method.name)}) {{
       auto route = {route_name}_;
       auto owner = owner_;
       auto feature_session = feature_session_;
 {invoker}
-      return facebook::jsi::Value({function});
+      auto function = {function};
+{preflight}
+      return facebook::jsi::Value(std::move(function));
     }}'''
 
 
@@ -1890,6 +2113,79 @@ def _validations(binding: SemanticBinding, diagnostic: str) -> str:
     return _validations_parameters(binding.parameters, diagnostic)
 
 
+def _scalar_preflight_function(
+    binding: SemanticBinding,
+    diagnostic: str,
+    *,
+    name: str,
+    check: bool,
+    indent: str,
+) -> str:
+    validations = _validations(binding, diagnostic)
+    success = (
+        "supernote_validation_success(runtime)"
+        if check
+        else "facebook::jsi::Value(true)"
+    )
+    rejected = (
+        "supernote_validation_failure(\n"
+        f"{indent}          runtime, facebook::jsi::Value(runtime, error.value()))"
+        if check
+        else "facebook::jsi::Value(false)"
+    )
+    arguments = (
+        "const facebook::jsi::Value *arguments"
+        if binding.parameters
+        else "const facebook::jsi::Value *"
+    )
+    return f'''facebook::jsi::Function::createFromHostFunction(
+{indent}    runtime,
+{indent}    facebook::jsi::PropNameID::forAscii(runtime, {json.dumps(name)}),
+{indent}    {len(binding.parameters)},
+{indent}    [](facebook::jsi::Runtime &runtime,
+{indent}       const facebook::jsi::Value &,
+{indent}       {arguments},
+{indent}       std::size_t argument_count) -> facebook::jsi::Value {{
+{indent}      try {{
+{validations}
+{indent}        return {success};
+{indent}      }} catch (const facebook::jsi::JSError &error) {{
+{indent}        return {rejected};
+{indent}      }} catch (const std::exception &error) {{
+{indent}        supernote_throw_error(runtime, "INTERNAL", error.what());
+{indent}      }}
+{indent}    }})'''
+
+
+def _scalar_preflight_statements(
+    binding: SemanticBinding,
+    diagnostic: str,
+    *,
+    indent: str = "    ",
+) -> str:
+    accepts = _scalar_preflight_function(
+        binding,
+        diagnostic,
+        name=binding.name + ".accepts",
+        check=False,
+        indent=indent,
+    )
+    check = _scalar_preflight_function(
+        binding,
+        diagnostic,
+        name=binding.name + ".checkArguments",
+        check=True,
+        indent=indent,
+    )
+    return (
+        f"{indent}auto accepts = {accepts};\n"
+        f"{indent}auto check_arguments = {check};\n"
+        f"{indent}function = supernote_attach_preflight(\n"
+        f"{indent}    runtime, std::move(function), std::move(accepts),\n"
+        f"{indent}    std::move(check_arguments));"
+    )
+
+
 def _validations_parameters(parameters, diagnostic: str) -> str:
     expected = ", ".join(
         f"{_jsi_expected_type(_CPP_TYPES[item.type])} {item.name}"
@@ -1901,7 +2197,10 @@ def _validations_parameters(parameters, diagnostic: str) -> str:
         f"          if (argument_count != {count}) {{",
         "            supernote_throw_type_error(",
         f"                runtime, std::string({json.dumps(diagnostic + ': expected ' + description + '; received ')}) +",
-        "                std::to_string(argument_count));",
+        "                std::to_string(argument_count),",
+        f"                \"ARITY_MISMATCH\", {json.dumps(diagnostic)},",
+        f"                {json.dumps(description)},",
+        "                std::to_string(argument_count) + \" arguments\");",
         "          }",
     ]
     for index, item in enumerate(parameters):
@@ -1910,7 +2209,10 @@ def _validations_parameters(parameters, diagnostic: str) -> str:
             [
                 f"          if ({_jsi_type_check(parameter, index)}) {{",
                 "            supernote_throw_type_error(",
-                f"                runtime, {json.dumps(diagnostic + ': argument ' + str(index + 1) + ' (' + item.name + ') has the wrong JavaScript type')});",
+                f"                runtime, {json.dumps(diagnostic + ': argument ' + str(index + 1) + ' (' + item.name + ') has the wrong JavaScript type')},",
+                f"                \"TYPE_MISMATCH\", {json.dumps(diagnostic + '.argument[' + str(index) + '](' + item.name + ')')},",
+                f"                {json.dumps(_jsi_expected_type(_CPP_TYPES[item.type]))},",
+                f"                supernote_describe_value(runtime, arguments[{index}]));",
                 "          }",
             ]
         )

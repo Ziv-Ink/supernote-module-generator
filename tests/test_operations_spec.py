@@ -85,7 +85,7 @@ def test_add_scaffolds_selected_families_without_backend_metadata(
     assert (feature / "android/src/main/cpp/feature.cpp").is_file() is native
     kotlin = feature / "android/src/main/java/com/example/document/FeatureApi.kt"
     assert kotlin.is_file() is jvm
-    assert "supernote-v2-runtime" in (root / "android/settings.gradle").read_text()
+    assert "supernote-v3-runtime" in (root / "android/settings.gradle").read_text()
 
 
 @pytest.mark.parametrize(
@@ -173,6 +173,105 @@ def test_update_preserves_both_source_roots_and_deleted_starter(tmp_path: Path):
     assert not starter.exists()
 
 
+def test_v3_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
+    tmp_path: Path, make_directory_symlink
+):
+    root = plugin(tmp_path)
+    configurations = {
+        "typed-cpp": ("cpp",),
+        "typed-jvm": ("kotlin",),
+        "typed-mixed": ("cpp", "kotlin"),
+    }
+    for name, starters in configurations.items():
+        arguments = ["add", name]
+        for starter in starters:
+            arguments.extend(("--starter", starter))
+        arguments.extend(("--skip-install", "--yes"))
+        code, _, stderr = invoke(root, arguments)
+        assert code == 0, stderr
+
+    cpp_source = root / "local_modules/typed-cpp/android/src/main/cpp/Types.hpp"
+    cpp_source.write_text(
+        "// @SupernotePluginValue\n"
+        "struct Point {\n"
+        "  // @SupernotePluginExport\n"
+        "  double x;\n"
+        "};\n"
+        "// @SupernotePluginObject\n"
+        "class Stroke {\n"
+        "public:\n"
+        "  // @SupernotePluginExport\n"
+        "  double length() const;\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    mixed_cpp = root / "local_modules/typed-mixed/android/src/main/cpp/Types.hpp"
+    mixed_cpp.write_text(
+        "// @SupernotePluginValue\n"
+        "struct NativeSize {\n"
+        "  // @SupernotePluginExport\n"
+        "  double width;\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    jvm_source = (
+        root
+        / "local_modules/typed-jvm/android/src/main/java/com/example/typed_jvm/Types.kt"
+    )
+    jvm_source.write_text(
+        "package com.example.typed_jvm\n\n"
+        "import supernote.generated.annotations.SupernotePluginExport\n"
+        "import supernote.generated.annotations.SupernotePluginObject\n"
+        "import supernote.generated.annotations.SupernotePluginValue\n\n"
+        "@SupernotePluginValue\n"
+        "data class Point(@field:SupernotePluginExport val x: Double)\n\n"
+        "@SupernotePluginObject\n"
+        "class Stroke {\n"
+        "  @SupernotePluginExport fun length(): Double = 1.0\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    mixed_jvm = (
+        root
+        / "local_modules/typed-mixed/android/src/main/java/com/example/typed_mixed/Types.kt"
+    )
+    mixed_jvm.write_text(
+        "package com.example.typed_mixed\n\n"
+        "import supernote.generated.annotations.SupernotePluginExport\n"
+        "import supernote.generated.annotations.SupernotePluginValue\n\n"
+        "@SupernotePluginValue\n"
+        "data class JvmSize(@field:SupernotePluginExport val height: Double)\n",
+        encoding="utf-8",
+    )
+    owned_sources = (cpp_source, mixed_cpp, jvm_source, mixed_jvm)
+    source_bytes = {path: path.read_bytes() for path in owned_sources}
+
+    for name in configurations:
+        code, _, stderr = invoke(root, ["update", name, "--skip-install", "--yes"])
+        assert code == 0, stderr
+    assert {path: path.read_bytes() for path in owned_sources} == source_bytes
+
+    links = root / "node_modules"
+    links.mkdir()
+    for name in configurations:
+        make_directory_symlink(links / name, root / "local_modules" / name)
+    code, _, stderr = invoke(root, ["validate", "--all"])
+    assert code == 0, stderr
+
+    for command in (None, "add", "update", "validate", "remove", "doctor"):
+        arguments = ["--help"] if command is None else ["help", command]
+        code, stdout, stderr = invoke(root, arguments)
+        assert code == 0, stderr
+        assert "Supernote Module Generator" in stdout
+
+    for name in configurations:
+        code, _, stderr = invoke(
+            root, ["remove", name, "--skip-install", "--yes"]
+        )
+        assert code == 0, stderr
+    assert not (root / "android/.supernote-module/v3-runtime").exists()
+
+
 @pytest.mark.parametrize("option", ["--skip-install", "--package-manager=npm"])
 def test_update_rejects_dependency_options_when_refresh_is_not_required(
     tmp_path: Path, option: str, make_directory_symlink
@@ -218,11 +317,77 @@ def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
     assert code == 1
     assert "structural postconditions" in stderr
     assert not (root / "local_modules/broken").exists()
-    assert not (root / "android/.supernote-module/v2-runtime").exists()
+    assert not (root / "android/.supernote-module/v3-runtime").exists()
     assert not (root / "local_modules").exists()
     assert not (root / "android/.supernote-module").exists()
     for path, content in originals.items():
         assert path.read_bytes() == content
+
+
+def test_add_replaces_stale_v2_generated_runtime_transactionally(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    legacy_runtime = root / "android/.supernote-module/v2-runtime"
+    legacy_runtime.mkdir(parents=True)
+    (legacy_runtime / "generated-proof.txt").write_text("v2\n", encoding="utf-8")
+    settings = root / "android/settings.gradle"
+    app_build = root / "android/app/build.gradle"
+    settings.write_text(
+        settings.read_text()
+        + "// supernote-module-v2-runtime\nlegacy settings\n"
+        "// end supernote-module-v2-runtime\n"
+        "include ':user-library'\n",
+        encoding="utf-8",
+    )
+    app_build.write_text(
+        app_build.read_text()
+        + "// supernote-module-v2-runtime\nlegacy dependency\n"
+        "// end supernote-module-v2-runtime\n"
+        "dependencies { implementation project(':user-library') }\n",
+        encoding="utf-8",
+    )
+
+    code, _, stderr = invoke(
+        root, ["add", "typed", "--starter", "cpp", "--skip-install", "--yes"]
+    )
+
+    assert code == 0, stderr
+    assert not legacy_runtime.exists()
+    assert "supernote-module-v2" not in settings.read_text()
+    assert "supernote-module-v2" not in app_build.read_text()
+    assert "include ':user-library'" in settings.read_text()
+    assert "project(':user-library')" in app_build.read_text()
+    assert (root / "android/.supernote-module/v3-runtime").is_dir()
+
+    # A later public-operation failure restores the exact old generated state.
+    assert invoke(
+        root, ["remove", "typed", "--skip-install", "--yes"]
+    )[0] == 0
+    legacy_runtime.mkdir(parents=True)
+    proof = legacy_runtime / "generated-proof.txt"
+    proof.write_text("v2 rollback\n", encoding="utf-8")
+    settings.write_text(
+        settings.read_text()
+        + "// supernote-module-v2-runtime\nlegacy settings\n"
+        "// end supernote-module-v2-runtime\n",
+        encoding="utf-8",
+    )
+    before_settings = settings.read_bytes()
+    before_proof = proof.read_bytes()
+    monkeypatch.setattr(
+        "supernote_module_generator.feature_operations.FeatureOperationService.verify_generated_state",
+        lambda self: ["forced structural failure"],
+    )
+
+    code, _, _ = invoke(
+        root, ["add", "broken", "--starter", "cpp", "--skip-install", "--yes"]
+    )
+
+    assert code == 1
+    assert settings.read_bytes() == before_settings
+    assert proof.read_bytes() == before_proof
+    assert not (root / "android/.supernote-module/v3-runtime").exists()
 
 
 @pytest.mark.skipif(
@@ -284,7 +449,7 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
         ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
     )[0] == 0
     feature = root / "local_modules/safe"
-    runtime_before = (root / "android/.supernote-module/v2-runtime/feature-registry.json").read_bytes()
+    runtime_before = (root / "android/.supernote-module/v3-runtime/feature-registry.json").read_bytes()
 
     attempts = 0
 
@@ -302,7 +467,7 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
     assert "forced install failure" in stderr
     assert feature.is_dir()
     assert (
-        root / "android/.supernote-module/v2-runtime/feature-registry.json"
+        root / "android/.supernote-module/v3-runtime/feature-registry.json"
     ).read_bytes() == runtime_before
     assert json.loads((root / "package.json").read_text())["dependencies"]["safe"]
 
@@ -343,7 +508,7 @@ def test_failed_or_interrupted_dependency_refresh_exactly_restores_main_applicat
     assert code == (130 if interrupted else 1), stderr
     assert application.read_bytes() == before
     expected_marker_count = 0 if command == "add" else 1
-    assert application.read_text().count("supernote-module-v2-package") == (
+    assert application.read_text().count("supernote-module-v3-package") == (
         expected_marker_count * 2
     )
     assert not (root / ".supernote-module-transaction.json").exists()
@@ -384,8 +549,8 @@ def test_empty_validation_rejects_leftover_v2_runtime_and_package_wiring(
     code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 1
-    assert "V2 runtime blocks; expected 0" in stderr
-    assert application.read_text().count("supernote-module-v2-package") == 2
+    assert "V3 runtime blocks; expected 0" in stderr
+    assert application.read_text().count("supernote-module-v3-package") == 2
 
 
 def test_empty_validation_rejects_leftover_package_registration_alone(
@@ -402,8 +567,8 @@ def test_empty_validation_rejects_leftover_package_registration_alone(
     code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 1
-    assert "V2 package blocks; expected 0" in stderr
-    assert application.read_text().count("supernote-module-v2-package") == 2
+    assert "V3 package blocks; expected 0" in stderr
+    assert application.read_text().count("supernote-module-v3-package") == 2
 
 
 def test_feature_validation_rejects_missing_main_application_registration(
@@ -427,8 +592,8 @@ def test_feature_validation_rejects_missing_main_application_registration(
     code, _, stderr = invoke(root, ["validate", "safe"])
 
     assert code == 1
-    assert "V2 package blocks; expected 1" in stderr
-    assert "supernote-module-v2-package" not in application.read_text()
+    assert "V3 package blocks; expected 1" in stderr
+    assert "supernote-module-v3-package" not in application.read_text()
 
 
 def test_remove_preserves_build_outputs_unless_cleanup_is_explicit(tmp_path: Path):
@@ -483,7 +648,7 @@ def test_remove_all_is_explicit_and_removes_every_feature(tmp_path: Path):
     assert "2 features" in stdout
     assert not (root / "local_modules/one").exists()
     assert not (root / "local_modules/two").exists()
-    assert not (root / "android/.supernote-module/v2-runtime").exists()
+    assert not (root / "android/.supernote-module/v3-runtime").exists()
 
 
 def test_package_manager_precedence_for_noninteractive_add(tmp_path: Path):

@@ -55,7 +55,7 @@ def test_typescript_uses_only_public_common_semantics_and_exact_value_mappings()
     )
     text = render_typescript("Document", SemanticApi((public, internal)))
 
-    assert "load(value: bigint): Promise<Uint8Array>;" in text
+    assert "load: SupernoteCallable<[value: bigint], Promise<Uint8Array>>;" in text
     assert "hidden" not in text
     assert "export class SupernoteError extends Error" in text
     assert 'readonly code: SupernoteErrorCode;' in text
@@ -100,7 +100,7 @@ def test_typescript_generates_public_object_factory_and_explicit_members_only():
     text = render_typescript("Feature", SemanticApi(classes=(item,)))
 
     assert "export interface Document {" in text
-    assert "pageCount(value: bigint): number;" in text
+    assert "pageCount: SupernoteCallable<[value: bigint], number>;" in text
     assert "rebuild" not in text
     assert "create(path: string): Document;" in text
     assert "Document: DocumentFactory;" in text

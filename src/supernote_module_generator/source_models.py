@@ -1,4 +1,4 @@
-"""Language-specific declaration facts retained by V2 frontends."""
+"""Language-specific declaration facts retained by V3 frontends."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,6 +13,8 @@ class SourceModelError(ValueError):
 
 
 class SupernoteMarker(str, Enum):
+    OBJECT = "SupernotePluginObject"
+    VALUE = "SupernotePluginValue"
     EXPORT = "SupernotePluginExport"
     INTERNAL = "SupernotePluginInternal"
     ASYNC = "SupernotePluginAsync"
@@ -22,7 +24,9 @@ class SupernoteMarker(str, Enum):
 class DeclarationTarget(str, Enum):
     FUNCTION = "function"
     CLASS = "class"
+    ENUM = "enum"
     METHOD = "method"
+    FIELD = "field"
     CONSTRUCTOR = "constructor"
 
 
@@ -55,16 +59,42 @@ class SourceIntent:
                 "SupernotePluginExport and SupernotePluginInternal cannot mark one declaration"
             )
 
+        type_markers = {SupernoteMarker.OBJECT, SupernoteMarker.VALUE}
+        reachability = {SupernoteMarker.EXPORT, SupernoteMarker.INTERNAL}
         if self.target is DeclarationTarget.CONSTRUCTOR:
             invalid = marker_set - {SupernoteMarker.CONSTRUCTOR}
             if invalid:
                 raise SourceModelError(
-                    "constructors accept only SupernoteConstructor in initial V2"
+                    "constructors accept only SupernoteConstructor in initial V3"
+                )
+        elif self.target is DeclarationTarget.CLASS:
+            if marker_set and marker_set not in (
+                {SupernoteMarker.OBJECT},
+                {SupernoteMarker.VALUE},
+            ):
+                raise SourceModelError(
+                    "classes require exactly one of SupernotePluginObject or "
+                    "SupernotePluginValue; reachability markers belong on members"
+                )
+        elif self.target is DeclarationTarget.ENUM:
+            if marker_set != {SupernoteMarker.VALUE}:
+                raise SourceModelError(
+                    "a generated string enum requires exactly SupernotePluginValue"
+                )
+        elif self.target is DeclarationTarget.FIELD:
+            if marker_set and marker_set != {SupernoteMarker.EXPORT}:
+                raise SourceModelError(
+                    "generated fields accept only SupernotePluginExport"
                 )
         else:
             if SupernoteMarker.CONSTRUCTOR in marker_set:
                 raise SourceModelError(
                     "SupernoteConstructor is valid only on a constructor"
+                )
+            if marker_set & type_markers:
+                raise SourceModelError(
+                    "SupernotePluginObject and SupernotePluginValue are valid only "
+                    "on type declarations"
                 )
             if (
                 SupernoteMarker.ASYNC in marker_set
@@ -74,8 +104,11 @@ class SourceIntent:
                 raise SourceModelError(
                     "SupernotePluginAsync requires SupernotePluginExport or SupernotePluginInternal"
                 )
-            if self.target is DeclarationTarget.CLASS and SupernoteMarker.ASYNC in marker_set:
-                raise SourceModelError("SupernotePluginAsync cannot mark a class")
+            if marker_set and not marker_set & reachability:
+                raise SourceModelError(
+                    "generated functions and methods require "
+                    "SupernotePluginExport or SupernotePluginInternal"
+                )
 
     @classmethod
     def from_markers(
@@ -121,6 +154,14 @@ class SourceIntent:
     def selects_constructor(self) -> bool:
         return SupernoteMarker.CONSTRUCTOR in self.marker_set
 
+    @property
+    def declares_object(self) -> bool:
+        return SupernoteMarker.OBJECT in self.marker_set
+
+    @property
+    def declares_value(self) -> bool:
+        return SupernoteMarker.VALUE in self.marker_set
+
 
 @dataclass(frozen=True)
 class CppParameterSource:
@@ -137,6 +178,7 @@ class CppFunctionSource:
     intent: SourceIntent
     noexcept: bool = False
     definition_offset: int = -1
+    namespace: Tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.FUNCTION:
@@ -173,6 +215,7 @@ class CppMethodSource:
     access: str
     const: bool = False
     noexcept: bool = False
+    static: bool = False
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.METHOD:
@@ -188,12 +231,51 @@ class CppClassSource:
     constructors: Tuple[CppConstructorSource, ...]
     methods: Tuple[CppMethodSource, ...]
     declaration_kind: str = "class"
+    fields: Tuple["CppFieldSource", ...] = field(default_factory=tuple)
+    namespace: Tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.CLASS:
             raise SourceModelError("a C++ class requires class source intent")
         if self.declaration_kind not in {"class", "struct"}:
             raise SourceModelError("a C++ class source kind must be class or struct")
+
+    @property
+    def qualified_name(self) -> str:
+        return "::".join((*self.namespace, self.cpp_name))
+
+
+@dataclass(frozen=True)
+class CppFieldSource:
+    provenance: SourceProvenance
+    cpp_name: str
+    type_spelling: str
+    intent: SourceIntent
+    access: str
+    mutable: bool
+    static: bool = False
+
+    def __post_init__(self) -> None:
+        if self.intent.target is not DeclarationTarget.FIELD:
+            raise SourceModelError("a C++ field requires field source intent")
+
+
+@dataclass(frozen=True)
+class CppEnumSource:
+    provenance: SourceProvenance
+    cpp_name: str
+    include: str
+    intent: SourceIntent
+    constants: Tuple[str, ...]
+    namespace: Tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if self.intent.target is not DeclarationTarget.ENUM:
+            raise SourceModelError("a C++ enum requires enum source intent")
+
+    @property
+    def qualified_name(self) -> str:
+        return "::".join((*self.namespace, self.cpp_name))
 
 
 class JvmLanguage(str, Enum):
@@ -219,6 +301,22 @@ class JvmParameterSource:
     name: str
     nullable: bool = False
     injected: Optional[JvmInjectedDependency] = None
+    type_arguments: Tuple["JvmTypeSource", ...] = field(default_factory=tuple)
+
+    @property
+    def type_source(self) -> "JvmTypeSource":
+        return JvmTypeSource(self.jvm_type, self.nullable, self.type_arguments)
+
+
+@dataclass(frozen=True)
+class JvmTypeSource:
+    jvm_type: str
+    nullable: bool = False
+    arguments: Tuple["JvmTypeSource", ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not self.jvm_type:
+            raise SourceModelError("a JVM type spelling cannot be empty")
 
 
 @dataclass(frozen=True)
@@ -257,6 +355,15 @@ class JvmDeclarationSource:
     language: JvmLanguage
     is_suspend: bool = False
     is_static: bool = False
+    result_type_arguments: Tuple[JvmTypeSource, ...] = field(default_factory=tuple)
+
+    @property
+    def result_type_source(self) -> JvmTypeSource:
+        return JvmTypeSource(
+            self.result_jvm_type,
+            self.result_nullable,
+            self.result_type_arguments,
+        )
 
     def __post_init__(self) -> None:
         if self.intent.target not in {
@@ -291,6 +398,13 @@ class JvmOwnerSource:
     constructors: Tuple[JvmConstructorSource, ...]
     declarations: Tuple[JvmDeclarationSource, ...]
     visibility: str = "public"
+    fields: Tuple["JvmFieldSource", ...] = field(default_factory=tuple)
+    enum_constants: Tuple[str, ...] = field(default_factory=tuple)
+    is_data: bool = False
+    is_record: bool = False
+    is_final: bool = True
+    type_parameter_count: int = 0
+    supertypes: Tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.intent.target is not DeclarationTarget.CLASS:
@@ -347,3 +461,31 @@ class JvmOwnerSource:
                 raise SourceModelError(
                     "a JVM declaration language must match its containing owner"
                 )
+        for source_field in self.fields:
+            if source_field.owner_declaration_id != self.provenance.declaration_id:
+                raise SourceModelError(
+                    f"JVM field {source_field.name!r} does not reference its owner"
+                )
+            if source_field.provenance.language != self.language.value:
+                raise SourceModelError("a JVM field language must match its owner")
+        if self.type_parameter_count < 0:
+            raise SourceModelError("JVM type parameter count cannot be negative")
+
+
+@dataclass(frozen=True)
+class JvmFieldSource:
+    provenance: SourceProvenance
+    owner_declaration_id: str
+    name: str
+    type: JvmTypeSource
+    intent: SourceIntent
+    visibility: str
+    mutable: bool
+    is_static: bool = False
+    accessor_identity: str = ""
+
+    def __post_init__(self) -> None:
+        if self.intent.target is not DeclarationTarget.FIELD:
+            raise SourceModelError("a JVM field requires field source intent")
+        if not self.owner_declaration_id:
+            raise SourceModelError("a JVM field owner identity cannot be empty")

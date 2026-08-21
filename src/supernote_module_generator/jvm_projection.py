@@ -1,27 +1,38 @@
-"""Project authoritative KSP/JVM source facts into common V2 semantics."""
+"""Project authoritative KSP/JVM source facts into common V3 semantics."""
 from __future__ import annotations
 
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Iterable, Optional
 
 from .semantic import (
     BindingCapabilities,
     BindingKind,
+    BackendFamily,
     DeclarationRole,
+    MemberScope,
     SemanticApi,
     SemanticBinding,
     SemanticClass,
     SemanticClassKind,
     SemanticConstructor,
+    SemanticEnumDeclaration,
+    SemanticField,
+    SemanticObjectDeclaration,
     SemanticParameter,
+    SemanticProjection,
     SemanticType,
+    SemanticValueDeclaration,
+    semantic_type_id,
 )
 from .source_models import (
     JvmConstructorSource,
     JvmDeclarationSource,
     JvmLanguage,
+    JvmFieldSource,
     JvmOwnerForm,
     JvmOwnerSource,
     JvmParameterSource,
+    JvmTypeSource,
 )
 
 
@@ -49,6 +60,42 @@ _JAVA_TYPES = {
     "java.lang.String": SemanticType.STRING,
     "byte[]": SemanticType.BYTES,
 }
+_JAVA_BOXED_TYPES = {
+    "java.lang.Boolean": SemanticType.BOOL,
+    "java.lang.Integer": SemanticType.INT32,
+    "java.lang.Long": SemanticType.INT64,
+    "java.lang.Float": SemanticType.FLOAT32,
+    "java.lang.Double": SemanticType.FLOAT64,
+}
+
+
+@dataclass(frozen=True)
+class _JvmNamedType:
+    kind: str
+    type_id: str
+    public_name: str
+
+
+class _JvmTypeRegistry:
+    def __init__(self, feature_id: str, owners: tuple[JvmOwnerSource, ...]) -> None:
+        self.feature_id = feature_id
+        self.values: dict[str, _JvmNamedType] = {}
+        for owner in owners:
+            if not (owner.intent.declares_object or owner.intent.declares_value):
+                continue
+            kind = (
+                "enum"
+                if owner.enum_constants
+                else "object" if owner.intent.declares_object else "value"
+            )
+            self.values[owner.owner_class] = _JvmNamedType(
+                kind,
+                semantic_type_id(feature_id, owner.source_name),
+                owner.source_name,
+            )
+
+    def resolve(self, name: str) -> Optional[_JvmNamedType]:
+        return self.values.get(name)
 
 
 def canonical_jvm_type(
@@ -58,32 +105,93 @@ def canonical_jvm_type(
     nullable: bool,
     result: bool,
     source: JvmDeclarationSource | JvmConstructorSource,
+    arguments: tuple[JvmTypeSource, ...] = (),
+    registry: Optional[_JvmTypeRegistry] = None,
+    generic_argument: bool = False,
 ) -> SemanticType:
-    if nullable:
-        raise _error(source, "nullable marked JVM values are deferred")
+    if nullable and spelling in {"kotlin.Unit", "void"}:
+        raise _error(source, "void/Unit cannot be nullable")
+    if spelling in {"kotlin.collections.List", "java.util.List"}:
+        if len(arguments) != 1:
+            raise _error(source, "List requires exactly one invariant type argument")
+        element = canonical_jvm_type(
+            arguments[0].jvm_type,
+            language=language,
+            nullable=arguments[0].nullable,
+            result=False,
+            source=source,
+            arguments=arguments[0].arguments,
+            registry=registry,
+            generic_argument=True,
+        )
+        semantic = SemanticType.array(element)
+        return SemanticType.nullable(semantic) if nullable else semantic
     table = _KOTLIN_TYPES if language is JvmLanguage.KOTLIN else _JAVA_TYPES
     semantic = table.get(spelling)
+    if language is JvmLanguage.JAVA:
+        boxed = _JAVA_BOXED_TYPES.get(spelling)
+        if generic_argument or nullable:
+            if boxed is not None:
+                semantic = boxed
+            elif spelling in {"boolean", "int", "long", "float", "double"}:
+                raise _error(
+                    source,
+                    f"Java {spelling} must use its boxed reference spelling in "
+                    "nullable or generic positions",
+                )
+        elif boxed is not None:
+            raise _error(
+                source,
+                f"Java direct non-null scalar {spelling!r} must use its primitive spelling",
+            )
+    if semantic is None and registry is not None:
+        named = registry.resolve(spelling)
+        if named is not None:
+            if named.kind == "object":
+                semantic = SemanticType.object_ref(named.type_id)
+            elif named.kind == "value":
+                semantic = SemanticType.value_ref(named.type_id)
+            else:
+                semantic = SemanticType.enum_ref(named.type_id)
     if semantic is None:
         accepted = ", ".join(table)
         raise _error(
             source,
             f"unsupported marked {language.value} type {spelling!r}; "
-            f"use one canonical V2 type ({accepted})",
+            f"use one canonical V3 type ({accepted})",
         )
     if semantic is SemanticType.VOID and not result:
         raise _error(source, "void/Unit is valid only as a marked result")
-    return semantic
+    return SemanticType.nullable(semantic) if nullable else semantic
 
 
-def project_jvm_owners(owners: Iterable[JvmOwnerSource]) -> SemanticApi:
+def project_jvm_owners(
+    owners: Iterable[JvmOwnerSource],
+    *,
+    feature_id: str = "supernote:feature:legacy",
+) -> SemanticApi:
+    owner_sources = tuple(owners)
+    registry = _JvmTypeRegistry(feature_id, owner_sources)
     functions: list[SemanticBinding] = []
     classes: list[SemanticClass] = []
-    for owner in owners:
+    declarations = []
+    for owner in owner_sources:
         if owner.provenance.language != owner.language.value:
             raise _error(owner, "JVM owner provenance language does not match")
+        if owner.intent.declares_object:
+            declarations.append(_project_jvm_object(owner, registry, feature_id))
+            continue
+        if owner.intent.declares_value:
+            if owner.enum_constants:
+                declarations.append(_project_jvm_enum(owner, feature_id))
+            else:
+                declarations.append(_project_jvm_value(owner, registry, feature_id))
+            continue
         if owner.intent.role is DeclarationRole.ORDINARY:
             _validate_ordinary_owner_route(owner)
-            functions.extend(_project_function(owner, item) for item in owner.declarations)
+            functions.extend(
+                _project_function(owner, item, registry) for item in owner.declarations
+            )
             continue
         if owner.visibility != "public":
             raise _error(owner, "a marked JVM class must be public")
@@ -115,13 +223,14 @@ def project_jvm_owners(owners: Iterable[JvmOwnerSource]) -> SemanticApi:
                 methods=methods,
             )
         )
-    return SemanticApi(tuple(functions), tuple(classes))
+    return SemanticApi(tuple(functions), tuple(classes), tuple(declarations))
 
 
 def _parameters(
     source: JvmDeclarationSource | JvmConstructorSource,
     language: JvmLanguage,
     parameters: tuple[JvmParameterSource, ...],
+    registry: Optional[_JvmTypeRegistry] = None,
 ) -> tuple[SemanticParameter, ...]:
     result = []
     for item in parameters:
@@ -138,15 +247,204 @@ def _parameters(
                     nullable=item.nullable,
                     result=False,
                     source=source,
+                    arguments=item.type_arguments,
+                    registry=registry,
                 ),
             )
         )
     return tuple(result)
 
 
+def _selected_jvm_object_constructor(
+    owner: JvmOwnerSource,
+    registry: _JvmTypeRegistry,
+) -> Optional[SemanticConstructor]:
+    selected = [item for item in owner.constructors if item.selected]
+    if len(selected) > 1:
+        raise _error(owner, "an object may select at most one SupernoteConstructor")
+    if not selected:
+        return None
+    constructor = selected[0]
+    if constructor.visibility != "public":
+        raise _error(constructor, "SupernoteConstructor must select a public constructor")
+    return SemanticConstructor(
+        constructor.provenance,
+        _parameters(
+            constructor,
+            owner.language,
+            constructor.parameters,
+            registry,
+        ),
+    )
+
+
+def _jvm_field(
+    owner: JvmOwnerSource,
+    source: JvmFieldSource,
+    owner_id: str,
+    registry: _JvmTypeRegistry,
+) -> SemanticField:
+    if source.owner_declaration_id != owner.provenance.declaration_id:
+        raise _error(source, "JVM field owner identity does not match its type")
+    if source.visibility != "public":
+        raise _error(source, "a generated JVM field/property must be public")
+    if source.is_static:
+        raise _error(source, "static generated fields are unsupported")
+    if source.intent.role is not DeclarationRole.EXPORTED:
+        raise _error(source, "generated fields require SupernotePluginExport")
+    semantic = canonical_jvm_type(
+        source.type.jvm_type,
+        language=owner.language,
+        nullable=source.type.nullable,
+        result=False,
+        source=source,
+        arguments=source.type.arguments,
+        registry=registry,
+    )
+    return SemanticField(
+        f"{owner_id}:field:{source.name}",
+        owner_id,
+        source.name,
+        semantic,
+        source.provenance,
+        source.mutable,
+    )
+
+
+def _object_method(
+    owner: JvmOwnerSource,
+    source: JvmDeclarationSource,
+    owner_id: str,
+    registry: _JvmTypeRegistry,
+) -> SemanticBinding:
+    if source.visibility != "public":
+        raise _error(source, "a marked JVM object method must be public")
+    return SemanticBinding(
+        f"supernote:binding:{source.provenance.declaration_id}",
+        BindingKind.OBJECT_METHOD,
+        source.jvm_name,
+        BindingCapabilities.for_role(source.intent.role),
+        source.intent.execution,
+        _parameters(source, owner.language, source.parameters, registry),
+        canonical_jvm_type(
+            source.result_jvm_type,
+            language=owner.language,
+            nullable=source.result_nullable,
+            result=True,
+            source=source,
+            arguments=source.result_type_arguments,
+            registry=registry,
+        ),
+        source.provenance,
+        owner_id,
+        owner.source_name,
+        MemberScope.STATIC if source.is_static else MemberScope.INSTANCE,
+    )
+
+
+def _validate_jvm_bridge_type(owner: JvmOwnerSource) -> None:
+    if owner.visibility != "public":
+        raise _error(owner, "a marked JVM type must be public")
+    if owner.type_parameter_count:
+        raise _error(owner, "generic marked JVM types are unsupported")
+    if owner.supertypes:
+        raise _error(owner, "inheritance and interfaces on marked JVM types are unsupported")
+    if owner.language is JvmLanguage.JAVA and not owner.is_final:
+        raise _error(owner, "marked Java object/value classes must be final")
+
+
+def _project_jvm_object(
+    owner: JvmOwnerSource,
+    registry: _JvmTypeRegistry,
+    feature_id: str,
+) -> SemanticObjectDeclaration:
+    _validate_jvm_bridge_type(owner)
+    if owner.form is not JvmOwnerForm.CLASS:
+        raise _error(owner, "SupernotePluginObject requires a normal class")
+    owner_id = semantic_type_id(feature_id, owner.source_name)
+    return SemanticObjectDeclaration(
+        feature_id,
+        owner_id,
+        owner.source_name,
+        SemanticProjection(BackendFamily.JVM, owner.provenance),
+        _selected_jvm_object_constructor(owner, registry),
+        tuple(
+            _object_method(owner, item, owner_id, registry)
+            for item in owner.declarations
+            if item.intent.role is not DeclarationRole.ORDINARY
+        ),
+        tuple(_jvm_field(owner, item, owner_id, registry) for item in owner.fields),
+    )
+
+
+def _project_jvm_value(
+    owner: JvmOwnerSource,
+    registry: _JvmTypeRegistry,
+    feature_id: str,
+) -> SemanticValueDeclaration:
+    _validate_jvm_bridge_type(owner)
+    if owner.language is JvmLanguage.KOTLIN and not owner.is_data:
+        raise _error(owner, "SupernotePluginValue requires a Kotlin data class")
+    if owner.language is JvmLanguage.JAVA and not (owner.is_record or owner.is_final):
+        raise _error(owner, "Java values require a record or supported final class")
+    if any(item.selected for item in owner.constructors):
+        raise _error(owner, "SupernoteConstructor cannot mark a value type")
+    if any(item.intent.role is not DeclarationRole.ORDINARY for item in owner.declarations):
+        raise _error(owner, "value types expose fields/properties, not generated methods")
+    owner_id = semantic_type_id(feature_id, owner.source_name)
+    fields = tuple(
+        _jvm_field(owner, item, owner_id, registry) for item in owner.fields
+    )
+    if owner.language is JvmLanguage.JAVA:
+        if any(item.mutable for item in owner.fields):
+            raise _error(owner, "Java value fields/record components must be final")
+        eligible = [
+            item for item in owner.constructors if item.visibility == "public"
+        ]
+        if len(eligible) != 1:
+            raise _error(
+                owner,
+                "a Java value requires exactly one public constructor matching "
+                "its ordered fields/record components",
+            )
+        parameters = _parameters(
+            eligible[0], owner.language, eligible[0].parameters, registry
+        )
+        expected = tuple((item.name, item.type) for item in fields)
+        actual = tuple((item.name, item.type) for item in parameters)
+        if actual != expected:
+            raise _error(
+                eligible[0],
+                "Java value constructor parameters must match the ordered "
+                "field/component names and types exactly",
+            )
+    return SemanticValueDeclaration(
+        feature_id,
+        owner_id,
+        owner.source_name,
+        fields,
+        (SemanticProjection(BackendFamily.JVM, owner.provenance),),
+    )
+
+
+def _project_jvm_enum(
+    owner: JvmOwnerSource,
+    feature_id: str,
+) -> SemanticEnumDeclaration:
+    _validate_jvm_bridge_type(owner)
+    return SemanticEnumDeclaration(
+        feature_id,
+        semantic_type_id(feature_id, owner.source_name),
+        owner.source_name,
+        owner.enum_constants,
+        (SemanticProjection(BackendFamily.JVM, owner.provenance),),
+    )
+
+
 def _project_function(
     owner: JvmOwnerSource,
     source: JvmDeclarationSource,
+    registry: Optional[_JvmTypeRegistry] = None,
 ) -> SemanticBinding:
     if source.intent.role is DeclarationRole.ORDINARY:
         raise _error(source, "ordinary JVM declarations do not become bindings")
@@ -158,13 +456,15 @@ def _project_function(
         name=source.jvm_name,
         capabilities=BindingCapabilities.for_role(source.intent.role),
         execution=source.intent.execution,
-        parameters=_parameters(source, owner.language, source.parameters),
+        parameters=_parameters(source, owner.language, source.parameters, registry),
         result=canonical_jvm_type(
             source.result_jvm_type,
             language=owner.language,
             nullable=source.result_nullable,
             result=True,
             source=source,
+            arguments=source.result_type_arguments,
+            registry=registry,
         ),
         source=source.provenance,
     )

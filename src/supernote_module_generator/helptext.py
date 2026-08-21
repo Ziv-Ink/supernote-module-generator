@@ -6,7 +6,7 @@ from typing import Dict
 
 ROOT_HELP = """Supernote Module Generator
 
-Generate and manage language-neutral V2 features in an existing Supernote plugin.
+Generate and manage language-neutral V3 features in an existing Supernote plugin.
 
 Usage:
   supernote-module
@@ -265,7 +265,7 @@ Exit:
 
 DOCTOR_HELP = """Supernote Module Generator
 
-Verify the development environment required by this V2 plugin.
+Verify the development environment required by this V3 plugin.
 
 Usage:
   supernote-module doctor [options]
@@ -284,7 +284,7 @@ Output options:
 Behavior:
   Doctor checks JavaScript, Kotlin/KSP, Gradle, Java 17 through 23 (Java 17 is
   recommended), Android SDK/NDK tools, NDK Clang with C23/C++23, CMake, and JSI
-  requirements used by the plugin-level V2 runtime. It also reports the target-
+  requirements used by the plugin-level V3 runtime. It also reports the target-
   device runtime boundary that cannot be proven locally.
 
 Examples:

@@ -52,7 +52,7 @@ def _feature(root: Path) -> Path:
     [
         ("{", "invalid JSON at line 1"),
         ({"schema_version": 99}, "unsupported feature manifest schema 99"),
-        ({"kind": "something_else"}, "kind must be 'supernote_feature'"),
+        ({"kind": "something_else"}, "kind must be 'supernote_v3_feature'"),
         ({"public_name": None}, "public_name must be a non-empty string"),
     ],
 )

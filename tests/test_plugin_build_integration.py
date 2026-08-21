@@ -29,14 +29,14 @@ def test_wires_one_plugin_runtime_project_idempotently(tmp_path: Path, kotlin: b
 
     set_runtime_wiring(tmp_path, enabled=False)
     verify_runtime_wiring(tmp_path, enabled=False)
-    assert "supernote-v2-runtime" not in settings.read_text()
-    assert "supernote-v2-runtime" not in app.read_text()
+    assert "supernote-v3-runtime" not in settings.read_text()
+    assert "supernote-v3-runtime" not in app.read_text()
 
 
 def test_duplicate_runtime_blocks_are_rejected(tmp_path: Path):
     android = tmp_path / "android"
     (android / "app").mkdir(parents=True)
-    block = "// supernote-module-v2-runtime\nx\n// end supernote-module-v2-runtime\n"
+    block = "// supernote-module-v3-runtime\nx\n// end supernote-module-v3-runtime\n"
     (android / "settings.gradle").write_text(block + block)
     (android / "app/build.gradle").write_text("plugins {}\n")
     with pytest.raises(ConfigurationError, match="duplicate"):
@@ -70,9 +70,63 @@ def test_registers_generated_react_package_idempotently(
     first = source.read_text()
     set_runtime_wiring(tmp_path, enabled=True)
     assert source.read_text() == first
-    assert first.count("SupernoteV2Package") == 1
+    assert first.count("SupernoteV3Package") == 1
     verify_runtime_wiring(tmp_path, enabled=True)
 
     set_runtime_wiring(tmp_path, enabled=False)
-    assert "SupernoteV2Package" not in source.read_text()
+    assert "SupernoteV3Package" not in source.read_text()
     verify_runtime_wiring(tmp_path, enabled=False)
+
+
+def test_complete_stale_v2_wiring_is_removed_without_touching_user_source(
+    tmp_path: Path,
+):
+    android = tmp_path / "android"
+    (android / "app").mkdir(parents=True)
+    (android / "settings.gradle").write_text(
+        "rootProject.name = 'fixture'\n"
+        "// supernote-module-v2-runtime\nlegacy\n"
+        "// end supernote-module-v2-runtime\n"
+        "include ':user-library'\n"
+    )
+    (android / "app/build.gradle").write_text(
+        "plugins {}\n"
+        "// supernote-module-v2-runtime\nlegacy dependency\n"
+        "// end supernote-module-v2-runtime\n"
+        "dependencies { implementation project(':user-library') }\n"
+    )
+    application = android / "app/src/main/java/com/example/MainApplication.kt"
+    application.parent.mkdir(parents=True)
+    application.write_text(
+        "fun getPackages() =\n"
+        "    PackageList(this).packages.apply {\n"
+        "      // supernote-module-v2-package\n"
+        "      add(supernote.generated.runtime.SupernoteV2Package())\n"
+        "      // end supernote-module-v2-package\n"
+        "      add(UserPackage())\n"
+        "    }\n"
+    )
+
+    set_runtime_wiring(tmp_path, enabled=True)
+
+    assert "supernote-module-v2" not in (android / "settings.gradle").read_text()
+    assert "include ':user-library'" in (android / "settings.gradle").read_text()
+    assert "supernote-module-v2" not in (android / "app/build.gradle").read_text()
+    assert "project(':user-library')" in (android / "app/build.gradle").read_text()
+    assert "SupernoteV2Package" not in application.read_text()
+    assert "add(UserPackage())" in application.read_text()
+    verify_runtime_wiring(tmp_path, enabled=True)
+
+
+def test_malformed_stale_v2_wiring_is_rejected_without_mutation(tmp_path: Path):
+    android = tmp_path / "android"
+    (android / "app").mkdir(parents=True)
+    settings = android / "settings.gradle"
+    settings.write_text("// supernote-module-v2-runtime\nlegacy\n")
+    (android / "app/build.gradle").write_text("plugins {}\n")
+    before = settings.read_bytes()
+
+    with pytest.raises(ConfigurationError, match="malformed"):
+        set_runtime_wiring(tmp_path, enabled=True)
+
+    assert settings.read_bytes() == before

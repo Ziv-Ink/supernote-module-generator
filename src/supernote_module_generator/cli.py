@@ -192,7 +192,10 @@ def _usage_recovery(command: str, message: str) -> str:
     if message == "node is not available":
         return "Install Node.js, then rerun the command."
     if message.startswith("not a Supernote plugin"):
-        return "Expected PluginConfig.json, package.json, and android/.\nRun the command from the plugin root."
+        return (
+            "Expected package.json, android/, and either PluginConfig.json or the\n"
+            "official template build script. Run the command from the plugin root."
+        )
     if message.startswith("non-interactive Add is missing required decisions"):
         return ""
     if "needs more information in non-interactive mode" in message:
@@ -521,7 +524,13 @@ def _interactive_loop(
     except ConfigurationError:
         ui.header()
         print(f"\nNot a Supernote plugin: {cwd.resolve()}\n", file=renderer.stderr)
-        print("Expected:\n  PluginConfig.json\n  package.json\n  android/\n", file=renderer.stderr)
+        print(
+            "Expected:\n"
+            "  package.json\n"
+            "  android/\n"
+            "  PluginConfig.json or scripts/buildPlugin.sh/.ps1\n",
+            file=renderer.stderr,
+        )
         try:
             choice = ui.menu(
                 "",

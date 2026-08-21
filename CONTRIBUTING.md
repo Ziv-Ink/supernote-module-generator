@@ -50,7 +50,7 @@ copyability, stream separation, machine output, keyboard safety, or recovery.
 - Integration tests cover CLI lifecycle behavior against temporary plugin
   roots, parent wiring, source preservation, rollback, and documentation
   artifacts.
-- Android fixture tests must compile the single plugin-level V2 runtime with
+- Android fixture tests must compile the single plugin-level V3 runtime with
   mixed C/C++ and Kotlin/Java feature input. Do not describe Python-only tests
   or generated-text checks as Android compilation proof.
 - Device tests are relevant only when qualifying generated runtime integration,
@@ -110,11 +110,11 @@ validation tier completed.
 - `README.md` is a short product entry point; the separate GitHub Wiki contains
   generator-specific user guidance.
 - `CONTRIBUTING.md` is contributor documentation.
-- `docs/V1-TO-V2-ARCHITECTURE.md` records contributor-facing architectural
-  history without defining a supported migration workflow.
+- `docs/V3-ARCHITECTURE.md` records the contributor-facing V3 model without
+  defining a supported V2 migration workflow.
 - `maintainers/` contains release/operation procedures.
-- The immutable `v1-final` tag and Git history preserve the implementation
-  baseline. They create no V1 maintenance or compatibility contract.
+- Historical tags and Git history preserve earlier implementation baselines.
+  They create no V2 maintenance or compatibility contract.
 
 The main repository must not contain a second copy of Wiki user guides. GitHub
 stores Wiki pages in `supernote-module-generator.wiki.git`; update and review

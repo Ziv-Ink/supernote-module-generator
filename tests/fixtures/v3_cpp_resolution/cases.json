@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "decision": "D-042",
+  "cases": [
+    {"file": "accept_global_complete.hpp", "outcome": "accept", "rule": "global_complete"},
+    {"file": "accept_named_namespace.hpp", "outcome": "accept", "rule": "named_namespace_complete"},
+    {"file": "accept_nested_namespace.hpp", "outcome": "accept", "rule": "nested_named_namespace_complete"},
+    {"file": "accept_exact_qualified_reference.hpp", "outcome": "accept", "rule": "exact_qualified_reference"},
+    {"file": "accept_unqualified_enclosing.hpp", "outcome": "accept", "rule": "unique_unqualified_enclosing_reference"},
+    {"file": "accept_forward_then_marked_definition.hpp", "outcome": "accept", "rule": "unmarked_forward_then_marked_definition"},
+    {"file": "reject_alias_signature.hpp", "outcome": "reject", "rule": "alias_bridge_visible_spelling"},
+    {"file": "reject_marked_alias.hpp", "outcome": "reject", "rule": "marked_alias"},
+    {"file": "reject_anonymous_namespace.hpp", "outcome": "reject", "rule": "anonymous_namespace_bridge_type"},
+    {"file": "reject_nested_type.hpp", "outcome": "reject", "rule": "nested_bridge_declaration"},
+    {"file": "reject_ambiguous_unqualified.hpp", "outcome": "reject", "rule": "ambiguous_unqualified_reference"},
+    {"file": "reject_forward_only.hpp", "outcome": "reject", "rule": "forward_declaration_only"},
+    {"file": "reject_public_name_collision.hpp", "outcome": "reject", "rule": "same_final_public_name_collision"}
+  ]
+}
