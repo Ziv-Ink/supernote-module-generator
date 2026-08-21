@@ -14,6 +14,7 @@ from pathlib import Path
 from .config import METADATA_FILES, gradle_project_name, normalize_backend
 from .errors import ConfigurationError, FilesystemError, GeneratorError
 from .platform_tools import host_command
+from .project import resolve_plugin_root
 from .subprocesses import run_process
 
 LOCAL_MODULES_DIR = "local_modules"
@@ -21,12 +22,7 @@ LEGACY_MODULES_DIRS = ("local-modules", "modules")
 
 
 def plugin_root(path: Path) -> Path:
-    root = path.expanduser().resolve()
-    if not (root / "PluginConfig.json").is_file() or not (root / "package.json").is_file():
-        raise ConfigurationError("Run this command from a Supernote plugin root (PluginConfig.json and package.json are required)")
-    if not (root / "android").is_dir():
-        raise ConfigurationError("Supernote plugin is missing its android directory")
-    return root
+    return resolve_plugin_root(path)
 
 
 def settings_file(root: Path) -> Path:

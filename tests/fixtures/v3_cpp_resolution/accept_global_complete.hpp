@@ -1,0 +1,2 @@
+// @SupernotePluginObject
+class Stroke {};

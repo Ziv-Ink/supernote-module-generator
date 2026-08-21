@@ -20,7 +20,6 @@ def module(tmp_path: Path) -> Path:
     (source / "internal.hpp").write_text(
         """#pragma once
 #include <cstdint>
-// @SupernotePluginInternal
 class IndexService {
 public:
   IndexService();
@@ -45,7 +44,10 @@ std::int32_t loadIndex(std::int32_t page) { return page; }
 def test_cpp_internal_facade_is_typed_hidden_and_feature_scoped(tmp_path: Path):
     root = module(tmp_path)
     header, source = render_cpp_internal_facade(
-        root, module_name="Documents", feature_id=FEATURE_ID
+        root,
+        module_name="Documents",
+        feature_id=FEATURE_ID,
+        include_prefix="documents/android/src/main/cpp",
     )
 
     assert internal_header_path(FEATURE_ID) == (
@@ -55,11 +57,13 @@ def test_cpp_internal_facade_is_typed_hidden_and_feature_scoped(tmp_path: Path):
     assert "std::int32_t pageCount(std::int32_t offset);" in header
     assert "std::function<void(supernote::Result<std::int32_t>)>" in header
     assert "struct IndexService final" in header
+    assert '#include "documents/android/src/main/cpp/internal.hpp"' in source
     assert "current_feature_session()" in source
     assert 'feature->service<::IndexService>' in source
     assert "process_services().workers().submit" in source
     assert "claim_internal_completion" in source
     assert "feature->accept({}, std::move(callback))" in source
+    assert "operation->set_retained_state(retained_input_state)" in source
     assert "operation->take_internal_completion()" in source
     worker_capture = source[
         source.index("process_services().workers().submit") :

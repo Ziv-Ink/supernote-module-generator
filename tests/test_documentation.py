@@ -147,7 +147,7 @@ def test_wiki_links_use_known_task_pages():
             assert page in WIKI_PAGES
 
 
-def test_root_readme_explains_the_v2_public_model():
+def test_root_readme_explains_the_v3_public_model():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     opening = "\n".join(readme.splitlines()[:12])
     opening_words = " ".join(opening.split())
@@ -160,11 +160,52 @@ def test_root_readme_explains_the_v2_public_model():
     assert "--type native" not in readme
     assert "SupernotePluginInternal" in readme
     assert "SupernotePluginAsync" in readme
+    assert "SupernotePluginObject" in readme
+    assert "SupernotePluginValue" in readme
+    assert "returned-only objects" in readme
+    assert "homogeneous array" in readme
+    assert "nullable `T`" in readme
+    assert "does not generate C++/JVM native-object proxies" in readme
+    assert "no V2 users or migration requirements" in readme
     assert "C23" in readme and "C++23" in readme
     assert "--delete-build-files" in readme
     assert "managed non-JS context" in " ".join(readme.split())
     assert "https://docs.supernote.com/" in readme
-    assert len(readme.splitlines()) < 240
+    assert len(readme.splitlines()) < 280
+
+
+def test_generated_v3_feature_readme_covers_object_value_and_deferral_contracts(
+    tmp_path: Path,
+):
+    from supernote_module_generator.feature_generator import (
+        FeatureConfig,
+        stage_feature,
+    )
+    from supernote_module_generator.feature_model import StarterFamily
+
+    feature = stage_feature(
+        FeatureConfig(
+            output=tmp_path / "typed-feature",
+            npm_name="typed-feature",
+            package_version="3.0.0.dev0",
+            public_name="TypedFeature",
+            android_namespace="com.example.typed_feature",
+            starters=(StarterFamily.NATIVE, StarterFamily.JVM),
+        )
+    )
+    readme = (feature / "README.md").read_text(encoding="utf-8")
+
+    for contract in (
+        "SupernotePluginObject",
+        "SupernotePluginValue",
+        "SupernoteConstructor",
+        "Returned-only objects",
+        "arrays, and nullable",
+        "Cross-family native-object proxies",
+        "structured",
+        "thread safety",
+    ):
+        assert contract in readme
 
 
 @pytest.mark.parametrize(
@@ -266,11 +307,13 @@ def test_native_initial_declaration_uses_the_configured_interface_name(tmp_path:
     assert "$MODULE" not in declarations
 
 
-def test_repository_docs_contain_architectural_history_not_migration_tooling():
-    history = (ROOT / "docs/V1-TO-V2-ARCHITECTURE.md").read_text()
-    assert "architectural history" in history
-    assert "not a converter guide" in history
-    assert "automatic converter" in history
+def test_repository_docs_define_v3_architecture_without_migration_tooling():
+    architecture = (ROOT / "docs/V3-ARCHITECTURE.md").read_text()
+    assert "V3 architecture" in architecture
+    assert "not a V2" in architecture
+    assert "automatic converter" in architecture
+    assert "Cross-family object proxies" in architecture
+    assert not (ROOT / "docs/V1-TO-V2-ARCHITECTURE.md").exists()
     assert not (ROOT / "docs/Add-a-Feature.md").exists()
     assert not (ROOT / "UX_REDESIGN_SPECIFICATION.md").exists()
     assert not (ROOT / "PYPI_README.md").exists()
@@ -279,7 +322,7 @@ def test_repository_docs_contain_architectural_history_not_migration_tooling():
     )
 
 
-def test_release_guide_uses_the_v2_feature_model():
+def test_release_guide_uses_the_language_neutral_feature_model():
     guide = (ROOT / "maintainers/releasing.md").read_text(encoding="utf-8")
     assert "C/C++ starter" in guide
     assert "Kotlin/Java starter" in guide

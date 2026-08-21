@@ -18,6 +18,10 @@ from .models import ModuleInfo
 from .validation import package_path, validate_config
 
 LOCAL_MODULES_DIR = "local_modules"
+TEMPLATE_BUILD_SCRIPTS = (
+    Path("scripts/buildPlugin.sh"),
+    Path("scripts/buildPlugin.ps1"),
+)
 
 
 def ensure_within_plugin(root: Path, target: Path) -> Path:
@@ -39,18 +43,30 @@ def ensure_tree_within_plugin(root: Path, tree: Path) -> None:
         ensure_within_plugin(root, target)
 
 
+def template_build_script(root: Path) -> Optional[Path]:
+    """Return the official template's pre-build identity marker, if present."""
+    return next(
+        (root / relative for relative in TEMPLATE_BUILD_SCRIPTS if (root / relative).is_file()),
+        None,
+    )
+
+
 def resolve_plugin_root(path: Path) -> Path:
     root = path.expanduser().resolve()
+    manifest = root / "PluginConfig.json"
+    prebuild_marker = template_build_script(root)
     markers = (
-        (root / "PluginConfig.json").is_file(),
+        manifest.is_file() or prebuild_marker is not None,
         (root / "package.json").is_file(),
         (root / "android").is_dir(),
         any((root / "android" / name).is_file() for name in ("settings.gradle", "settings.gradle.kts")),
     )
     if not all(markers):
         raise ConfigurationError(f"not a Supernote plugin: {root}")
+    identity_marker = manifest if manifest.is_file() else prebuild_marker
+    assert identity_marker is not None
     for marker in (
-        root / "PluginConfig.json",
+        identity_marker,
         root / "package.json",
         root / "android",
         android_settings(root),

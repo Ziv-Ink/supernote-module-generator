@@ -10,6 +10,8 @@ import re
 import sys
 
 if __package__:
+    from .cpp_object_binding_codegen import render_cpp_object_bindings
+    from .cpp_routes import CppRouteError, plan_cpp_routes
     from .cpp_projection import (
         CppProjectionError,
         project_cpp_api,
@@ -25,7 +27,9 @@ if __package__:
     from .source_models import (
         CppClassSource,
         CppConstructorSource,
+        CppEnumSource,
         CppFunctionSource,
+        CppFieldSource,
         CppMethodSource,
         CppParameterSource,
         DeclarationTarget,
@@ -35,6 +39,13 @@ if __package__:
         SupernoteMarker,
     )
 else:
+    from supernote_codegen.cpp_object_binding_codegen import (  # type: ignore[no-redef]
+        render_cpp_object_bindings,
+    )
+    from supernote_codegen.cpp_routes import (  # type: ignore[no-redef]
+        CppRouteError,
+        plan_cpp_routes,
+    )
     from supernote_codegen.cpp_projection import (  # type: ignore[no-redef]
         CppProjectionError,
         project_cpp_api,
@@ -50,7 +61,9 @@ else:
     from supernote_codegen.source_models import (  # type: ignore[no-redef]
         CppClassSource,
         CppConstructorSource,
+        CppEnumSource,
         CppFunctionSource,
+        CppFieldSource,
         CppMethodSource,
         CppParameterSource,
         DeclarationTarget,
@@ -736,7 +749,7 @@ def _parse_parameter(
 ) -> Parameter:
     line = tokens[0].line if tokens else marker_line
     expected = (
-        f"argument {argument_index} must use one named canonical V2 value "
+        f"argument {argument_index} must use one named canonical V3 value "
         "type, for example 'std::int32_t value'"
     )
     if not tokens:
@@ -750,7 +763,6 @@ def _parse_parameter(
         )
     values = [token.value for token in tokens]
     forbidden = {
-        "&": "references",
         "*": "raw pointers",
         "=": "default arguments",
         "...": "variadic arguments",
@@ -771,15 +783,9 @@ def _parse_parameter(
                 f"{description} are not supported; {expected}",
             )
 
-    cpp_type, consumed = _type_prefix(tokens)
-    name = (
-        tokens[consumed].value
-        if cpp_type is not None
-        and cpp_type != "void"
-        and consumed + 1 == len(tokens)
-        and tokens[consumed].kind == "identifier"
-        else None
-    )
+    name = tokens[-1].value if tokens[-1].kind == "identifier" else None
+    type_tokens = tokens[:-1]
+    cpp_type = _cpp_type_spelling(type_tokens) if name is not None else None
     if cpp_type is None or name is None:
         raise _source_error(
             module_root,
@@ -802,6 +808,32 @@ def _parse_parameter(
     return Parameter(cpp_type, name)
 
 
+def _cpp_type_spelling(tokens: list[_Token]) -> str | None:
+    if not tokens:
+        return None
+    allowed_punctuation = {"::", "<", ">", "&"}
+    if any(
+        token.kind != "identifier" and token.value not in allowed_punctuation
+        for token in tokens
+    ):
+        return None
+    if sum(token.value == "<" for token in tokens) != sum(
+        token.value == ">" for token in tokens
+    ):
+        return None
+    if any(
+        token.value == "&" and index != len(tokens) - 1
+        for index, token in enumerate(tokens)
+    ):
+        return None
+    value = " ".join(token.value for token in tokens)
+    value = re.sub(r"\s*::\s*", "::", value)
+    value = re.sub(r"\s*<\s*", "<", value)
+    value = re.sub(r"\s*>\s*", ">", value)
+    value = re.sub(r"\s*&\s*", "&", value)
+    return value
+
+
 def _parse_function_source(
     *,
     module_root: Path,
@@ -814,6 +846,7 @@ def _parse_function_source(
 ) -> CppFunctionSource:
     marker = stack.first
     marker_export = "<pending>"
+    namespace, namespace_depth = _namespace_at(lexed, marker.start)
     for comment in stack.comments:
         if not comment.line_only:
             raise _source_error(
@@ -834,14 +867,15 @@ def _parse_function_source(
                 "Supernote markers are not allowed inside a preprocessor "
                 "conditional (#if, #ifdef, or #ifndef block)",
             )
-        if comment.brace_depth:
+        if comment.brace_depth != namespace_depth:
             raise _source_error(
                 module_root,
                 path,
                 comment.line,
                 module_name,
                 marker_export,
-                "a free-function marker must be at global C++ scope",
+                "a free-function marker must be at namespace scope, not inside "
+                "a class or function",
             )
 
     occurrences = tuple(
@@ -957,7 +991,31 @@ def _parse_function_source(
             "have ordinary external C++ linkage with no modifiers",
         )
 
-    return_type, consumed = _type_prefix(following)
+    opening_signature = next(
+        (index for index, token in enumerate(following) if token.value == "("),
+        None,
+    )
+    if opening_signature is None or opening_signature < 2:
+        return_type = None
+        consumed = 0
+    else:
+        consumed = opening_signature - 1
+        return_type = _cpp_type_spelling(following[:consumed])
+    return_tokens = following[:consumed]
+    if any(token.value == "*" for token in return_tokens):
+        raise _source_error(
+            module_root, path, following[0].line, module_name,
+            marker_export,
+            "raw pointers are not supported as marked C++ results; "
+            "return one canonical owned V3 type",
+        )
+    if any(token.value in {"&", "&&"} for token in return_tokens):
+        raise _source_error(
+            module_root, path, following[0].line, module_name,
+            marker_export,
+            "references are not supported as marked C++ results; return "
+            "one canonical owned V3 type",
+        )
     if return_type is None:
         description = (
             "unsupported declaration prefix or macro"
@@ -971,27 +1029,10 @@ def _parse_function_source(
             module_name,
             marker_export,
             "not a supported top-level function definition: "
-            f"{description} {first_value!r}; expected one canonical V2 return "
+            f"{description} {first_value!r}; expected one canonical V3 return "
             "type followed by a function name",
         )
     cursor = consumed
-
-    if (
-        cursor < len(following)
-        and following[cursor].value in {"*", "&", "&&"}
-    ):
-        declarator = following[cursor].value
-        description = "raw pointers" if declarator == "*" else "references"
-        raise _source_error(
-            module_root,
-            path,
-            following[cursor].line,
-            module_name,
-            marker_export,
-            f"unsupported return type {return_type + declarator!r}: "
-            f"{description} are not supported; return one canonical V2 value "
-            "type by value",
-        )
 
     if cursor >= len(following) or following[cursor].kind != "identifier":
         line = following[min(cursor, len(following) - 1)].line
@@ -1173,6 +1214,7 @@ def _parse_function_source(
         intent=intent,
         noexcept=is_noexcept,
         definition_offset=function_token.start,
+        namespace=namespace,
     )
 
 
@@ -1801,12 +1843,13 @@ def _marker_entries(
             if match and match.group("name") not in SOURCE_MARKERS:
                 message = (
                     f"unknown Supernote marker {match.group('name')!r}; supported "
-                    "markers are SupernotePluginExport, SupernotePluginInternal, "
+                    "markers are SupernotePluginObject, SupernotePluginValue, "
+                    "SupernotePluginExport, SupernotePluginInternal, "
                     "SupernotePluginAsync, and SupernoteConstructor"
                 )
             else:
                 message = (
-                    "malformed Supernote marker; initial V2 markers take no "
+                    "malformed Supernote marker; initial V3 markers take no "
                     "arguments and must be written exactly, for example "
                     "// @SupernotePluginExport"
                 )
@@ -1922,6 +1965,44 @@ def _validate_marker_stack_location(
             )
 
 
+def _namespace_at(lexed: _LexedSource, offset: int) -> tuple[tuple[str, ...], int]:
+    tokens = [item for item in lexed.tokens if item.conditional_depth == 0]
+    ranges: list[tuple[int, int, tuple[str, ...]]] = []
+    for index, token in enumerate(tokens):
+        if token.value != "namespace" or token.start >= offset:
+            continue
+        cursor = index + 1
+        names: list[str] = []
+        expect_name = True
+        while cursor < len(tokens) and tokens[cursor].value != "{":
+            current = tokens[cursor]
+            if expect_name and current.kind == "identifier":
+                names.append(current.value)
+                expect_name = False
+            elif not expect_name and current.value == "::":
+                expect_name = True
+            else:
+                names = []
+                break
+            cursor += 1
+        if cursor >= len(tokens) or tokens[cursor].value != "{" or not names or expect_name:
+            continue
+        opening = tokens[cursor]
+        closing = next(
+            (
+                item
+                for item in tokens[cursor + 1:]
+                if item.value == "}" and item.brace_depth == opening.brace_depth + 1
+            ),
+            None,
+        )
+        if closing is not None and opening.end <= offset < closing.start:
+            ranges.append((opening.start, closing.start, tuple(names)))
+    ranges.sort(key=lambda item: item[0])
+    namespace = tuple(name for _, _, names in ranges for name in names)
+    return namespace, len(ranges)
+
+
 def _constructor_suffix(
     tokens: list[_Token],
     *,
@@ -1973,68 +2054,97 @@ def _parse_v2_class_source(
     path: Path,
     text: str,
     lexed: _LexedSource,
-    class_stack: _MarkerStack,
+    class_stack: _MarkerStack | None,
+    class_token: _Token | None,
     stacks: list[_MarkerStack],
     module_name: str,
 ) -> tuple[CppClassSource, set[int]]:
-    _validate_marker_stack_location(
-        module_root,
-        path,
-        module_name,
-        class_stack,
-        brace_depth=0,
-        description="class",
-    )
-    class_intent = _intent_from_stack(
-        module_root,
-        path,
-        module_name,
-        class_stack,
-        DeclarationTarget.CLASS,
-        None,
-    )
     active_tokens = [
         token for token in lexed.tokens if token.conditional_depth == 0
     ]
-    preceding = [
-        token for token in active_tokens if token.end <= class_stack.first.start
-    ]
-    prefix: list[_Token] = []
-    for token in reversed(preceding):
-        if token.value in {";", "{", "}"}:
-            break
-        prefix.append(token)
-    prefix.reverse()
-    if prefix:
-        raise _source_error(
+    if class_stack is not None:
+        class_offset = class_stack.first.start
+        namespace, namespace_depth = _namespace_at(lexed, class_offset)
+        _validate_marker_stack_location(
             module_root,
             path,
-            prefix[0].line,
             module_name,
-            None,
-            "unsupported declaration prefix before the class marker "
-            f"{_tokens_text(prefix)!r}; templates and declaration modifiers "
-            "are not supported",
+            class_stack,
+            brace_depth=namespace_depth,
+            description="class",
         )
-    following = [
-        token for token in active_tokens if token.start >= class_stack.last.end
-    ]
+        class_intent = _intent_from_stack(
+            module_root,
+            path,
+            module_name,
+            class_stack,
+            DeclarationTarget.CLASS,
+            None,
+        )
+        preceding = [
+            token for token in active_tokens if token.end <= class_offset
+        ]
+        prefix: list[_Token] = []
+        for token in reversed(preceding):
+            if token.value in {";", "{", "}"}:
+                break
+            prefix.append(token)
+        prefix.reverse()
+        if prefix:
+            raise _source_error(
+                module_root,
+                path,
+                prefix[0].line,
+                module_name,
+                None,
+                "unsupported declaration prefix before the class marker "
+                f"{_tokens_text(prefix)!r}; templates and declaration "
+                "modifiers are not supported",
+            )
+        following = [
+            token for token in active_tokens
+            if token.start >= class_stack.last.end
+        ]
+        diagnostic_line = class_stack.first.line
+    else:
+        if class_token is None:
+            raise ValueError("an unmarked class parse requires its class token")
+        class_offset = class_token.start
+        namespace, namespace_depth = _namespace_at(lexed, class_offset)
+        if class_token.brace_depth != namespace_depth:
+            raise _source_error(
+                module_root,
+                path,
+                class_token.line,
+                module_name,
+                None,
+                "generated members require a top-level or namespace-level "
+                "implementation owner class",
+            )
+        class_intent = SourceIntent(DeclarationTarget.CLASS)
+        following = [
+            token for token in active_tokens if token.start >= class_token.start
+        ]
+        diagnostic_line = class_token.line
     if not following:
         raise _source_error(
             module_root,
             path,
-            class_stack.first.line,
+            diagnostic_line,
             module_name,
             None,
             "a class marker stack must be followed by a complete class or "
             "struct definition",
         )
     first = following[0]
-    if text[class_stack.last.end:first.start].strip():
+    if (
+        class_stack is not None
+        and text[class_stack.last.end:first.start].strip()
+    ):
         raise _source_error(
             module_root,
             path,
-            class_stack.first.line,
+            diagnostic_line,
             module_name,
             None,
             "only whitespace may appear between the final class marker and "
@@ -2085,7 +2195,7 @@ def _parse_v2_class_source(
             before_body[0].line,
             module_name,
             cpp_name,
-            "inheritance is not supported for initial V2 generated classes",
+            "inheritance is not supported for initial V3 generated classes",
         )
     if before_body:
         raise _source_error(
@@ -2142,7 +2252,11 @@ def _parse_v2_class_source(
         if opening_token.end <= stack.first.start < closing_token.start
         and stack is not class_stack
     ]
-    consumed = {comment.start for comment in class_stack.comments}
+    consumed = (
+        {comment.start for comment in class_stack.comments}
+        if class_stack is not None
+        else set()
+    )
     stack_by_declaration: dict[int, _MarkerStack] = {}
     for stack in member_stacks:
         _validate_marker_stack_location(
@@ -2196,6 +2310,7 @@ def _parse_v2_class_source(
 
     constructors: list[CppConstructorSource] = []
     methods: list[CppMethodSource] = []
+    fields: list[CppFieldSource] = []
     method_names: dict[str, int] = {}
     constructor_ids: set[str] = set()
     has_user_constructor = False
@@ -2206,16 +2321,79 @@ def _parse_v2_class_source(
         stack = stack_by_declaration.get(declaration[0].start)
         values = [token.value for token in declaration]
         if "(" not in values:
-            if stack is not None:
+            if stack is None:
+                if class_intent.declares_value and "static" not in values:
+                    raise _source_error(
+                        module_root,
+                        path,
+                        declaration[0].line,
+                        module_name,
+                        cpp_name,
+                        "every non-static stored value member requires "
+                        "SupernotePluginExport",
+                    )
+                continue
+            intent = _intent_from_stack(
+                module_root,
+                path,
+                module_name,
+                stack,
+                DeclarationTarget.FIELD,
+                cpp_name,
+            )
+            if access != "public":
                 raise _source_error(
                     module_root,
                     path,
                     stack.first.line,
                     module_name,
                     cpp_name,
-                    "properties, fields, and other non-method generated "
-                    "members are deferred in initial V2",
+                    "a generated field must be public in C++",
                 )
+            if any(value in values for value in {"=", ",", "*", "[["}):
+                raise _source_error(
+                    module_root,
+                    path,
+                    stack.first.line,
+                    module_name,
+                    cpp_name,
+                    "a generated field must be one directly declared named "
+                    "canonical V3 field without initializer, pointer, attribute, "
+                    "or multiple declarator",
+                )
+            is_static = values[0] == "static"
+            field_tokens = declaration[1:] if is_static else declaration
+            is_const = bool(field_tokens and field_tokens[0].value == "const")
+            if is_const:
+                field_tokens = field_tokens[1:]
+            if len(field_tokens) < 2 or field_tokens[-1].kind != "identifier":
+                raise _source_error(
+                    module_root, path, stack.first.line, module_name, cpp_name,
+                    "a generated field requires a canonical type and ordinary name",
+                )
+            field_type = _cpp_type_spelling(field_tokens[:-1])
+            if field_type is None:
+                raise _source_error(
+                    module_root, path, stack.first.line, module_name, cpp_name,
+                    "unsupported generated field type spelling",
+                )
+            field_name = field_tokens[-1].value
+            fields.append(
+                CppFieldSource(
+                    SourceProvenance(
+                        f"cpp:{relative}:{cpp_name}.{field_name}#field",
+                        "cpp",
+                        relative,
+                        stack.first.line,
+                    ),
+                    field_name,
+                    field_type,
+                    intent,
+                    access,
+                    not is_const,
+                    is_static,
+                )
+            )
             continue
         opening_index = values.index("(")
         try:
@@ -2389,7 +2567,6 @@ def _parse_v2_class_source(
             )
         for forbidden, description in (
             ("operator", "operators"),
-            ("static", "static methods"),
             ("virtual", "virtual methods"),
         ):
             if forbidden in prefix_values:
@@ -2401,27 +2578,28 @@ def _parse_v2_class_source(
                     cpp_name,
                     f"{description} are deferred generated-member forms",
                 )
-        return_type, consumed_type = _type_prefix(declaration[:opening_index])
-        if (
-            return_type is None
-            or consumed_type + 1 != opening_index
-            or declaration[consumed_type].kind != "identifier"
-        ):
+        method_prefix = declaration[:opening_index]
+        is_static = bool(method_prefix and method_prefix[0].value == "static")
+        if is_static:
+            method_prefix = method_prefix[1:]
+        return_type = _cpp_type_spelling(method_prefix[:-1])
+        method_token = method_prefix[-1] if method_prefix else declaration[0]
+        if return_type is None or not method_prefix or method_token.kind != "identifier":
             raise _source_error(
                 module_root,
                 path,
                 declaration[0].line,
                 module_name,
                 cpp_name,
-                "a marked method must use one canonical V2 result type "
+                "a marked method must use one canonical V3 result type "
                 "followed by an ordinary method name",
             )
-        method_name = declaration[consumed_type].value
+        method_name = method_token.value
         if method_name in CPP23_KEYWORDS:
             raise _source_error(
                 module_root,
                 path,
-                declaration[consumed_type].line,
+                method_token.line,
                 module_name,
                 cpp_name,
                 f"method name {method_name!r} is a C++23 keyword",
@@ -2430,7 +2608,7 @@ def _parse_v2_class_source(
             raise _source_error(
                 module_root,
                 path,
-                declaration[consumed_type].line,
+                method_token.line,
                 module_name,
                 cpp_name,
                 f"duplicate generated method name {method_name!r}; first "
@@ -2454,7 +2632,7 @@ def _parse_v2_class_source(
             allow_default=False,
         )
         signature = ",".join(parameter.cpp_type for parameter in parameters)
-        method_names[method_name] = declaration[consumed_type].line
+        method_names[method_name] = method_token.line
         methods.append(
             CppMethodSource(
                 provenance=SourceProvenance(
@@ -2475,6 +2653,7 @@ def _parse_v2_class_source(
                 access=access,
                 const=is_const,
                 noexcept=is_noexcept,
+                static=is_static,
             )
         )
 
@@ -2487,7 +2666,7 @@ def _parse_v2_class_source(
                     ),
                     language="cpp",
                     path=relative,
-                    line=class_stack.first.line,
+                    line=diagnostic_line,
                 ),
                 parameters=(),
                 access="public",
@@ -2500,7 +2679,7 @@ def _parse_v2_class_source(
             declaration_id=f"cpp:{relative}:class:{cpp_name}",
             language="cpp",
             path=relative,
-            line=class_stack.first.line,
+            line=diagnostic_line,
         ),
         cpp_name=cpp_name,
         include=path.relative_to(source_root).as_posix(),
@@ -2508,8 +2687,46 @@ def _parse_v2_class_source(
         constructors=tuple(constructors),
         methods=tuple(methods),
         declaration_kind=first.value,
+        fields=tuple(fields),
+        namespace=namespace,
     )
     return class_source, consumed
+
+
+def _top_level_class_extents(
+    lexed: _LexedSource,
+) -> list[tuple[_Token, _Token, _Token]]:
+    tokens = [item for item in lexed.tokens if item.conditional_depth == 0]
+    result: list[tuple[_Token, _Token, _Token]] = []
+    for index, token in enumerate(tokens):
+        if token.value not in {"class", "struct"}:
+            continue
+        if index and tokens[index - 1].value == "enum":
+            continue
+        _, namespace_depth = _namespace_at(lexed, token.start)
+        if token.brace_depth != namespace_depth:
+            continue
+        opening = next(
+            (
+                item for item in tokens[index + 1:]
+                if item.value in {"{", ";"}
+            ),
+            None,
+        )
+        if opening is None or opening.value != "{":
+            continue
+        closing = next(
+            (
+                item for item in tokens
+                if item.start > opening.start
+                and item.value == "}"
+                and item.brace_depth == opening.brace_depth + 1
+            ),
+            None,
+        )
+        if closing is not None:
+            result.append((token, opening, closing))
+    return result
 
 
 def scan_cpp_class_source_model(
@@ -2530,8 +2747,35 @@ def scan_cpp_class_source_model(
         entries = _marker_entries(module_root, path, lexed, module_name)
         stacks = _marker_stacks(text, entries)
         consumed: set[int] = set()
+        parsed_class_offsets: set[int] = set()
         for stack in stacks:
-            if stack.first.brace_depth != 0:
+            namespace, namespace_depth = _namespace_at(lexed, stack.first.start)
+            if stack.first.brace_depth != namespace_depth:
+                if any(
+                    marker in {SupernoteMarker.OBJECT, SupernoteMarker.VALUE}
+                    for marker in stack.markers
+                ):
+                    raise _source_error(
+                        module_root,
+                        path,
+                        stack.first.line,
+                        module_name,
+                        None,
+                        "marked C++ types must be at global or named-namespace "
+                        "brace depth; anonymous namespaces and nested types "
+                        "are unsupported",
+                    )
+                continue
+            following = next(
+                (
+                    item for item in lexed.tokens
+                    if item.conditional_depth == 0
+                    and item.start >= stack.last.end
+                ),
+                None,
+            )
+            if following is not None and following.value == "enum":
+                consumed.update(comment.start for comment in stack.comments)
                 continue
             item, item_consumed = _parse_v2_class_source(
                 module_root=module_root,
@@ -2540,6 +2784,43 @@ def scan_cpp_class_source_model(
                 text=text,
                 lexed=lexed,
                 class_stack=stack,
+                class_token=None,
+                stacks=stacks,
+                module_name=module_name,
+            )
+            classes.append(item)
+            consumed.update(item_consumed)
+            if following is not None:
+                parsed_class_offsets.add(following.start)
+
+        extents = _top_level_class_extents(lexed)
+        owner_offsets: set[int] = set()
+        for stack in stacks:
+            if all(comment.start in consumed for comment in stack.comments):
+                continue
+            owner = next(
+                (
+                    extent for extent in extents
+                    if extent[1].end <= stack.first.start < extent[2].start
+                ),
+                None,
+            )
+            if owner is not None:
+                owner_offsets.add(owner[0].start)
+        for owner_offset in sorted(owner_offsets):
+            if owner_offset in parsed_class_offsets:
+                continue
+            class_token = next(
+                token for token, _, _ in extents if token.start == owner_offset
+            )
+            item, item_consumed = _parse_v2_class_source(
+                module_root=module_root,
+                source_root=source_root,
+                path=path,
+                text=text,
+                lexed=lexed,
+                class_stack=None,
+                class_token=class_token,
                 stacks=stacks,
                 module_name=module_name,
             )
@@ -2553,8 +2834,8 @@ def scan_cpp_class_source_model(
                     comment.line,
                     module_name,
                     None,
-                    "a marked C++ member requires a marked top-level "
-                    "SupernotePluginExport or SupernotePluginInternal class",
+                    "a marked C++ member requires a top-level or namespace-level "
+                    "implementation owner class",
                 )
     classes.sort(
         key=lambda item: (
@@ -2564,6 +2845,127 @@ def scan_cpp_class_source_model(
         )
     )
     return classes
+
+
+def _parse_cpp_enum_source(
+    *,
+    module_root: Path,
+    source_root: Path,
+    path: Path,
+    text: str,
+    lexed: _LexedSource,
+    stack: _MarkerStack,
+    module_name: str,
+) -> tuple[CppEnumSource, set[int]]:
+    namespace, namespace_depth = _namespace_at(lexed, stack.first.start)
+    _validate_marker_stack_location(
+        module_root, path, module_name, stack,
+        brace_depth=namespace_depth, description="enum",
+    )
+    intent = _intent_from_stack(
+        module_root, path, module_name, stack, DeclarationTarget.ENUM, None
+    )
+    following = [
+        item for item in lexed.tokens
+        if item.conditional_depth == 0 and item.start >= stack.last.end
+    ]
+    if len(following) < 5 or following[0].value != "enum" or following[1].value != "class":
+        raise _source_error(
+            module_root, path, stack.first.line, module_name, None,
+            "SupernotePluginValue on an enum requires a complete enum class definition",
+        )
+    if text[stack.last.end:following[0].start].strip():
+        raise _source_error(
+            module_root, path, stack.first.line, module_name, None,
+            "only whitespace may appear between SupernotePluginValue and enum class",
+        )
+    name_token = following[2]
+    if name_token.kind != "identifier" or following[3].value != "{":
+        raise _source_error(
+            module_root, path, name_token.line, module_name, None,
+            "a marked enum class requires an ordinary name and no base type",
+        )
+    opening = following[3]
+    closing_index = next(
+        (
+            index for index, item in enumerate(following[4:], start=4)
+            if item.value == "}" and item.brace_depth == opening.brace_depth + 1
+        ),
+        None,
+    )
+    if closing_index is None or closing_index + 1 >= len(following) or following[closing_index + 1].value != ";":
+        raise _source_error(
+            module_root, path, name_token.line, module_name, name_token.value,
+            "marked enum class must be a complete definition ending in '};'",
+        )
+    body = following[4:closing_index]
+    constants: list[str] = []
+    expect_constant = True
+    for token in body:
+        if expect_constant and token.kind == "identifier":
+            constants.append(token.value)
+            expect_constant = False
+        elif not expect_constant and token.value == ",":
+            expect_constant = True
+        else:
+            raise _source_error(
+                module_root, path, token.line, module_name, name_token.value,
+                "string enums allow only comma-separated source constant names; "
+                "explicit values, aliases, and attributes are unsupported",
+            )
+    if not constants or (expect_constant and body and body[-1].value != ","):
+        raise _source_error(
+            module_root, path, name_token.line, module_name, name_token.value,
+            "a marked enum class requires at least one valid constant",
+        )
+    relative = str(path.relative_to(module_root))
+    return (
+        CppEnumSource(
+            SourceProvenance(
+                f"cpp:{relative}:enum:{'::'.join((*namespace, name_token.value))}",
+                "cpp", relative, stack.first.line,
+            ),
+            name_token.value,
+            path.relative_to(source_root).as_posix(),
+            intent,
+            tuple(constants),
+            namespace,
+        ),
+        {item.start for item in stack.comments},
+    )
+
+
+def scan_cpp_enum_source_model(
+    module_root: Path,
+    *,
+    module_name: str | None = None,
+) -> list[CppEnumSource]:
+    source_root = module_root / "android/src/main/cpp"
+    _, resolved_name = _scan_context(module_root, None, module_name)
+    result: list[CppEnumSource] = []
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in CPP_HEADER_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        lexed = _lex_source(text)
+        stacks = _marker_stacks(
+            text, _marker_entries(module_root, path, lexed, resolved_name)
+        )
+        for stack in stacks:
+            following = next(
+                (
+                    item for item in lexed.tokens
+                    if item.conditional_depth == 0 and item.start >= stack.last.end
+                ),
+                None,
+            )
+            if following is not None and following.value == "enum":
+                item, _ = _parse_cpp_enum_source(
+                    module_root=module_root, source_root=source_root, path=path,
+                    text=text, lexed=lexed, stack=stack, module_name=resolved_name,
+                )
+                result.append(item)
+    return sorted(result, key=lambda item: (item.provenance.path, item.provenance.line))
 
 
 def scan_cpp_source_model(
@@ -2612,7 +3014,7 @@ def scan_cpp_source_model(
         ):
             if suffix == ".c":
                 message = (
-                    "direct marked C bindings are unsupported in initial V2; "
+                    "direct marked C bindings are unsupported in initial V3; "
                     "use ordinary C23 implementation code behind a canonical "
                     "marked C++ boundary"
                 )
@@ -2691,9 +3093,18 @@ def scan_cpp_semantic_model(
     module_name: str | None = None,
 ) -> SemanticApi:
     try:
+        feature_id = "supernote:feature:legacy"
+        metadata_path = module_root / ".supernote-module.json"
+        if metadata_path.is_file():
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            candidate = metadata.get("feature_id")
+            if isinstance(candidate, str):
+                feature_id = candidate
         return project_cpp_api(
             scan_cpp_source_model(module_root, module_name=module_name),
             scan_cpp_class_source_model(module_root, module_name=module_name),
+            scan_cpp_enum_source_model(module_root, module_name=module_name),
+            feature_id=feature_id,
         )
     except (CppProjectionError, SourceModelError, ValueError) as exc:
         raise CodegenError(str(exc)) from exc
@@ -2991,7 +3402,7 @@ def scan_objects(
                 comment.line,
                 module_name,
                 None,
-                "SupernoteExportObject is removed in V2; mark the class with "
+                "SupernoteExportObject is removed in V3; mark the class with "
                 "SupernotePluginExport and mark each generated method explicitly",
             )
     class_sources = scan_cpp_class_source_model(
@@ -3688,6 +4099,7 @@ def _jsi_range_validation(
     prefix = (
         f"{diagnostic_name}: argument {number + 1} ({parameter.name}) "
     )
+    path = f"{diagnostic_name}.argument[{number}]({parameter.name})"
     if parameter.cpp_type in {"int32_t", "std::int32_t"}:
         return [
             f"{indent}const double {argument_name} = arguments[{number}].asNumber();",
@@ -3698,14 +4110,17 @@ def _jsi_range_validation(
             f"{indent}    {argument_name} > static_cast<double>(",
             f"{indent}        std::numeric_limits<std::int32_t>::max())) {{",
             f"{indent}  supernote_throw_range_error(",
-            f"{indent}      runtime, {json.dumps(prefix + 'must be a signed 32-bit integer')});",
+            f"{indent}      runtime, {json.dumps(prefix + 'must be a signed 32-bit integer')},",
+            f"{indent}      \"OUT_OF_RANGE\", {json.dumps(path)}, \"int32\",",
+            f"{indent}      supernote_describe_value(runtime, arguments[{number}]));",
             f"{indent}}}",
         ]
     if parameter.cpp_type in {"int64_t", "std::int64_t"}:
         return [
             f"{indent}if (!arguments[{number}].getBigInt(runtime).isInt64(runtime)) {{",
             f"{indent}  supernote_throw_range_error(",
-            f"{indent}      runtime, {json.dumps(prefix + 'must fit in a signed 64-bit integer')});",
+            f"{indent}      runtime, {json.dumps(prefix + 'must fit in a signed 64-bit integer')},",
+            f"{indent}      \"OUT_OF_RANGE\", {json.dumps(path)}, \"int64 bigint\", \"bigint\");",
             f"{indent}}}",
         ]
     if parameter.cpp_type == "float":
@@ -3717,7 +4132,8 @@ def _jsi_range_validation(
             f"{indent}     {argument_name} > static_cast<double>(",
             f"{indent}         std::numeric_limits<float>::max()))) {{",
             f"{indent}  supernote_throw_range_error(",
-            f"{indent}      runtime, {json.dumps(prefix + 'must fit in a 32-bit float')});",
+            f"{indent}      runtime, {json.dumps(prefix + 'must fit in a 32-bit float')},",
+            f"{indent}      \"OUT_OF_RANGE\", {json.dumps(path)}, \"float32\", \"number\");",
             f"{indent}}}",
         ]
     return []
@@ -3751,29 +4167,113 @@ def _jsi_result_lines(call: str, return_type: str, indent: str) -> list[str]:
 
 
 def _jsi_value_helpers() -> str:
-    return r'''[[noreturn]] void supernote_throw_builtin_error(
+    return r'''std::string supernote_describe_value(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Value &value) {
+  if (value.isUndefined()) return "undefined";
+  if (value.isNull()) return "null";
+  if (value.isBool()) return "boolean";
+  if (value.isNumber()) return "number";
+  if (value.isBigInt()) return "bigint";
+  if (value.isString()) return "string";
+  if (value.isSymbol()) return "symbol";
+  if (!value.isObject()) return "unknown";
+  auto object = value.getObject(runtime);
+  if (object.isArray(runtime)) return "Array";
+  if (object.isFunction(runtime)) return "function";
+  return "object";
+}
+
+facebook::jsi::Value supernote_make_builtin_error(
     facebook::jsi::Runtime &runtime,
     const char *constructor_name,
-    const std::string &message) {
+    const std::string &message,
+    const std::string &reason,
+    const std::string &path,
+    const std::string &expected,
+    const std::string &actual) {
   auto constructor =
       runtime.global().getPropertyAsFunction(runtime, constructor_name);
   const facebook::jsi::Value argument(
       facebook::jsi::String::createFromUtf8(runtime, message));
-  auto error = constructor.callAsConstructor(
+  auto error_value = constructor.callAsConstructor(
       runtime, &argument, static_cast<std::size_t>(1));
+  auto error = error_value.getObject(runtime);
+  error.setProperty(
+      runtime, "reason",
+      facebook::jsi::String::createFromAscii(runtime, reason));
+  error.setProperty(
+      runtime, "path",
+      facebook::jsi::String::createFromUtf8(runtime, path));
+  error.setProperty(
+      runtime, "expected",
+      facebook::jsi::String::createFromUtf8(runtime, expected));
+  error.setProperty(
+      runtime, "actual",
+      facebook::jsi::String::createFromUtf8(runtime, actual));
+  return facebook::jsi::Value(std::move(error));
+}
+
+[[noreturn]] void supernote_throw_builtin_error(
+    facebook::jsi::Runtime &runtime,
+    const char *constructor_name,
+    const std::string &message,
+    const std::string &reason = "TYPE_MISMATCH",
+    const std::string &path = "",
+    const std::string &expected = "",
+    const std::string &actual = "unknown") {
+  auto error = supernote_make_builtin_error(
+      runtime, constructor_name, message, reason, path, expected, actual);
   throw facebook::jsi::JSError(runtime, std::move(error));
 }
 
 [[noreturn]] void supernote_throw_type_error(
     facebook::jsi::Runtime &runtime,
-    const std::string &message) {
-  supernote_throw_builtin_error(runtime, "TypeError", message);
+    const std::string &message,
+    const std::string &reason = "TYPE_MISMATCH",
+    const std::string &path = "",
+    const std::string &expected = "",
+    const std::string &actual = "unknown") {
+  supernote_throw_builtin_error(
+      runtime, "TypeError", message, reason, path, expected, actual);
 }
 
 [[noreturn]] void supernote_throw_range_error(
     facebook::jsi::Runtime &runtime,
-    const std::string &message) {
-  supernote_throw_builtin_error(runtime, "RangeError", message);
+    const std::string &message,
+    const std::string &reason = "OUT_OF_RANGE",
+    const std::string &path = "",
+    const std::string &expected = "",
+    const std::string &actual = "unknown") {
+  supernote_throw_builtin_error(
+      runtime, "RangeError", message, reason, path, expected, actual);
+}
+
+facebook::jsi::Value supernote_validation_success(
+    facebook::jsi::Runtime &runtime) {
+  facebook::jsi::Object result(runtime);
+  result.setProperty(runtime, "ok", true);
+  return facebook::jsi::Value(std::move(result));
+}
+
+facebook::jsi::Value supernote_validation_failure(
+    facebook::jsi::Runtime &runtime,
+    facebook::jsi::Value error) {
+  facebook::jsi::Object result(runtime);
+  result.setProperty(runtime, "ok", false);
+  result.setProperty(runtime, "error", std::move(error));
+  return facebook::jsi::Value(std::move(result));
+}
+
+facebook::jsi::Function supernote_attach_preflight(
+    facebook::jsi::Runtime &runtime,
+    facebook::jsi::Function function,
+    facebook::jsi::Function accepts,
+    facebook::jsi::Function check_arguments) {
+  function.setProperty(runtime, "accepts", std::move(accepts));
+  function.setProperty(
+      runtime, "checkArguments", std::move(check_arguments));
+  return function;
 }
 
 [[noreturn]] void supernote_throw_error(
@@ -3888,7 +4388,7 @@ facebook::jsi::Value supernote_make_uint8_array(
 
 def _jsi_async_helpers() -> str:
     return r'''constexpr char kPromiseContinuationsGlobal[] =
-    "__supernoteV2PromiseContinuations_a7db36cf3b5e";
+    "__supernoteV3PromiseContinuations_a7db36cf3b5e";
 
 facebook::jsi::Object supernote_error_object(
     facebook::jsi::Runtime &runtime,
@@ -4573,6 +5073,11 @@ def _jsi_binding(
     objects: list[ObjectExport],
     *,
     feature_id: str | None = None,
+    extra_includes: tuple[str, ...] = (),
+    extra_declarations: tuple[str, ...] = (),
+    extra_wrappers: tuple[str, ...] = (),
+    extra_registrations: tuple[str, ...] = (),
+    extra_uses_async: bool = False,
 ) -> str:
     namespace = str(config["android_namespace"])
     module_name = str(config["module_name"])
@@ -4582,12 +5087,14 @@ def _jsi_binding(
     feature_suffix = ""
     if feature_id is not None:
         if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
-            raise CodegenError(f"invalid V2 feature identity {feature_id!r}")
+            raise CodegenError(f"invalid V3 feature identity {feature_id!r}")
         feature_suffix = feature_id.removeprefix("supernote:feature:")
     declarations = _cpp_declarations(exports)
     object_includes = "\n".join(
         f'#include "{include}"'
-        for include in dict.fromkeys(item.include for item in objects)
+        for include in dict.fromkeys(
+            [item.include for item in objects] + list(extra_includes)
+        )
     )
     object_include_block = f"{object_includes}\n\n" if object_includes else ""
     object_wrappers = "\n\n".join(
@@ -4599,6 +5106,10 @@ def _jsi_binding(
         )
         for index, item in enumerate(objects)
     )
+    if extra_wrappers:
+        object_wrappers = "\n\n".join(
+            filter(None, (object_wrappers, *extra_wrappers))
+        )
     object_wrapper_block = f"{object_wrappers}\n\n" if object_wrappers else ""
     registrations: list[str] = []
     sync_capture = "[feature_session]" if feature_id is not None else "[]"
@@ -4612,7 +5123,7 @@ def _jsi_binding(
         if export.async_:
             if feature_id is None:
                 raise CodegenError(
-                    "V2 async bindings require plugin-level feature lowering"
+                    "V3 async bindings require plugin-level feature lowering"
                 )
             registrations.append(_jsi_async_registration(module_name, export))
             continue
@@ -4709,13 +5220,14 @@ def _jsi_binding(
         )
         for index, item in enumerate(objects)
     )
+    registrations.extend(extra_registrations)
     has_async_methods = any(
         method.async_ for item in objects for method in item.methods
     )
     async_helper_block = (
         _jsi_async_helpers() + "\n\n"
         if feature_id is not None
-        and (any(item.async_ for item in exports) or has_async_methods)
+        and (any(item.async_ for item in exports) or has_async_methods or extra_uses_async)
         else ""
     )
     namespace_open = (
@@ -4730,7 +5242,7 @@ constexpr char kGlobalName[] = {json.dumps(global_name)};
 """
     else:
         bootstrap_constants = f"""constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV2FeatureRegistry_63f6999c8c67";
+    "__supernoteV3FeatureRegistry_63f6999c8c67";
 constexpr char kFeatureId[] = {json.dumps(feature_id)};
 """
     value_helpers = _jsi_value_helpers()
@@ -4872,9 +5384,11 @@ void clear_pending_exception(JNIEnv *env, const char *operation) {
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 {object_include_block}{declarations}
+{chr(10).join(extra_declarations)}
 
 {namespace_open}
 
@@ -4907,24 +5421,90 @@ def render_v2_feature_jsi(
     *,
     module_name: str,
     feature_id: str,
+    conversion_digest: str | None = None,
+    include_prefix: str | None = None,
 ) -> str:
     """Render one feature registration unit without owning plugin bootstrap."""
 
+    extra_includes: tuple[str, ...] = ()
+    extra_declarations: tuple[str, ...] = ()
+    extra_wrappers: tuple[str, ...] = ()
+    extra_registrations: tuple[str, ...] = ()
+    extra_uses_async = False
     if (module_root / "android/src/main/cpp").is_dir():
-        bindings = scan_v2_bindings(module_root, module_name=module_name)
+        function_sources = scan_cpp_source_model(
+            module_root, module_name=module_name
+        )
+        class_sources = scan_cpp_class_source_model(
+            module_root, module_name=module_name
+        )
+        enum_sources = scan_cpp_enum_source_model(
+            module_root, module_name=module_name
+        )
+        try:
+            semantic = project_cpp_api(
+                function_sources,
+                class_sources,
+                enum_sources,
+                feature_id=feature_id,
+            )
+            routes = plan_cpp_routes(
+                semantic, function_sources, class_sources, enum_sources
+            )
+            (
+                extra_includes,
+                extra_declarations,
+                extra_wrappers,
+                extra_registrations,
+            ) = render_cpp_object_bindings(routes, module_name=module_name)
+            if include_prefix is not None:
+                extra_includes = tuple(
+                    f"{include_prefix.rstrip('/')}/{include}"
+                    for include in extra_includes
+                )
+            extra_uses_async = any(
+                route.execution is ExecutionMode.ASYNC
+                for route in routes.functions
+            ) or any(
+                route.execution is ExecutionMode.ASYNC
+                for item in routes.objects
+                for route in item.methods
+            )
+        except (CppProjectionError, CppRouteError, SourceModelError, ValueError) as exc:
+            raise CodegenError(str(exc)) from exc
+        # The V3 route renderer owns every public C++ function, including
+        # scalar-only functions.  Keeping the legacy scalar renderer empty is
+        # important because it loses namespace ownership and cannot safely
+        # distinguish identical starter symbols from separate features.
+        bindings = ScannedBindings((), ())
     else:
         bindings = ScannedBindings((), ())
     config: dict[str, object] = {
-        "android_namespace": "supernote.generated.v2",
+        "android_namespace": "supernote.generated.v3",
         "module_name": module_name,
-        "class_prefix": "V2Feature",
-        "jsi_global_name": "__supernoteV2",
+        "class_prefix": "V3Feature",
+        "jsi_global_name": "__supernoteV3",
     }
-    return _jsi_binding(
+    rendered = _jsi_binding(
         config,
         list(bindings.exports),
         list(bindings.objects),
         feature_id=feature_id,
+        extra_includes=extra_includes,
+        extra_declarations=extra_declarations,
+        extra_wrappers=extra_wrappers,
+        extra_registrations=extra_registrations,
+        extra_uses_async=extra_uses_async,
+    )
+    if conversion_digest is None:
+        return rendered
+    if not re.fullmatch(r"[0-9a-f]{64}", conversion_digest):
+        raise CodegenError("invalid V3 conversion-plan digest")
+    return (
+        f"// Supernote V3 conversion plan SHA-256: {conversion_digest}\n"
+        "#include <supernote/conversion.hpp>\n"
+        "#include <supernote/cpp_objects.hpp>\n"
+        + rendered
     )
 
 
@@ -4938,16 +5518,16 @@ def render_v2_plugin_jsi(
     validated: list[tuple[str, str]] = []
     for feature_id in feature_ids:
         if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
-            raise CodegenError(f"invalid V2 feature identity {feature_id!r}")
+            raise CodegenError(f"invalid V3 feature identity {feature_id!r}")
         validated.append(
             (feature_id, feature_id.removeprefix("supernote:feature:"))
         )
     if len({feature_id for feature_id, _ in validated}) != len(validated):
-        raise CodegenError("duplicate V2 feature identity in plugin registry")
+        raise CodegenError("duplicate V3 feature identity in plugin registry")
     jvm_features = set(jvm_feature_ids or ())
     unknown_jvm = jvm_features - {feature_id for feature_id, _ in validated}
     if unknown_jvm:
-        raise CodegenError("JVM routes refer to an unknown V2 feature")
+        raise CodegenError("JVM routes refer to an unknown V3 feature")
     declarations = "\n".join(
         "namespace supernote::generated::feature_"
         f"{suffix} {{\n"
@@ -4999,7 +5579,7 @@ namespace supernote::generated {{
 namespace {{
 
 constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV2FeatureRegistry_63f6999c8c67";
+    "__supernoteV3FeatureRegistry_63f6999c8c67";
 
 [[noreturn]] void throw_type_error(
     facebook::jsi::Runtime &runtime, const std::string &message) {{
@@ -5036,7 +5616,7 @@ void install_plugin_bindings(
         if (argument_count != 1 || !arguments[0].isString()) {{
           throw_type_error(
               runtime,
-              "Supernote V2 runtime feature(id) expects exactly one string");
+              "Supernote V3 runtime feature(id) expects exactly one string");
         }}
         const auto feature_id = arguments[0].asString(runtime).utf8(runtime);
         auto registry = runtime.global().getPropertyAsObject(
@@ -5044,13 +5624,13 @@ void install_plugin_bindings(
         auto binding = registry.getProperty(runtime, feature_id.c_str());
         if (binding.isUndefined()) {{
           throw_type_error(
-              runtime, "unknown Supernote V2 feature: " + feature_id);
+              runtime, "unknown Supernote V3 feature: " + feature_id);
         }}
         return binding;
       }});
   public_runtime.setProperty(runtime, "feature", std::move(feature));
   runtime.global().setProperty(
-      runtime, "__supernoteV2", std::move(public_runtime));
+      runtime, "__supernoteV3", std::move(public_runtime));
 }}
 
 }}  // namespace supernote::generated

@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 
 from supernote_module_generator.doctor import DoctorService
+from supernote_module_generator.feature_generator import FeatureConfig
+from supernote_module_generator.feature_model import StarterFamily
+from supernote_module_generator.feature_operations import FeatureOperationService
 from supernote_module_generator.rendering import Renderer, TerminalCapabilities
 
 
@@ -102,6 +105,53 @@ def test_doctor_executes_required_probes_and_keeps_selinux_advisory(
     assert any(check.id == "selinux_policy" for check in result.doctor.checks)
     assert not any(check.id in {"adb", "adb_device"} for check in result.doctor.checks)
     assert result.doctor.advisory_count >= 1
+
+
+def test_doctor_passes_for_plugin_with_typed_cpp_jvm_and_mixed_v3_features(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    (root / "android/app").mkdir()
+    (root / "android/app/build.gradle").write_text("plugins {}\n", encoding="utf-8")
+    features = FeatureOperationService(root)
+    for name, starters in (
+        ("typed-cpp", (StarterFamily.NATIVE,)),
+        ("typed-jvm", (StarterFamily.JVM,)),
+        ("typed-mixed", (StarterFamily.NATIVE, StarterFamily.JVM)),
+    ):
+        features.add(
+            FeatureConfig(
+                output=root / "local_modules" / name,
+                npm_name=name,
+                package_version="0.1.0",
+                android_namespace=f"com.example.{name.replace('-', '_')}",
+                public_name="".join(part.title() for part in name.split("-")),
+                starters=starters,
+            )
+        )
+    typed_cpp = root / "local_modules/typed-cpp/android/src/main/cpp/Typed.hpp"
+    typed_cpp.write_text(
+        "// @SupernotePluginValue\n"
+        "struct Point {\n"
+        "  // @SupernotePluginExport\n"
+        "  double x;\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    features.update("typed-cpp")
+
+    install_fake_sdk(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "supernote_module_generator.doctor.shutil.which",
+        lambda name: f"/tools/{name}",
+    )
+
+    result = DoctorService(root, renderer(), run=successful_run).execute("plugin")
+
+    assert result.exit_code == 0
+    assert result.doctor is not None
+    assert result.doctor.required_passed
+    assert len(features.records()) == 3
 
 
 def test_windows_doctor_uses_batch_wrapper_and_exe_ndk_compilers(

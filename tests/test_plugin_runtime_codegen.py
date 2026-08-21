@@ -36,7 +36,7 @@ def entry(name: str) -> FeatureRegistryEntry:
 def registry(*names: str) -> PluginRuntimeRegistry:
     return PluginRuntimeRegistry.create(
         plugin_id="com.example.plugin",
-        generator_version="2.0.0.dev0",
+        generator_version="3.0.0.dev0",
         features=(entry(name) for name in names),
     )
 
@@ -82,6 +82,19 @@ def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
             )
             assert "\\tlocal_modules/" in option
 
+        cmake = (generated / "CMakeLists.txt").read_text()
+        assert '"${CMAKE_CURRENT_LIST_DIR}/../../../local_modules"' in cmake
+
+
+def test_common_codegen_skips_cross_family_renderer_for_jvm_only_feature(
+    tmp_path: Path,
+):
+    generated = generate_plugin_runtime(tmp_path, registry("jvm"))
+    common_codegen = (generated / "common_codegen.py").read_text()
+
+    assert "if source_manifest is not None and native_root.is_dir():" in common_codegen
+    assert "include_prefix=native_include_prefix" in common_codegen
+
 
 def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Path):
     runtime_registry = registry("alpha", "beta")
@@ -94,9 +107,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     public_header = (generated / "include/supernote/runtime.hpp").read_text()
     source = (generated / "src/feature_registry.cpp").read_text()
     gradle = (generated / "build.gradle").read_text()
+    consumer_rules = (generated / "consumer-rules.pro").read_text()
     processor = (
         generated
-        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV2Processor.kt"
+        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV3Processor.kt"
     ).read_text()
     bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
     registration_bridge = (
@@ -104,7 +118,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     ).read_text()
     module = (
         generated
-        / "src/main/java/supernote/generated/runtime/SupernoteV2Module.kt"
+        / "src/main/java/supernote/generated/runtime/SupernoteV3Module.kt"
     ).read_text()
     coroutine_bridge = (
         generated
@@ -114,8 +128,16 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert cmake.count(f"add_library({component} SHARED") == 1
     assert cmake.count(f"add_library({registration_component} SHARED") == 1
     assert '"${SUPERNOTE_NATIVE_ROOT}/*.c"' in cmake
-    assert "C_STANDARD 23 C_STANDARD_REQUIRED YES" in cmake
+    assert "C_STANDARD 23" in cmake
+    assert "C_STANDARD_REQUIRED YES" in cmake
     assert "target_compile_features" in cmake and "cxx_std_23" in cmake
+    assert "C_VISIBILITY_PRESET hidden" in cmake
+    assert "CXX_VISIBILITY_PRESET hidden" in cmake
+    assert "VISIBILITY_INLINES_HIDDEN YES" in cmake
+    assert 'target_link_options' in cmake
+    assert '"-Wl,-Bsymbolic-functions"' in cmake
+    assert "if(SUPERNOTE_V3_WEAK_OBJECT_PROBE)" in cmake
+    assert "SUPERNOTE_V3_WEAK_OBJECT_PROBE=1" in cmake
     assert "runtime_services.cpp" in cmake
     assert "feature_registry.cpp" in cmake
     assert "local_modules/@local/alpha/android/src/main/cpp" in cmake
@@ -128,8 +150,13 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "runtime_bootstrap.cpp" in cmake
     assert "runtime_registration_bridge.c" in cmake
     assert services.count("static ProcessServices services") == 1
+    assert "void BoundedExecutor::ensure_started()" in services
+    assert "DeferredDestruction::DeferredDestruction()" in services
+    assert "ProcessServices::thread_count() const noexcept" in services
+    assert "ProcessServices::shutdown() noexcept" in services
     assert "class FeatureCallScope" in services_header
     assert "claim_internal_completion" in services_header
+    assert "set_retained_state" in services_header
     assert "thread_local std::weak_ptr<FeatureSession>" in services
     assert "enum class ErrorCode" in public_header
     assert "class Result final" in public_header
@@ -138,6 +165,24 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert '"Beta"' in source
     assert gradle.count("com.android.library") == 1
     assert "jniLibs.excludes" in gradle
+    assert "org.jspecify:jspecify:1.0.0" in gradle
+    assert "consumerProguardFiles 'consumer-rules.pro'" in gradle
+    assert "-keep interface com.facebook.react.ReactPackage { *; }" in consumer_rules
+    assert "-keep class com.facebook.soloader.SoLoader { *; }" in consumer_rules
+    assert "-keep class com.facebook.soloader.SoSource { *; }" in consumer_rules
+    assert "-keep class com.facebook.soloader.DirectorySoSource { *; }" in consumer_rules
+    assert "-keep class kotlin.** { *; }" in consumer_rules
+    assert "-keep class kotlinx.coroutines.** { *; }" in consumer_rules
+    assert (
+        "-keep,includedescriptorclasses class supernote.generated.runtime.** { *; }"
+        in consumer_rules
+    )
+    assert (
+        "-keep,includedescriptorclasses class supernote.generated.adapters.** { *; }"
+        in consumer_rules
+    )
+    assert "-keep class com.example.alpha.** { *; }" in consumer_rules
+    assert "-keep class com.example.beta.** { *; }" in consumer_rules
     assert "**/libjsi.so" in gradle
     assert "**/libreactnative.so" in gradle
     assert "local_modules/@local/alpha/android/src/main/java" in gradle
@@ -149,14 +194,18 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
     assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
+    assert "gradleProperty('supernoteV3WeakObjectProbe')" in gradle
+    assert "-DSUPERNOTE_V3_WEAK_OBJECT_PROBE=" in gradle
     assert "def supernoteIsWindows" in gradle
-    assert "'supernote-v2/sn_supernote_runtime_" in gradle
+    assert "'supernote-v3/sn_supernote_runtime_" in gradle
     assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
     assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
-    assert 'file("${rootProject.projectDir}/.cxx/snv2")' in gradle
+    assert 'file("${rootProject.projectDir}/.cxx/snv3")' in gradle
     assert "-DSUPERNOTE_GENERATED_ROOT=${layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}" in gradle
     assert "'--build-root'" in gradle
     assert "layout.buildDirectory.get().asFile.absolutePath" in gradle
+    assert "buildVariant == 'Release' ? 'RelWithDebInfo' : buildVariant" in gradle
+    assert '"configureCMake${cmakeBuildType}[arm64-v8a]"' in gradle
     assert 'file(TO_CMAKE_PATH "${SUPERNOTE_GENERATED_ROOT}"' in cmake
     assert '"${SUPERNOTE_GENERATED_ROOT}/${SUPERNOTE_VARIANT}/jni/*.cpp"' in cmake
     assert "? ['py', '-3']" in gradle
@@ -170,14 +219,21 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "schema_version" in processor
     assert "getSymbolsWithAnnotation" in processor
     assert "Kotlin suspend requires explicit SupernotePluginAsync" in processor
+    assert "org.jspecify.annotations.Nullable" in processor
+    assert "androidx.annotation.Nullable" not in processor
+    assert "Java nullability requires org.jspecify.annotations.Nullable" in processor
     assert "ReactMethod" not in processor
     assert "TypeScript" not in processor
     assert "nativeInstall" in bootstrap
     assert "nativeInvalidate" in bootstrap
+    assert "last_session = g_sessions.empty()" in bootstrap
+    assert "process_services().shutdown()" in bootstrap
+    assert "stopped process services for runtime generation" in bootstrap
     assert "nativeRunJsTask" not in bootstrap
     assert "RegisterNatives" in bootstrap
     assert "register_coroutine_bridge(env, class_loader)" in bootstrap
-    assert "GetStringUTFChars" not in bootstrap
+    assert "GetStringUTFChars(request, nullptr)" in bootstrap
+    assert "GetStringUTFChars(generation_identity, nullptr)" in bootstrap
     assert "GetByteArrayRegion" in bootstrap
     assert 'const_cast<char *>("(JLjava/lang/Object;[BZ)V")' in bootstrap
     assert "failureMessageUtf8: ByteArray?" in coroutine_bridge
@@ -186,9 +242,16 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "AttachCurrentThread" in bootstrap
     assert "DetachCurrentThread" in bootstrap
     assert f"{component}_register_natives" in bootstrap
-    assert "publish_runtime_registrar(env)" in bootstrap
-    assert f"supernote.v2.registrar.{component}.v1" in bootstrap
-    assert "supernote.generated.runtime.SupernoteV2Module" in bootstrap
+    assert "retain_runtime_mapping" not in bootstrap
+    assert "g_runtime_mapping" not in bootstrap
+    jni_on_load = bootstrap.index('extern "C" JNIEXPORT jint JNICALL JNI_OnLoad')
+    jni_on_load_end = bootstrap.index("\n}\n", jni_on_load) + 3
+    jni_on_load_body = bootstrap[jni_on_load:jni_on_load_end]
+    assert "return publish_runtime_registrar(env)" in jni_on_load_body
+    assert f"supernote.v3.load-request.{component}.v1" in bootstrap
+    assert f"supernote.v3.registrar.{component}.v2" in bootstrap
+    assert "generated runtime generation identity mismatch" in bootstrap
+    assert "supernote.generated.runtime.SupernoteV3Module" in bootstrap
     assert "(JLjava/lang/ClassLoader;" in bootstrap
     assert "Lcom/facebook/react/bridge/ReactApplicationContext;" in bootstrap
     assert "CallInvokerHolder;)J" in bootstrap
@@ -197,8 +260,13 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "runOnJSQueueThread" not in bootstrap
     assert 'const_cast<char *>("nativeInvalidate")' in bootstrap
     assert "JNI_OnLoad" in bootstrap
-    assert "RegisterNatives" not in bootstrap[bootstrap.index("JNI_OnLoad") :]
+    assert "RegisterNatives" not in jni_on_load_body
     assert "install_plugin_bindings" in bootstrap
+    assert "class WeakObjectProbeHost" in bootstrap
+    assert "std::optional<facebook::jsi::WeakObject>" in bootstrap
+    assert "weak_->lock(runtime)" in bootstrap
+    assert "weak_.reset()" in bootstrap
+    assert "install_weak_object_probe(*runtime)" in bootstrap
     assert "runOnJSQueueThread" in module
     assert "context.jsCallInvokerHolder" in module
     assert "nativeInstall(runtimePointer, loader, context, callInvoker)" in module
@@ -220,17 +288,41 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "sessionId.also { sessionId = 0L }" in invalidate_guard
     assert "nativeRunJsTask" not in module
     assert f'findLibrary("{registration_component}")' in module
-    assert "SupernoteV2NativeRegistrationBridge.register" in module
+    assert "SupernoteV3NativeRegistrationBridge.register" in module
+    assert f'File(context.codeCacheDir, "supernote-v3-runtime/{component}")' in module
+    assert 'Integer.toHexString(System.identityHashCode(pluginClassLoader))' in module
+    assert 'java.lang.Long.toHexString(System.nanoTime())' in module
+    assert 'File(runtimeDirectory, "lib$runtimeLoadName.so")' in module
+    assert "DirectorySoSource.RESOLVE_DEPENDENCIES" in module
+    assert "SoLoader.prependSoSource" in module
+    assert "SoLoader.loadLibrary(runtimeLoadName)" in module
+    assert "System.load(runtimeCopy.absolutePath)" not in module
+    assert "synchronized(System.getProperties())" in module
+    assert "publishedGeneration != runtimeLoadName" in module
+    assert f"supernote.v3.source.{component}.v1" in module
+    assert f"supernote.v3.generations.{component}.v1" in module
+    assert "MAX_RETAINED_GENERATIONS = 32" in module
+    assert "retainedGenerations !in 0 until MAX_RETAINED_GENERATIONS" in module
+    assert "restart PluginHost before loading another native generation" in module
+    assert "runtimeCopy.delete()" in module
+    assert f'SoLoader.loadLibrary("{component}")' not in module
     assert "File.createTempFile" in module
     assert "System.load(bridge.absolutePath)" in module
     assert "bridge.delete()" in module
-    assert f"supernote.v2.registrar.{component}.v1" in module
-    assert "nativeRegister(registrarAddress, classLoader)" in module
+    assert f"supernote.v3.load-request.{component}.v1" in module
+    assert f"supernote.v3.registrar.{component}.v2" in module
+    assert (
+        "nativeRegister(registrarAddress, generationIdentity, classLoader)"
+        in module
+    )
     assert "SupernoteRuntimeRegistrar" in registration_bridge
     assert "nativeRegister" in registration_bridge
+    assert "dladdr((void *)registrar, &registrar_info)" in registration_bridge
+    assert "SupernoteV3Registration" in registration_bridge
+    assert "published runtime registrar is no longer mapped" in registration_bridge
     assert "jsi" not in registration_bridge
     assert "RuntimeSession" not in registration_bridge
-    assert "class SupernoteV2Package" in module
+    assert "class SupernoteV3Package" in module
     assert (
         generated
         / "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java"
@@ -344,6 +436,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   },
                   std::make_shared<int>(7));
               auto cleanup = std::make_shared<DeferredDestruction>();
+              if (cleanup->thread_count() != 0) return 39;
               auto feature = FeatureSession::create(runtime, cleanup);
               std::atomic<int> resolved{0};
               std::atomic<int> rejected{0};
@@ -351,6 +444,11 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               auto operation = feature->accept(
                   [&](void *) { ++rejected; });
               if (!operation || operation->cancellation_token().is_cancelled()) return 1;
+              auto retained_state = std::make_shared<int>(77);
+              std::weak_ptr<int> retained_weak = retained_state;
+              operation->set_retained_state(retained_state);
+              retained_state.reset();
+              if (retained_weak.expired()) return 29;
               operation->set_cancel_hook([&] { ++cancelled; });
               if (!feature->schedule_completion(
                       operation, [&](void *) { ++resolved; })) return 2;
@@ -361,8 +459,90 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               if (operation->winner() != OperationWinner::CANCELLED_BY_FEATURE ||
                   !operation->cancellation_token().is_cancelled() ||
                   cancelled != 1) return 4;
-
+              if (retained_weak.expired()) return 30;
               js_queue.clear();
+              operation.reset();
+              if (!retained_weak.expired()) return 31;
+
+              for (int iteration = 0; iteration < 1000; ++iteration) {
+                std::atomic<int> callbacks{0};
+                std::atomic<int> race_cancelled{0};
+                std::atomic<bool> go{false};
+                int race_runtime_pointer = iteration + 1;
+                auto race_runtime = RuntimeSession::create(
+                    [&](RuntimeSession::JsTask task) {
+                      task(&race_runtime_pointer);
+                    });
+                auto race_feature = FeatureSession::create(race_runtime, cleanup);
+                auto race_operation = race_feature->accept(
+                    [&](void *) { ++callbacks; });
+                race_operation->set_cancel_hook([&] { ++race_cancelled; });
+                std::thread completing([&] {
+                  while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                  }
+                  race_feature->schedule_completion(
+                      race_operation, [&](void *) { ++callbacks; });
+                });
+                std::thread closing([&] {
+                  while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                  }
+                  race_feature->close_feature();
+                });
+                go.store(true, std::memory_order_release);
+                completing.join();
+                closing.join();
+                const auto winner = race_operation->winner();
+                if (callbacks != 1) return 32;
+                if (winner == OperationWinner::COMPLETING) {
+                  if (race_cancelled != 0) return 33;
+                } else if (winner == OperationWinner::CANCELLED_BY_FEATURE) {
+                  if (race_cancelled != 1) return 34;
+                } else {
+                  return 35;
+                }
+                race_runtime->invalidate();
+              }
+
+              for (int iteration = 0; iteration < 1000; ++iteration) {
+                std::atomic<int> completed{0};
+                std::atomic<int> race_cancelled{0};
+                std::atomic<bool> go{false};
+                int race_runtime_pointer = iteration + 1;
+                auto race_runtime = RuntimeSession::create(
+                    [&](RuntimeSession::JsTask task) {
+                      task(&race_runtime_pointer);
+                    });
+                auto race_feature = FeatureSession::create(race_runtime, cleanup);
+                auto race_operation = race_feature->accept({});
+                race_operation->set_cancel_hook([&] { ++race_cancelled; });
+                std::thread completing([&] {
+                  while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                  }
+                  race_feature->schedule_completion(
+                      race_operation, [&](void *) { ++completed; });
+                });
+                std::thread closing([&] {
+                  while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                  }
+                  race_runtime->invalidate();
+                });
+                go.store(true, std::memory_order_release);
+                completing.join();
+                closing.join();
+                const auto winner = race_operation->winner();
+                if (winner == OperationWinner::COMPLETING) {
+                  if (completed != 1 || race_cancelled != 0) return 36;
+                } else if (winner == OperationWinner::CANCELLED_BY_RUNTIME) {
+                  if (completed != 0 || race_cancelled != 1) return 37;
+                } else {
+                  return 38;
+                }
+              }
+
               auto replacement = RuntimeSession::create(
                   [&](RuntimeSession::JsTask task) {
                     js_queue.push_back(std::move(task));
@@ -412,6 +592,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               detached_runtime->invalidate();
 
               BoundedExecutor executor(1, 2);
+              if (executor.thread_count() != 0) return 40;
               std::atomic<int> worker_initialized{0};
               std::atomic<int> worker_cleaned{0};
               executor.set_thread_initializer([&] {
@@ -433,6 +614,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                 std::unique_lock lock(mutex);
                 ready.wait(lock, [&] { return started; });
               }
+              if (executor.thread_count() != 1) return 41;
               auto second = executor.submit(
                   [&](CancellationToken) { second_ran = true; });
               if (!first.accepted() || !second.accepted() || !second.cancel()) return 7;
@@ -444,8 +626,10 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               executor.shutdown();
               if (second_ran || !second.token().is_cancelled()) return 8;
               if (worker_initialized != 1 || worker_cleaned != 1) return 20;
+              if (executor.thread_count() != 0) return 42;
 
               std::atomic<int> jvm_completions{0};
+              if (process_services().thread_count() != 0) return 43;
               auto completion_id = process_services().register_jvm_async_completion(
                   [&](void *, void *, std::string code, std::string message) {
                     if (code == "IMPLEMENTATION_ERROR" && message == "failed") {
@@ -484,6 +668,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               if (destroyed_future.wait_for(std::chrono::seconds(2)) !=
                   std::future_status::ready) return 10;
               if (destroyed_future.get() == releasing_thread) return 11;
+              if (cleanup->thread_count() != 1) return 44;
 
               std::promise<std::thread::id> callback_destroyed;
               auto callback_destroyed_future = callback_destroyed.get_future();
@@ -523,6 +708,9 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   std::future_status::ready) return 21;
               allow_blocking_release.set_value();
               cleanup->drain_and_shutdown();
+              if (cleanup->thread_count() != 0) return 45;
+              process_services().shutdown();
+              if (process_services().thread_count() != 0) return 46;
               return 0;
             }
             """
@@ -533,11 +721,17 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
         "runtime_contract.exe" if os.name == "nt" else "runtime_contract"
     )
     thread_flags = [] if os.name == "nt" else ["-pthread"]
+    sanitizer_flags = (
+        ["-fsanitize=thread", "-g"]
+        if os.environ.get("SUPERNOTE_V3_TSAN") == "1"
+        else []
+    )
     compiled = subprocess.run(
         [
             compiler,
             "-std=c++23",
             *thread_flags,
+            *sanitizer_flags,
             str(generated / "src/runtime_services.cpp"),
             str(harness),
             "-I",
@@ -551,7 +745,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     )
     assert compiled.returncode == 0, compiled.stderr
     executed = subprocess.run(
-        [str(executable)], capture_output=True, text=True, check=False, timeout=10
+        [str(executable)], capture_output=True, text=True, check=False, timeout=60
     )
     assert executed.returncode == 0, executed.stderr
 
@@ -740,7 +934,7 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
         tmp_path,
         PluginRuntimeRegistry.create(
             plugin_id="com.example.plugin",
-            generator_version="2.0.0.dev0",
+            generator_version="3.0.0.dev0",
             features=(FeatureRegistryEntry.create(feature, api),),
         ),
     )
@@ -773,8 +967,8 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     assert "JNI_OnLoad" not in source
     bootstrap = (jni / "plugin_bindings.cpp").read_text()
     assert "install_plugin_bindings" in bootstrap
-    assert "__supernoteV2FeatureRegistry_" in bootstrap
-    assert '"__supernoteV2"' in bootstrap
+    assert "__supernoteV3FeatureRegistry_" in bootstrap
+    assert '"__supernoteV3"' in bootstrap
 
 
 def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):
@@ -789,7 +983,6 @@ def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):
     (cpp / "documents.hpp").write_text(
         """#pragma once
 #include <cstdint>
-// @SupernotePluginInternal
 class IndexService {
 public:
   IndexService();
@@ -811,7 +1004,7 @@ std::int32_t pageCount(std::int32_t page) { return page; }
         tmp_path,
         PluginRuntimeRegistry.create(
             plugin_id="com.example.plugin",
-            generator_version="2.0.0.dev0",
+            generator_version="3.0.0.dev0",
             features=(FeatureRegistryEntry.create(feature, api),),
         ),
     )

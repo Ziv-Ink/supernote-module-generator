@@ -5,21 +5,20 @@ existing Supernote plugin. It generates the JSI, JNI, Kotlin Symbol Processing,
 TypeScript, build, and lifecycle code that connects those implementations to
 JavaScript.
 
-V2 models one user-facing feature, regardless of where its implementation
+V3 models one user-facing feature, regardless of where its implementation
 lives. One feature may contain C++, C helper files, Kotlin, and Java together.
-JSI is the only JavaScript frontend, and the plugin compiles one generated V2
+JSI is the only JavaScript frontend, and the plugin compiles one generated V3
 runtime/build component shared by all features.
 
-V2 is the current stable architecture. Version `2.0.4` aligns the CLI help with
-the actual Add, Update, Remove, feature-version, and Doctor behavior. It also
-includes the cross-platform generator and generated-build improvements from
-`2.0.3`, including Windows command discovery, Android toolchain diagnostics,
-short coordinated runtime build paths, hardened failure handling, and safer
-generated runtime teardown. Actual feature calls still require the plugin
-runtime to be ready.
-The initial V2 release series deliberately keeps advanced value/object features
-and caller-controlled cancellation out of scope; the supported foundation is
-described below.
+Version `3.0.0.dev0` is the development line for first-class native objects and
+declared copied value types. JavaScript keeps references to original C++,
+Kotlin, and Java object instances, while declared value objects are validated
+and copied. Arrays, nullable values, string enums, live object fields,
+returned-only objects, explicit constructors/factories, and async object retention use
+one language-neutral JavaScript and TypeScript model.
+
+There are no V2 users or migration requirements. V3 deliberately has no V2
+manifest reader, converter, compatibility mode, or migration tool.
 
 ## Install
 
@@ -118,31 +117,59 @@ declaration to JavaScript or TypeScript. `SupernotePluginAsync` is always explic
 Kotlin `suspend`, C++ future-like types, or blocking implementation code never
 silently change the public API.
 
-An exported class publishes the object type. Its single eligible public
-constructor becomes the normal `create(...)` factory, while every other method
-still needs its own marker:
+`SupernotePluginObject` declares reference semantics;
+`SupernotePluginValue` declares copied structural semantics. Neither marker
+publishes members or construction by itself. Every JavaScript-visible function,
+method, field, and constructor requires its own explicit marker:
 
 ```cpp
-// @SupernotePluginExport
-class Document {
+// @SupernotePluginValue
+struct Point {
+  // @SupernotePluginExport
+  double x;
+  // @SupernotePluginExport
+  double y;
+};
+
+// @SupernotePluginObject
+class Stroke {
 public:
-  explicit Document(std::string path);
+  // @SupernoteConstructor
+  explicit Stroke(std::vector<Point> points);
 
   // @SupernotePluginExport
-  std::int32_t pageCount() const;
+  bool intersects(const std::shared_ptr<Stroke> &other) const;
 
-  void resetInternalCache(); // ignored
+  // @SupernotePluginExport
+  std::shared_ptr<Stroke> transformed(Point offset) const;
+
+  // @SupernotePluginExport
+  std::string label;
+
+  void resetInternalCache();  // ignored
 };
+
+// @SupernotePluginExport
+std::shared_ptr<Stroke> loadStroke(std::string path);
 ```
 
-Initial V2 also supports the same narrow per-JavaScript-object model for
-deliberately marked Kotlin/Java classes. Object parameters/results,
-returned-only objects, inheritance, properties, custom factories, and general
-object graphs are deferred.
+JavaScript receives stable runtime-local identity: if the same live native
+instance is exposed again in one active runtime generation, the same JavaScript
+object is returned. C++ objects use generated shared ownership; JVM objects use
+managed global references and `IsSameObject`. Returned-only objects omit a
+constructor but retain the same methods, argument/result behavior, lifetime,
+and identity. Marked native-object fields are live properties; source
+mutability determines whether they are writable.
 
-## Initial value types
+Kotlin data classes and supported Java records/final classes can declare copied
+values. Kotlin/Java object classes use `@SupernotePluginObject`, and an eligible
+constructor uses `@SupernoteConstructor`. Static/top-level functions returning
+an object are ordinary explicitly marked factories; no separate factory marker
+is needed.
 
-The initial semantic types and JavaScript/TypeScript mappings are:
+## V3 types and copied values
+
+The closed V3 semantic types and JavaScript/TypeScript mappings are:
 
 | Supernote value | JavaScript/TypeScript |
 | --- | --- |
@@ -153,11 +180,37 @@ The initial semantic types and JavaScript/TypeScript mappings are:
 | `float32`, `float64` | `number` |
 | `string` | `string` |
 | `bytes` | `Uint8Array` |
+| string enum | string-literal union |
+| declared value object | typed plain object |
+| native reference object | nominally branded generated interface |
+| homogeneous array of `T` | `T[]` |
+| nullable `T` | `T \| null` |
 
 Strings use UTF-8 when crossing native/JNI boundaries. Byte values use
 copy-based snapshot semantics and pass only the visible `Uint8Array` view.
-Nullability, generic collections, maps, value structs, enums, unsigned values,
-and zero-copy buffers are not part of the initial foundation.
+Declared value fields are required and strictly validated. Extra JavaScript
+fields are ignored without being read. Values and array containers are copied;
+native-object leaves retain references and identity. Arrays must be dense and
+homogeneous. `null` is accepted only where declared, while omitted values and
+`undefined` remain invalid.
+
+V3 intentionally does not accept arbitrary JavaScript objects, dynamic/JSON
+trees, callbacks, maps, sets, tuples, general unions, recursive value objects,
+raw pointers, numeric native handles, unsigned/platform-dependent C++ integer
+types, or unmarked structural lookalikes.
+
+## Language-family routing
+
+The public API does not expose implementation-family details. Current V3 passes
+C++ native objects only to C++ routes and Kotlin/Java native objects within the
+shared JVM family. Complete copied values may cross generated C++/JVM internal
+routes when both families declare the same logical schema.
+
+Current V3 does not generate C++/JVM native-object proxies. A direct or nested
+cross-family object reference is rejected during generation with a source-
+located diagnostic. Object type IDs and public TypeScript shapes remain
+language-neutral so a later proxy implementation does not require a public API
+redesign.
 
 ## Async, errors, and lifetime
 
@@ -192,6 +245,11 @@ compilation for that environment, not that a particular Supernote firmware,
 PluginHost, linker namespace, or SELinux policy will load and execute the code.
 Target-device behavior must be validated on the intended device.
 
+Same-process native runtime replacement is generation-checked and bounded. A
+PluginHost process accepts at most 32 generated native generations for one
+plugin component; restart PluginHost before another replacement if that limit
+is reached.
+
 The generator does not create the surrounding Supernote plugin. Plugin creation,
 installation, and device debugging are covered by the
 [official Supernote plugin documentation](https://docs.supernote.com/).
@@ -200,10 +258,9 @@ installation, and device debugging are covered by the
 
 See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md)
 for development and validation rules and
-[V1 to V2 architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/V1-TO-V2-ARCHITECTURE.md)
-for contributor-facing
-architectural history. That history is not a project migration guide or a
-compatibility promise.
+[V3 architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/V3-ARCHITECTURE.md)
+for the contributor-facing runtime and type model. It is not a V2 migration
+guide or compatibility promise.
 
 ## License
 

@@ -1,4 +1,4 @@
-"""Atomic V2 logical-feature and shared-runtime mutations."""
+"""Atomic V3 logical-feature and shared-runtime mutations."""
 from __future__ import annotations
 
 import json
@@ -12,6 +12,7 @@ from . import __version__, binding_codegen
 from .errors import ConfigurationError, GeneratorError
 from .feature_generator import FeatureConfig, stage_feature
 from .feature_model import (
+    FEATURE_MANIFEST_KIND,
     FeatureModelError,
     FeatureManifest,
     FeatureRegistryEntry,
@@ -41,10 +42,13 @@ class FeatureMetadataError(GeneratorError):
 
 
 class FeatureSourceError(GeneratorError):
-    """A marked user declaration cannot be represented by V2 bindings."""
+    """A marked user declaration cannot be represented by V3 bindings."""
 
     kind = "invalid_source"
     phase = "preflight"
+
+
+LEGACY_RUNTIME_RELATIVE_ROOT = Path("android/.supernote-module/v2-runtime")
 
 
 @dataclass(frozen=True)
@@ -77,7 +81,10 @@ class FeatureOperationService:
     def add(self, config: FeatureConfig) -> Path:
         had_features = bool(self.feature_paths())
         verify_runtime_wiring(
-            self.root, enabled=had_features, allow_missing_package=True
+            self.root,
+            enabled=had_features,
+            allow_missing_package=True,
+            allow_legacy_v2=True,
         )
         destination = config.output.resolve()
         if destination.exists():
@@ -89,6 +96,8 @@ class FeatureOperationService:
         feature_activated = False
         runtime_activated = False
         integration_mutated = False
+        legacy_runtime_backup = None
+        legacy_runtime_deactivated = False
         try:
             future = self._entries(extra=(staged_feature,), excluding=())
             staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
@@ -98,11 +107,16 @@ class FeatureOperationService:
                 staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
             )
             runtime_activated = True
+            legacy_runtime_backup = self._deactivate(
+                self.root / LEGACY_RUNTIME_RELATIVE_ROOT
+            )
+            legacy_runtime_deactivated = True
             set_runtime_wiring(self.root, enabled=True)
             integration_mutated = True
             verify_runtime_wiring(self.root, enabled=True)
             self._finalize(feature_backup)
             self._finalize(runtime_backup)
+            self._finalize(legacy_runtime_backup)
             return destination
         except BaseException:
             if feature_activated:
@@ -111,6 +125,11 @@ class FeatureOperationService:
                 self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
             if integration_mutated:
                 set_runtime_wiring(self.root, enabled=had_features)
+            if legacy_runtime_deactivated:
+                self._restore(
+                    self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
+                    legacy_runtime_backup,
+                )
             shutil.rmtree(staged_feature, ignore_errors=True)
             if staged_runtime is not None:
                 shutil.rmtree(staged_runtime, ignore_errors=True)
@@ -119,7 +138,10 @@ class FeatureOperationService:
     def update(self, npm_name: str) -> Path:
         had_features = bool(self.feature_paths())
         verify_runtime_wiring(
-            self.root, enabled=had_features, allow_missing_package=True
+            self.root,
+            enabled=had_features,
+            allow_missing_package=True,
+            allow_legacy_v2=True,
         )
         current = self.find(npm_name)
         metadata = read_feature_manifest(current)
@@ -141,6 +163,8 @@ class FeatureOperationService:
         feature_activated = False
         runtime_activated = False
         integration_mutated = False
+        legacy_runtime_backup = None
+        legacy_runtime_deactivated = False
         try:
             future = self._entries(extra=(staged_feature,), excluding=(current,))
             staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
@@ -150,11 +174,16 @@ class FeatureOperationService:
                 staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
             )
             runtime_activated = True
+            legacy_runtime_backup = self._deactivate(
+                self.root / LEGACY_RUNTIME_RELATIVE_ROOT
+            )
+            legacy_runtime_deactivated = True
             set_runtime_wiring(self.root, enabled=True)
             integration_mutated = True
             verify_runtime_wiring(self.root, enabled=True)
             self._finalize(feature_backup)
             self._finalize(runtime_backup)
+            self._finalize(legacy_runtime_backup)
             return current
         except BaseException:
             if feature_activated:
@@ -163,6 +192,11 @@ class FeatureOperationService:
                 self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
             if integration_mutated:
                 set_runtime_wiring(self.root, enabled=had_features)
+            if legacy_runtime_deactivated:
+                self._restore(
+                    self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
+                    legacy_runtime_backup,
+                )
             shutil.rmtree(staged_feature, ignore_errors=True)
             if staged_runtime is not None:
                 shutil.rmtree(staged_runtime, ignore_errors=True)
@@ -171,13 +205,18 @@ class FeatureOperationService:
     def remove(self, npm_name: str) -> None:
         had_features = bool(self.feature_paths())
         verify_runtime_wiring(
-            self.root, enabled=had_features, allow_missing_package=True
+            self.root,
+            enabled=had_features,
+            allow_missing_package=True,
+            allow_legacy_v2=True,
         )
         current = self.find(npm_name)
         staged_runtime = None
         runtime_backup = None
         runtime_activated = False
         integration_mutated = False
+        legacy_runtime_backup = None
+        legacy_runtime_deactivated = False
         feature_backup = current.parent / f".{current.name}.removed-{uuid.uuid4().hex}"
         try:
             future = self._entries(extra=(), excluding=(current,))
@@ -195,11 +234,16 @@ class FeatureOperationService:
                     self.root / RUNTIME_RELATIVE_ROOT
                 )
             runtime_activated = True
+            legacy_runtime_backup = self._deactivate(
+                self.root / LEGACY_RUNTIME_RELATIVE_ROOT
+            )
+            legacy_runtime_deactivated = True
             set_runtime_wiring(self.root, enabled=bool(future))
             integration_mutated = True
             verify_runtime_wiring(self.root, enabled=bool(future))
             shutil.rmtree(feature_backup)
             self._finalize(runtime_backup)
+            self._finalize(legacy_runtime_backup)
         except BaseException:
             if feature_backup.exists() and not current.exists():
                 os.replace(feature_backup, current)
@@ -207,6 +251,11 @@ class FeatureOperationService:
                 self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
             if integration_mutated:
                 set_runtime_wiring(self.root, enabled=had_features)
+            if legacy_runtime_deactivated:
+                self._restore(
+                    self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
+                    legacy_runtime_backup,
+                )
             if staged_runtime is not None:
                 shutil.rmtree(staged_runtime, ignore_errors=True)
             raise
@@ -304,10 +353,13 @@ class FeatureOperationService:
             verify_runtime_wiring(self.root, enabled=bool(records))
         except Exception as exc:
             issues.append(str(exc))
+        legacy_runtime = self.root / LEGACY_RUNTIME_RELATIVE_ROOT
+        if legacy_runtime.exists():
+            issues.append(f"stale generated V2 runtime exists: {legacy_runtime}")
         runtime = self.root / RUNTIME_RELATIVE_ROOT
         if not records:
             if runtime.exists():
-                issues.append("shared V2 runtime exists without any features")
+                issues.append("shared V3 runtime exists without any features")
             return issues
         try:
             expected = generated_runtime_files(self.expected_registry())
@@ -476,10 +528,10 @@ def _read_feature_metadata(metadata: Path) -> dict[str, object]:
     if not isinstance(value, dict):
         raise _invalid_feature_metadata(metadata, "top-level value must be an object")
     kind = value.get("kind")
-    if kind != "supernote_feature":
+    if kind != FEATURE_MANIFEST_KIND:
         raise _invalid_feature_metadata(
             metadata,
-            f"kind must be 'supernote_feature', got {kind!r}",
+            f"kind must be {FEATURE_MANIFEST_KIND!r}, got {kind!r}",
         )
     return value
 

@@ -11,14 +11,14 @@ import com.facebook.soloader.SoLoader
 import dalvik.system.BaseDexClassLoader
 import java.io.File
 
-class SupernoteV2Module(
+class SupernoteV3Module(
     private val context: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(context) {
   private val lifecycleLock = Any()
   private var lifecycleState = LifecycleState.NEW
   private var sessionId: Long = 0L
 
-  override fun getName(): String = "SupernoteV2Runtime"
+  override fun getName(): String = "SupernoteV3Runtime"
 
   override fun initialize() {
     super.initialize()
@@ -46,7 +46,7 @@ class SupernoteV2Module(
         abandonPendingInstall()
         return@runOnJSQueueThread
       }
-      val loader = SupernoteV2Module::class.java.classLoader
+      val loader = SupernoteV3Module::class.java.classLoader
       if (loader == null) {
         Log.e(TAG, "plugin ClassLoader is unavailable")
         abandonPendingInstall()
@@ -73,7 +73,7 @@ class SupernoteV2Module(
         }
       } ?: return@runOnJSQueueThread
       if (installed == 0L) {
-        Log.e(TAG, "V2 runtime installation failed")
+        Log.e(TAG, "V3 runtime installation failed")
       }
     }
   }
@@ -96,7 +96,7 @@ class SupernoteV2Module(
   }
 
   private fun loadNativeLibrary(): Boolean = try {
-    val pluginClassLoader = SupernoteV2Module::class.java.classLoader
+    val pluginClassLoader = SupernoteV3Module::class.java.classLoader
     val libraryPath =
         (pluginClassLoader as? BaseDexClassLoader)
             ?.findLibrary("${NATIVE_LIBRARY_NAME}")
@@ -104,36 +104,104 @@ class SupernoteV2Module(
     val registrationLibraryPath =
         pluginClassLoader.findLibrary("${NATIVE_REGISTRATION_LIBRARY_NAME}")
             ?: error("Cannot find lib${NATIVE_REGISTRATION_LIBRARY_NAME}.so")
-    val libraryDirectory =
-        File(libraryPath).parentFile ?: error("Cannot resolve native directory")
     val thread = Thread.currentThread()
     val previous = thread.contextClassLoader
+    val runtimeDirectory =
+        File(context.codeCacheDir, "supernote-v3-runtime/${NATIVE_LIBRARY_NAME}")
+    if (!runtimeDirectory.isDirectory &&
+        !runtimeDirectory.mkdirs() &&
+        !runtimeDirectory.isDirectory) {
+      error("Cannot create generated V3 runtime directory")
+    }
+    val runtimeLoadName =
+        "${NATIVE_LIBRARY_NAME}_" +
+            Integer.toHexString(System.identityHashCode(pluginClassLoader)) +
+            "_" + java.lang.Long.toHexString(System.nanoTime())
+    val runtimeCopy = File(runtimeDirectory, "lib$runtimeLoadName.so")
     try {
       thread.contextClassLoader = pluginClassLoader
       SoLoader.loadLibrary("jsi")
-      if (SoLoader.getLibraryPath(System.mapLibraryName("${NATIVE_LIBRARY_NAME}")) !=
-          libraryPath) {
-        SoLoader.prependSoSource(
-            DirectorySoSource(
-                libraryDirectory,
-                DirectorySoSource.RESOLVE_DEPENDENCIES,
-            ),
-        )
-      }
-      SoLoader.loadLibrary("${NATIVE_LIBRARY_NAME}")
-      if (!SupernoteV2NativeRegistrationBridge.register(
-              context,
-              File(registrationLibraryPath),
-              pluginClassLoader,
-          )) {
-        error("Cannot register generated V2 runtime natives")
+      File(libraryPath).copyTo(runtimeCopy, overwrite = true)
+      synchronized(System.getProperties()) {
+        val sourcePath = runtimeDirectory.canonicalPath
+        val registeredSource = System.getProperty("${NATIVE_SOURCE_PROPERTY}")
+        if (registeredSource == null) {
+          SoLoader.prependSoSource(
+              DirectorySoSource(
+                  runtimeDirectory,
+                  DirectorySoSource.RESOLVE_DEPENDENCIES,
+              ),
+          )
+          System.setProperty("${NATIVE_SOURCE_PROPERTY}", sourcePath)
+        } else if (registeredSource != sourcePath) {
+          error(
+              "Generated V3 runtime source mismatch: expected " +
+                  "$registeredSource but found $sourcePath",
+          )
+        }
+        val retainedGenerations =
+            System.getProperty("${NATIVE_GENERATION_COUNT_PROPERTY}")
+                ?.toIntOrNull()
+                ?: 0
+        if (retainedGenerations !in 0 until MAX_RETAINED_GENERATIONS) {
+          error(
+              "Generated V3 runtime replacement limit reached; " +
+                  "restart PluginHost before loading another native generation",
+          )
+        }
+        System.setProperty("${NATIVE_LOAD_REQUEST_PROPERTY}", runtimeLoadName)
+        System.clearProperty("${NATIVE_REGISTRAR_PROPERTY}")
+        try {
+          // The parent-loaded SoLoader resolves PluginHost's JSI/React Native
+          // dependencies. The source is registered once and each generation
+          // gets a unique logical name. The hard cap bounds process-retained
+          // native generations while supporting the 25-cycle stress gate.
+          SoLoader.loadLibrary(runtimeLoadName)
+          val publication =
+              System.getProperty("${NATIVE_REGISTRAR_PROPERTY}")
+                  ?: error("Generated V3 runtime registrar is unavailable")
+          val separator = publication.indexOf(':')
+          if (separator <= 0 || separator == publication.lastIndex) {
+            error("Generated V3 runtime registrar publication is malformed")
+          }
+          val publishedGeneration = publication.substring(0, separator)
+          if (publishedGeneration != runtimeLoadName) {
+            error(
+                "Generated V3 runtime generation mismatch: expected " +
+                    "$runtimeLoadName but loaded $publishedGeneration",
+            )
+          }
+          val registrarAddress = publication.substring(separator + 1).toLongOrNull()
+              ?: error("Generated V3 runtime registrar address is invalid")
+          if (registrarAddress == 0L ||
+              !SupernoteV3NativeRegistrationBridge.register(
+                  context,
+                  File(registrationLibraryPath),
+                  registrarAddress,
+                  runtimeLoadName,
+                  pluginClassLoader,
+              )) {
+            error("Cannot register generated V3 runtime natives")
+          }
+          System.setProperty(
+              "${NATIVE_GENERATION_COUNT_PROPERTY}",
+              (retainedGenerations + 1).toString(),
+          )
+        } finally {
+          if (System.getProperty("${NATIVE_LOAD_REQUEST_PROPERTY}") == runtimeLoadName) {
+            System.clearProperty("${NATIVE_LOAD_REQUEST_PROPERTY}")
+          }
+        }
       }
     } finally {
       thread.contextClassLoader = previous
+      if (runtimeCopy.exists() && !runtimeCopy.delete()) {
+        Log.w(TAG, "Cannot delete isolated generated runtime $runtimeCopy")
+      }
     }
     true
   } catch (failure: Throwable) {
-    Log.e(TAG, "Cannot load the generated V2 runtime", failure)
+    Log.e(TAG, "Cannot load the generated V3 runtime", failure)
     false
   }
 
@@ -146,7 +214,8 @@ class SupernoteV2Module(
   private external fun nativeInvalidate(sessionId: Long)
 
   private companion object {
-    const val TAG = "SupernoteV2Runtime"
+    const val TAG = "SupernoteV3Runtime"
+    const val MAX_RETAINED_GENERATIONS = 32
   }
 
   private enum class LifecycleState {
@@ -157,22 +226,21 @@ class SupernoteV2Module(
   }
 }
 
-private object SupernoteV2NativeRegistrationBridge {
+private object SupernoteV3NativeRegistrationBridge {
   fun register(
       context: ReactApplicationContext,
       sourceLibrary: File,
+      registrarAddress: Long,
+      generationIdentity: String,
       classLoader: ClassLoader,
   ): Boolean {
-    val registrarAddress =
-        System.getProperty("${NATIVE_REGISTRAR_PROPERTY}")?.toLongOrNull()
-            ?: error("Generated V2 runtime registrar is unavailable")
     if (registrarAddress == 0L) {
-      error("Generated V2 runtime registrar address is invalid")
+      error("Generated V3 runtime registrar address is invalid")
     }
     val directory =
-        File(context.codeCacheDir, "supernote-v2-registration/${NATIVE_LIBRARY_NAME}")
+        File(context.codeCacheDir, "supernote-v3-registration/${NATIVE_LIBRARY_NAME}")
     if (!directory.isDirectory && !directory.mkdirs() && !directory.isDirectory) {
-      error("Cannot create generated V2 registration directory")
+      error("Cannot create generated V3 registration directory")
     }
     val bridge =
         File.createTempFile("${NATIVE_REGISTRATION_LIBRARY_NAME}-", ".so", directory)
@@ -181,7 +249,7 @@ private object SupernoteV2NativeRegistrationBridge {
       // System.load is deliberately invoked from this child-loaded class. The
       // bridge has no JSI/React Native dependency and contains no runtime state.
       System.load(bridge.absolutePath)
-      nativeRegister(registrarAddress, classLoader)
+      nativeRegister(registrarAddress, generationIdentity, classLoader)
     } finally {
       if (bridge.exists() && !bridge.delete()) {
         Log.w(TAG, "Cannot delete temporary native-registration bridge $bridge")
@@ -191,16 +259,17 @@ private object SupernoteV2NativeRegistrationBridge {
 
   private external fun nativeRegister(
       registrarAddress: Long,
+      generationIdentity: String,
       classLoader: ClassLoader,
   ): Boolean
 
-  private const val TAG = "SupernoteV2Runtime"
+  private const val TAG = "SupernoteV3Runtime"
 }
 
-class SupernoteV2Package : ReactPackage {
+class SupernoteV3Package : ReactPackage {
   override fun createNativeModules(
       reactContext: ReactApplicationContext,
-  ): List<NativeModule> = listOf(SupernoteV2Module(reactContext))
+  ): List<NativeModule> = listOf(SupernoteV3Module(reactContext))
 
   override fun createViewManagers(
       reactContext: ReactApplicationContext,

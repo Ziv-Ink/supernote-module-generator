@@ -22,6 +22,7 @@ def test_setup_cfg_is_the_single_metadata_source():
         ROOT / "src/supernote_module_generator/__init__.py"
     ).read_text(encoding="utf-8")
     assert "name = supernote-module-generator" in setup
+    assert "author = Ziv-Ink" in setup
     assert "Generate typed C/C++ and Kotlin/Java features for existing Supernote plugins" in setup
     assert "url = https://github.com/Ziv-Ink/supernote-module-generator" in setup
     assert "PyPI = https://pypi.org/project/supernote-module-generator/" in setup
@@ -42,6 +43,7 @@ def test_release_license_and_manifest_are_present():
     assert "recursive-include maintainers *.md" in manifest
     assert "recursive-include architecture *.md" in manifest
     assert "recursive-include tests" in manifest
+    assert "recursive-include tests/fixtures *" in manifest
     assert "recursive-include src/supernote_module_generator/templates *" in manifest
 
 

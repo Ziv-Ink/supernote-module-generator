@@ -1,25 +1,24 @@
-# V1 to V2 architecture
+# V3 architecture
 
-This document is architectural history for contributors. It explains why V2
-code does not preserve several V1 shapes. It is not a converter guide, migration
-analyzer, compatibility promise, or supported V1 maintenance policy.
+This document summarizes the V3 architecture for contributors. It is not a V2
+converter guide, migration analyzer, compatibility promise, or supported V2
+maintenance policy.
 
-## Same product, deliberate architecture break
+## Deliberate architecture break
 
-V2 remains in the same repository, Python distribution
+V3 remains in the same repository, Python distribution
 (`supernote-module-generator`), and CLI command (`supernote-module`). The
-immutable `v1-final` tag preserves the exact final V1 development baseline;
-`v1.0.0` remains the earlier historical release tag. Mainline V2 development
-reuses proven V1 machinery where its behavior still matches the V2 contract.
+historical tags preserve earlier development baselines. Mainline V3 development
+reuses proven machinery only where its behavior still matches the V3 contract.
 
-There are no external V1 projects requiring migration support. Experimental
-V1 projects can be updated manually. Do not add an automatic converter,
+There are no V2 users requiring migration support. Experimental projects can be
+updated manually. Do not add an automatic converter,
 read-only analyzer, legacy mode, source rewriter, or hidden compatibility
 branch unless a real future user need produces a new explicit decision.
 
 ## Logical features replace backend-specific modules
 
-V1 asked developers to create Native, Native JNI, or JSI module types. V2 asks
+Earlier generators asked developers to create backend-specific module types. V3 asks
 which starter source families to scaffold:
 
 ```text
@@ -27,7 +26,7 @@ C/C++ (native)
 Kotlin/Java (JVM)
 ```
 
-That selection creates example files only. A logical feature remains
+That selection creates starter files only. A logical feature remains
 language-neutral and may contain either or both families. Marked source and KSP
 manifests determine its actual build and routing requirements.
 
@@ -37,7 +36,7 @@ second React Native bridge frontend.
 
 ## Source facts, API meaning, and routes are separate
 
-The V2 pipeline is:
+The V3 pipeline is:
 
 ```text
 language source model
@@ -51,23 +50,26 @@ adapters where compiler knowledge is required. The common model contains only
 facts with common Supernote meaning; it is not a collection of optional JNI,
 C++, or Kotlin backend fields.
 
-## Explicit intent replaces inference
+## First-class objects and explicit intent
 
-V1 object exports exposed supported public methods automatically. V2 ignores
-ordinary code regardless of language visibility. `SupernotePluginExport` publishes a
-declaration to JavaScript, `SupernotePluginInternal` creates hidden generated routing,
+V3 represents declared native instances as nominal, runtime-local JavaScript
+objects with stable identity, automatic lifetime management, and live marked
+fields. Declared value types are validated copied data. Arbitrary JavaScript
+object graphs are not accepted.
+
+V3 ignores ordinary code regardless of language visibility.
+`SupernotePluginExport` publishes a declaration to JavaScript,
+`SupernotePluginInternal` creates hidden generated routing,
 `SupernotePluginAsync` selects async Supernote semantics, and
 `SupernoteConstructor` resolves an otherwise ambiguous construction path.
 
-An exported class publishes its type and automatically uses its one eligible
-public constructor as `create(...)`. Every regular method, property-like API,
-static API, or special factory still requires explicit intent. There is no V1
-automatic-member compatibility mode.
+A marked object publishes its nominal type. Construction, every method, field,
+static API, and factory still require explicit intent. Returned-only object
+types are valid. There is no automatic-member compatibility mode.
 
-## One compiled runtime per plugin
+## One generated runtime per plugin
 
-V1 generated a local React Native/Android package for each module. V2 generates
-one plugin-level native build component containing shared runtime services and
+V3 generates one plugin-level native build component containing shared runtime services and
 all generated feature bindings. Logical features remain independent ownership
 units, but they do not compile separate worker pools, JVM services, or runtime
 singletons.
@@ -78,6 +80,15 @@ each feature gets a child FeatureSession. Background work never stores a
 thread and receives valid runtime access only if the originating generation is
 still alive.
 
+Plugin replacement loads a uniquely named copy of the generated bindings and
+performs an explicit native/JVM generation-identity handshake before JNI
+registration. A stale or mismatched publication fails closed. Dependency lookup
+uses one process-global SoLoader source per generated plugin component; native
+generations retained by SoLoader are capped at 32 per PluginHost process. The
+33rd load fails with a restart instruction instead of growing process state
+without a bound. This leaves room for the required 25-cycle reload stress while
+making the operational limit explicit.
+
 ## Async and teardown
 
 Async is explicit API intent, not a Kotlin/C++ implementation inference.
@@ -85,6 +96,12 @@ Ordinary blocking implementations use the shared bounded worker executor;
 supported Kotlin `suspend` implementations use the generated coroutine route.
 Once accepted, both use the same pending-operation, exactly-once completion,
 error, cancellation, and teardown lifecycle.
+
+Worker and deferred-destruction services start lazily. When the final session
+for one generated runtime generation is invalidated, that generation explicitly
+stops and joins its workers, clears pending JVM completions, and drains cleanup.
+This cleanup does not depend on the native library's static destructor because
+PluginHost may retain loaded generations in one process.
 
 Feature-only teardown rejects pending Promises while the runtime is healthy.
 Runtime teardown performs no JSI work and drops later completions. Physical work
@@ -112,10 +129,13 @@ context. Contributors must preserve all parts of that contract:
 - final component shutdown cannot unload code while queued or late cleanup can
   still execute.
 
-## What V1 still contributes
+## Language-family boundary
 
-V1 remains useful for its parsers, code generation, JSI HostFunction/HostObject
-patterns, shared ownership, transactions, diagnostics, build knowledge, KSP/JNI
-machinery, tests, and regression history. Reuse those pieces when they satisfy
-V2 decisions. Replace behavior that V2 deliberately changed instead of wrapping
-it in a compatibility branch.
+Current native-object routes remain within one implementation family: C++
+objects go to C++ and Kotlin/Java objects stay on the JVM. Declared copied
+values may cross generated internal C++/JVM routes. Cross-family object proxies
+are deferred without changing the public JavaScript or TypeScript model.
+
+Earlier parsers, code generation, JSI HostFunction/HostObject patterns, shared
+ownership, transactions, diagnostics, build knowledge, KSP/JNI machinery,
+tests, and regression history remain useful only when they satisfy V3 decisions.

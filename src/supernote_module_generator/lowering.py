@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Union
+from typing import Optional, Union
 
+from .conversion import BindingConversionPlan
 from .semantic import BindingKind, ExecutionMode, SemanticBinding
+from .semantic_types import SemanticTypeKind
 from .source_models import (
     CppFunctionSource,
     CppMethodSource,
@@ -62,6 +64,7 @@ class LoweringPlan:
     route: RouteKind
     scheduling: SchedulingKind
     data: RouteData
+    conversion: Optional[BindingConversionPlan] = None
 
     def __post_init__(self) -> None:
         if not self.binding_id or not self.source_declaration_id:
@@ -128,6 +131,21 @@ class LoweringPlan:
                 f"route {self.route.value!r} cannot implement binding kind "
                 f"{binding.kind.value!r}"
             )
+        if self.conversion is None:
+            semantic_types = [item.type for item in binding.parameters]
+            semantic_types.append(binding.result)
+            if any(
+                item.kind not in {SemanticTypeKind.VOID, SemanticTypeKind.SCALAR}
+                for item in semantic_types
+            ):
+                raise LoweringError(
+                    "recursive V3 routes require the shared binding conversion plan"
+                )
+        else:
+            try:
+                self.conversion.validate_binding(binding)
+            except ValueError as exc:
+                raise LoweringError(str(exc)) from exc
 
     def validate_source(
         self,

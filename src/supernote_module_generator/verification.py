@@ -69,8 +69,12 @@ def expected_generated_files(module: ManagedModule) -> List[str]:
         "android/.supernote-module/codegen-config.json",
         "android/.supernote-module/supernote_codegen/__init__.py",
         "android/.supernote-module/supernote_codegen/cpp_projection.py",
+        "android/.supernote-module/supernote_codegen/cpp_routes.py",
+        "android/.supernote-module/supernote_codegen/cpp_object_binding_codegen.py",
+        "android/.supernote-module/supernote_codegen/conversion.py",
         "android/.supernote-module/supernote_codegen/lowering.py",
         "android/.supernote-module/supernote_codegen/semantic.py",
+        "android/.supernote-module/supernote_codegen/semantic_types.py",
         "android/.supernote-module/supernote_codegen/source_models.py",
         generated_package,
     ]

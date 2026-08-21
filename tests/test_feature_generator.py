@@ -90,12 +90,17 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
     index = (feature / "index.js").read_text()
     package = json.loads((feature / "package.json").read_text())
 
-    assert "globalThis.__supernoteV2" in index
+    assert "globalThis.__supernoteV3" in index
     assert index.startswith("/* global globalThis */\n")
     assert "if (property === ERROR_CONSTRUCTOR_PROPERTY) return" not in index
     assert "{...descriptor, configurable: true}" in index
     assert '"supernote:feature:' not in index
     assert "runtime.feature(" in index
+    assert "export function isFeatureAvailable()" in index
+    assert "export function getFeatureStatus()" in index
+    assert "export function nativeObjectInfo(value)" in index
+    assert "__supernoteCppObjectInfo" in index
+    assert "__supernoteJvmObjectInfo" in index
     assert "new Proxy(" in index
     assert package["main"] == "index.js"
     assert "react-native" not in package
@@ -117,6 +122,14 @@ def test_feature_package_imports_before_runtime_install_and_resolves_lazily(
     script = f"""
 const generated = await import('data:text/javascript;base64,{encoded}');
 
+if (generated.getFeatureStatus() !== 'runtime-unavailable' ||
+    generated.isFeatureAvailable()) {{
+  throw new Error('missing runtime availability was reported incorrectly');
+}}
+if (generated.nativeObjectInfo({{}}) !== undefined) {{
+  throw new Error('object inspection should be absent without a runtime');
+}}
+
 let earlyError;
 try {{
   generated.default.greet;
@@ -124,12 +137,21 @@ try {{
   earlyError = error;
 }}
 if (!earlyError || earlyError.message !==
-    'Document is not installed in the Supernote V2 runtime') {{
+    'Document is not installed in the Supernote V3 runtime') {{
   throw new Error(`unexpected early-access result: ${{earlyError}}`);
 }}
 
-const first = {{firstOnly: 1, greet: name => `first:${{name}}`}};
-globalThis.__supernoteV2 = {{
+const nativeValue = {{native: true}};
+const first = {{
+  firstOnly: 1,
+  greet: name => `first:${{name}}`,
+  __supernoteCppObjectInfo(value) {{
+    return value === nativeValue
+      ? {{type: 'Stroke', originFamily: 'cpp'}}
+      : undefined;
+  }},
+}};
+globalThis.__supernoteV3 = {{
   feature(id) {{
     if (id !== {json.dumps(feature_id)}) throw new Error(`wrong id: ${{id}}`);
     return first;
@@ -137,6 +159,14 @@ globalThis.__supernoteV2 = {{
 }};
 if (generated.default.greet('Ada') !== 'first:Ada') {{
   throw new Error('feature did not resolve after runtime installation');
+}}
+if (!generated.isFeatureAvailable() ||
+    generated.getFeatureStatus() !== 'available') {{
+  throw new Error('installed feature availability was reported incorrectly');
+}}
+const info = generated.nativeObjectInfo(nativeValue);
+if (!info || info.type !== 'Stroke' || info.originFamily !== 'cpp') {{
+  throw new Error(`unexpected native object information: ${{JSON.stringify(info)}}`);
 }}
 if (first.__supernoteErrorConstructor !== generated.SupernoteError) {{
   throw new Error('SupernoteError constructor was not installed on the feature');
@@ -158,6 +188,11 @@ if (!firstKeys.includes('greet') || !firstKeys.includes('firstOnly')) {{
 if (firstKeys.includes('__supernoteErrorConstructor')) {{
   throw new Error('internal error constructor leaked through feature keys');
 }}
+if (firstKeys.includes('__supernoteCppObjectInfo') ||
+    '__supernoteCppObjectInfo' in generated.default ||
+    generated.default.__supernoteCppObjectInfo !== undefined) {{
+  throw new Error('internal object inspector leaked through the feature proxy');
+}}
 const greetDescriptor = Object.getOwnPropertyDescriptor(
   generated.default,
   'greet',
@@ -176,7 +211,7 @@ if (generated.default.__supernoteErrorConstructor !== undefined ||
 }}
 
 const second = {{greet: name => `second:${{name}}`, secondOnly: 2}};
-globalThis.__supernoteV2 = {{feature: () => second}};
+globalThis.__supernoteV3 = {{feature: () => second}};
 if (generated.default.greet('Ada') !== 'second:Ada') {{
   throw new Error('feature wrapper retained a stale runtime binding');
 }}
@@ -189,6 +224,19 @@ if (secondKeys.includes('firstOnly') || !secondKeys.includes('secondOnly')) {{
 }}
 if (second.__supernoteErrorConstructor !== generated.SupernoteError) {{
   throw new Error('SupernoteError constructor was not installed on replacement');
+}}
+
+const typeError = new TypeError('bad');
+Object.assign(typeError, {{
+  reason: 'TYPE_MISMATCH',
+  path: 'Drawing.stroke',
+  expected: 'Stroke',
+  actual: 'object',
+}});
+if (!generated.isSupernoteTypeError(typeError) ||
+    generated.isSupernoteRangeError(typeError) ||
+    generated.isSupernoteTypeError(new TypeError('plain'))) {{
+  throw new Error('validation error guards returned the wrong result');
 }}
 """
     result = subprocess.run(

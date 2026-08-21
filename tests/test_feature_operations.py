@@ -31,7 +31,7 @@ def registry(root: Path) -> dict:
     return json.loads(
         (
             root
-            / "android/.supernote-module/v2-runtime/feature-registry.json"
+            / "android/.supernote-module/v3-runtime/feature-registry.json"
         ).read_text()
     )
 
@@ -54,6 +54,12 @@ def test_add_update_remove_regenerate_one_shared_registry(tmp_path: Path):
     assert (alpha / "android/src/main/cpp/custom.cpp").is_file()
     assert registry(root)["component_name"] == component
 
+    alpha_source = (alpha / "android/src/main/cpp/feature.cpp").read_text()
+    beta_source = (beta / "android/src/main/cpp/feature.cpp").read_text()
+    assert "namespace supernote_feature_Alpha" in alpha_source
+    assert "namespace supernote_feature_Beta" in beta_source
+    assert "namespace supernote_feature_Beta" not in alpha_source
+
     service.remove("alpha")
     assert not alpha.exists()
     assert beta.exists()
@@ -72,7 +78,7 @@ def test_jvm_only_feature_is_scaffolded_for_ksp_without_python_source_parsing(
     assert created == jvm.output
     assert not (created / "android/src/main/cpp").exists()
     assert (created / "android/src/main/java/com/example/jvm/FeatureApi.kt").is_file()
-    gradle = (root / "android/.supernote-module/v2-runtime/build.gradle").read_text()
+    gradle = (root / "android/.supernote-module/v3-runtime/build.gradle").read_text()
     assert "local_modules/jvm/android/src/main/java" in gradle
     assert "com.google.devtools.ksp" in gradle
 
@@ -81,16 +87,16 @@ def test_removing_last_feature_removes_shared_component_and_wiring(tmp_path: Pat
     root = plugin(tmp_path)
     service = FeatureOperationService(root)
     service.add(config(root, "only"))
-    assert "supernote-v2-runtime" in (
+    assert "supernote-v3-runtime" in (
         root / "android/settings.gradle"
     ).read_text()
 
     service.remove("only")
 
-    assert not (root / "android/.supernote-module/v2-runtime").exists()
-    assert "supernote-v2-runtime" not in (
+    assert not (root / "android/.supernote-module/v3-runtime").exists()
+    assert "supernote-v3-runtime" not in (
         root / "android/settings.gradle"
     ).read_text()
-    assert "supernote-v2-runtime" not in (
+    assert "supernote-v3-runtime" not in (
         root / "android/app/build.gradle"
     ).read_text()

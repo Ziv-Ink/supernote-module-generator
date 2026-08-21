@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generated standalone V2 semantic merge stage. Do not edit."""
+"""Generated standalone V3 semantic merge stage. Do not edit."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,11 @@ import os
 from pathlib import Path
 import tempfile
 
+from common_support.conversion import plan_api_conversion
+from common_support.cross_family_codegen import (
+    CrossFamilyCodegenError,
+    build_cross_family_renderer,
+)
 from common_support.binding_codegen import (
     CodegenError,
     render_v2_feature_jsi,
@@ -100,6 +105,9 @@ def generate(
         recorded_cpp = semantic_api_from_manifest(cpp_raw)
         feature_root = plugin_root / "local_modules" / feature["npm_name"]
         native_root = feature_root / feature["implementation_roots"]["native"]
+        native_include_prefix = (
+            f'{feature["npm_name"]}/{feature["implementation_roots"]["native"]}'
+        )
         cpp = (
             scan_cpp_semantic_model(
                 feature_root, module_name=feature["public_name"]
@@ -121,22 +129,49 @@ def generate(
             source_manifest = read_jvm_manifest(
                 manifests[0], expected_feature_id=feature_id
             )
-            jvm = project_jvm_owners(source_manifest.owners)
+            jvm = project_jvm_owners(
+                source_manifest.owners, feature_id=source_manifest.feature_id
+            )
         semantic = merge_semantic_apis(cpp, jvm)
+        cross_family = None
+        if source_manifest is not None and native_root.is_dir():
+            try:
+                cross_family = build_cross_family_renderer(
+                    feature_root,
+                    semantic,
+                    source_manifest,
+                    feature_id=feature_id,
+                    module_name=feature["public_name"],
+                )
+            except (CrossFamilyCodegenError, ValueError) as exc:
+                raise RuntimeError(str(exc)) from exc
         semantic_json = semantic.manifest()
+        conversion_json = plan_api_conversion(semantic).manifest()
         encoded = json.dumps(
             semantic_json, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         ).encode("utf-8")
+        conversion_encoded = json.dumps(
+            conversion_json,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        conversion_digest = hashlib.sha256(conversion_encoded).hexdigest()
         semantic_registry.append(
             {
                 "feature_id": feature_id,
                 "semantic_digest": hashlib.sha256(encoded).hexdigest(),
+                "conversion_digest": conversion_digest,
                 "semantic_api": semantic_json,
             }
         )
         _atomic_write(
             output_root / "semantics" / f"{suffix}.json",
             json.dumps(semantic_json, indent=2, sort_keys=True) + "\n",
+        )
+        _atomic_write(
+            output_root / "conversions" / f"{suffix}.json",
+            json.dumps(conversion_json, indent=2, sort_keys=True) + "\n",
         )
         _atomic_write(
             feature_root / "index.d.ts",
@@ -147,6 +182,8 @@ def generate(
                 feature_root,
                 module_name=feature["public_name"],
                 feature_id=feature_id,
+                conversion_digest=conversion_digest,
+                include_prefix=native_include_prefix,
             )
         except CodegenError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -157,6 +194,8 @@ def generate(
                 feature_id=feature_id,
                 jvm_manifest=source_manifest,
                 jvm_semantic=jvm if source_manifest is not None else None,
+                cross_family=cross_family,
+                include_prefix=native_include_prefix,
             )
         except CodegenError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -172,6 +211,8 @@ def generate(
                         jvm,
                         feature_id=feature_id,
                         module_name=feature["public_name"],
+                        conversion_digest=conversion_digest,
+                        cross_family=cross_family,
                     )
                 )
             except JvmCodegenError as exc:

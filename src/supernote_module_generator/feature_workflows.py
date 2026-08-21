@@ -1,4 +1,4 @@
-"""Public V2 CLI decisions for language-neutral logical features."""
+"""Public V3 CLI decisions for language-neutral logical features."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -428,7 +428,7 @@ class FeatureDecisionCollector:
         if self.interactive:
             assert self.ui is not None
             self.ui.header("Doctor")
-            self.ui.info("Checking the tool requirements for this V2 plugin.", dim=True)
+            self.ui.info("Checking the tool requirements for this V3 plugin.", dim=True)
         return "plugin"
 
     def _choose_one(self, heading: str, records: list[FeatureRecord]) -> FeatureRecord:
