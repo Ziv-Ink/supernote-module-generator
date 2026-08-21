@@ -5,20 +5,15 @@ existing Supernote plugin. It generates the JSI, JNI, Kotlin Symbol Processing,
 TypeScript, build, and lifecycle code that connects those implementations to
 JavaScript.
 
-V3 models one user-facing feature, regardless of where its implementation
-lives. One feature may contain C++, C helper files, Kotlin, and Java together.
-JSI is the only JavaScript frontend, and the plugin compiles one generated V3
-runtime/build component shared by all features.
+A feature can use C++, C helper files, Kotlin, and Java together while exposing
+one JavaScript and TypeScript API. The generator connects everything through
+JSI and builds one shared runtime component for the plugin.
 
-Version `3.0.0.dev0` is the development line for first-class native objects and
-declared copied value types. JavaScript keeps references to original C++,
-Kotlin, and Java object instances, while declared value objects are validated
-and copied. Arrays, nullable values, string enums, live object fields,
-returned-only objects, explicit constructors/factories, and async object retention use
-one language-neutral JavaScript and TypeScript model.
-
-There are no V2 users or migration requirements. V3 deliberately has no V2
-manifest reader, converter, compatibility mode, or migration tool.
+Native objects keep a reference to the original C++, Kotlin, or Java instance.
+Declared value objects are validated and copied across the bridge. The same
+type system also supports arrays, nullable values, string enums, live object
+fields, returned-only objects, explicit constructors, factories, and async
+object retention.
 
 ## Install
 
@@ -28,7 +23,7 @@ Python 3.9 or newer is required:
 python3 -m pip install supernote-module-generator
 ```
 
-The public identities remain:
+Package and command names:
 
 ```text
 Python distribution: supernote-module-generator
@@ -47,16 +42,15 @@ supernote-module add document --starter kotlin --yes
 supernote-module add document --starter cpp --starter kotlin --yes
 ```
 
-The guided command presents the same choices as `C/C++ (native)` and
-`Kotlin/Java (JVM)`. This choice creates initial example files only. It does not
-make the feature a native or JVM feature, and either source family can be added
-later without conversion or metadata changes.
+The guided command shows the same choices as `C/C++ (native)` and
+`Kotlin/Java (JVM)`. These options only choose which example files to create.
+You can add either source family later.
 
-The native root compiles C23 and C++23 implementation source. Initial
-first-class marked declarations are C++23 only; C23 code remains fully supported
-behind normal C-compatible interfaces and a canonical marked C++ boundary.
+The native root compiles C23 and C++23 source. Exported declarations are written
+in C++23. C23 code can be used behind an ordinary C-compatible interface and a
+small marked C++ boundary.
 
-Useful lifecycle commands are:
+Common commands:
 
 ```bash
 supernote-module update document --yes
@@ -77,12 +71,12 @@ That option targets only `build/`, `android/build/`, and
 `android/app/build/`. `--yes` by itself never enables build-output deletion or
 widens a single-feature target to all features.
 
-## Explicit source intent
+## Marking exports
 
-Normal public source is ignored by the generator. A declaration participates
-only when it has a deliberate Supernote marker.
+The generator leaves ordinary source alone. It only processes declarations
+with a Supernote marker.
 
-For C++ the initial marker form is an exact source comment:
+In C++, markers are exact source comments:
 
 ```cpp
 // @SupernotePluginExport
@@ -112,10 +106,10 @@ fun rebuildIndex() = Unit
 suspend fun loadPage(page: Int): ByteArray = TODO()
 ```
 
-`SupernotePluginInternal` generates typed cross-language routing without adding the
-declaration to JavaScript or TypeScript. `SupernotePluginAsync` is always explicit;
-Kotlin `suspend`, C++ future-like types, or blocking implementation code never
-silently change the public API.
+`SupernotePluginInternal` generates typed cross-language routing without adding
+the declaration to JavaScript or TypeScript. `SupernotePluginAsync` is always
+explicit; Kotlin `suspend`, C++ future-like types, and blocking implementation
+code do not change the public API on their own.
 
 `SupernotePluginObject` declares reference semantics;
 `SupernotePluginValue` declares copied structural semantics. Neither marker
@@ -161,15 +155,15 @@ constructor but retain the same methods, argument/result behavior, lifetime,
 and identity. Marked native-object fields are live properties; source
 mutability determines whether they are writable.
 
-Kotlin data classes and supported Java records/final classes can declare copied
-values. Kotlin/Java object classes use `@SupernotePluginObject`, and an eligible
-constructor uses `@SupernoteConstructor`. Static/top-level functions returning
-an object are ordinary explicitly marked factories; no separate factory marker
-is needed.
+Kotlin data classes and supported Java records or final classes can declare
+copied values. Kotlin and Java object classes use `@SupernotePluginObject`, and
+constructors exposed to JavaScript use `@SupernoteConstructor`. A marked static
+or top-level function can also return an object; there is no separate factory
+annotation.
 
-## V3 types and copied values
+## Supported types and copied values
 
-The closed V3 semantic types and JavaScript/TypeScript mappings are:
+V3 supports these JavaScript and TypeScript mappings:
 
 | Supernote value | JavaScript/TypeScript |
 | --- | --- |
@@ -194,23 +188,22 @@ native-object leaves retain references and identity. Arrays must be dense and
 homogeneous. `null` is accepted only where declared, while omitted values and
 `undefined` remain invalid.
 
-V3 intentionally does not accept arbitrary JavaScript objects, dynamic/JSON
-trees, callbacks, maps, sets, tuples, general unions, recursive value objects,
-raw pointers, numeric native handles, unsigned/platform-dependent C++ integer
-types, or unmarked structural lookalikes.
+The generated boundary does not accept arbitrary JavaScript objects,
+dynamic/JSON trees, callbacks, maps, sets, tuples, general unions, recursive
+value objects, raw pointers, numeric native handles, unsigned or
+platform-dependent C++ integer types, or unmarked structural lookalikes.
 
 ## Language-family routing
 
-The public API does not expose implementation-family details. Current V3 passes
-C++ native objects only to C++ routes and Kotlin/Java native objects within the
-shared JVM family. Complete copied values may cross generated C++/JVM internal
-routes when both families declare the same logical schema.
+The public API does not expose implementation-language details. C++ native
+objects can be passed to C++ routes, while Kotlin and Java objects can be passed
+within the JVM family. Copied values may cross generated C++/JVM internal routes
+when both sides declare the same schema.
 
-Current V3 does not generate C++/JVM native-object proxies. A direct or nested
-cross-family object reference is rejected during generation with a source-
-located diagnostic. Object type IDs and public TypeScript shapes remain
-language-neutral so a later proxy implementation does not require a public API
-redesign.
+Cross-language native-object proxies are not generated yet. Passing a C++
+object to a JVM route, or a JVM object to a C++ route, produces a source-located
+generation error. Public TypeScript types remain independent of the
+implementation language.
 
 ## Async, errors, and lifetime
 
@@ -230,14 +223,13 @@ physical work can no longer access it. Generated code prevents use-after-free
 but does not add a mutex or serial queue around user object state; plugin
 implementations remain responsible for their own thread safety.
 
-Final generated C++ receiver/resource destruction is deferred to a managed
-non-JS context. There is no promise of a particular cleanup thread, exact
-timing, or JSI access. Resources requiring a specific thread must be managed by
-the plugin implementation. JNI global references are released safely by the
-generated runtime, while later JVM object collection remains controlled by the
-JVM.
+Generated code destroys C++ receivers and resources away from the JavaScript
+thread. Cleanup may run on different threads and must not access JSI. If a
+resource must be released on a particular thread, the plugin must arrange that
+itself. The generated runtime releases JNI global references; the JVM decides
+when the underlying objects are collected.
 
-## Validation boundary
+## Validation
 
 `supernote-module validate` checks generated structure by default; `--build`
 also invokes the Android build. A successful local build proves generation and
@@ -245,10 +237,9 @@ compilation for that environment, not that a particular Supernote firmware,
 PluginHost, linker namespace, or SELinux policy will load and execute the code.
 Target-device behavior must be validated on the intended device.
 
-Same-process native runtime replacement is generation-checked and bounded. A
-PluginHost process accepts at most 32 generated native generations for one
-plugin component; restart PluginHost before another replacement if that limit
-is reached.
+PluginHost can load up to 32 native generations for one plugin component in the
+same process. Restart PluginHost before installing another changed native
+generation after reaching that limit.
 
 The generator does not create the surrounding Supernote plugin. Plugin creation,
 installation, and device debugging are covered by the
@@ -259,8 +250,7 @@ installation, and device debugging are covered by the
 See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md)
 for development and validation rules and
 [V3 architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/V3-ARCHITECTURE.md)
-for the contributor-facing runtime and type model. It is not a V2 migration
-guide or compatibility promise.
+for the runtime and type model.
 
 ## License
 
