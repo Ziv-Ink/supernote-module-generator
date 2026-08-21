@@ -153,7 +153,10 @@ def test_root_readme_explains_the_v3_public_model():
     opening_words = " ".join(opening.split())
     assert "typed C/C++ and Kotlin/Java capabilities" in opening
     assert "existing Supernote plugin" in opening_words
-    assert "one user-facing feature" in opening
+    assert (
+        "A feature can use C++, C helper files, Kotlin, and Java together"
+        in opening
+    )
     assert "## Install" in readme
     assert "pip install supernote-module-generator" in readme
     assert "--starter cpp --starter kotlin" in readme
@@ -165,11 +168,15 @@ def test_root_readme_explains_the_v3_public_model():
     assert "returned-only objects" in readme
     assert "homogeneous array" in readme
     assert "nullable `T`" in readme
-    assert "does not generate C++/JVM native-object proxies" in readme
-    assert "no V2 users or migration requirements" in readme
+    assert "Cross-language native-object proxies are not generated yet" in readme
+    assert "no V2 users or migration requirements" not in readme
+    assert "development line for first-class native objects" not in readme
     assert "C23" in readme and "C++23" in readme
     assert "--delete-build-files" in readme
-    assert "managed non-JS context" in " ".join(readme.split())
+    assert (
+        "destroys C++ receivers and resources away from the JavaScript thread"
+        in " ".join(readme.split())
+    )
     assert "https://docs.supernote.com/" in readme
     assert len(readme.splitlines()) < 280
 
