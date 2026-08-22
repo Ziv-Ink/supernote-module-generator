@@ -6,6 +6,24 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 3.0.0 - 2026-08-22
+
+- Add native reference objects for C++, Kotlin, and Java with stable JavaScript
+  identity, generated lifetime management, strong type checks, and async
+  retention.
+- Support object parameters and results, explicit constructors, returned-only
+  objects, live fields, and factory functions while keeping the public
+  JavaScript and TypeScript API independent of the implementation language.
+- Add declared copied values, string enums, homogeneous arrays, nullable
+  values, and strict validation for nested type compositions.
+- Generate safe `.is`, `.accepts`, `.checkArguments`, and native-object
+  inspection APIs for validation and fallback routing without invoking native
+  code.
+- Keep native reference objects within their C++ or JVM family while allowing
+  compatible copied values to cross generated C++/JVM internal routes.
+- Bound same-process native generations and shut down generated worker and
+  cleanup services when their final runtime session is invalidated.
+
 ## 2.0.4 - 2026-08-17
 
 - Correct CLI help so `--yes` is described as applying defaults only to
