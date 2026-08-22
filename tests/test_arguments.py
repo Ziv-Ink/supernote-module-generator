@@ -158,6 +158,19 @@ def test_help_describes_defaults_as_overridable_and_versions_as_separate():
     assert "With --yes, the C/C++ starter is selected" not in normalized
 
 
+def test_help_explains_devconfig_and_generated_documentation_refresh():
+    root = " ".join(ROOT_HELP.split())
+    add = " ".join(COMMAND_HELP["add"].split())
+    doctor = " ".join(COMMAND_HELP["doctor"].split())
+
+    assert "javaHome, androidSdk, and adb" in root
+    assert "plugin root's devconfig.json" in root
+    assert "generated Gradle semantics task" in add
+    assert "index.d.ts and the feature README" in add
+    assert "devconfig.json take priority" in add
+    assert "configured devconfig.json paths take priority" in doctor
+
+
 def test_help_matches_update_remove_and_doctor_behavior():
     update = " ".join(COMMAND_HELP["update"].split())
     remove = " ".join(COMMAND_HELP["remove"].split())

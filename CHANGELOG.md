@@ -6,6 +6,12 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 3.0.2 - 2026-08-22
+
+- Use the plugin's machine-local `devconfig.json` consistently for Doctor,
+  Add/Update API generation, Android builds, dependency commands, and recovery,
+  without changing the parent shell environment.
+
 ## 3.0.1 - 2026-08-22
 
 - Generate feature-specific READMEs from the same merged C++ and JVM semantic

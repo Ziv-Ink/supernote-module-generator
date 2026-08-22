@@ -27,6 +27,10 @@ Starter code families:
     Creates a Kotlin starter. Java files can be added to the same JVM root.
   Starter selection controls only initial files; one feature can use both.
 
+Local tools:
+  Plugin operations and Doctor use javaHome, androidSdk, and adb from the
+  plugin root's devconfig.json when those values are configured.
+
 Global options:
   -h, --help      Show help.
   -V, --version   Show the version.
@@ -90,6 +94,11 @@ Non-interactive behavior:
   defaults: C/C++ starter, empty description, version 0.1.0, derived names, and
   dependency installation unless --skip-install is present. Explicit options
   still override those defaults. Conflicting lockfiles require --package-manager.
+
+Generation:
+  Add runs the generated Gradle semantics task after scaffolding so index.d.ts
+  and the feature README match the marked public API. Tool paths configured in
+  the plugin root's devconfig.json take priority over the launching environment.
 
 Version boundary:
   --package-version belongs to this local feature package. It does not change
@@ -287,7 +296,8 @@ Behavior:
   Doctor checks JavaScript, Kotlin/KSP, Gradle, Java 17 through 23 (Java 17 is
   recommended), Android SDK/NDK tools, NDK Clang with C23/C++23, CMake, and JSI
   requirements used by the plugin-level V3 runtime. It also reports the target-
-  device runtime boundary that cannot be proven locally.
+  device runtime boundary that cannot be proven locally. Inside a plugin root,
+  configured devconfig.json paths take priority over the launching environment.
 
 Examples:
   supernote-module doctor

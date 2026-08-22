@@ -1,6 +1,7 @@
 """Public CLI coordinator."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import subprocess
 import sys
 import time
@@ -11,6 +12,7 @@ from typing import IO, List, Optional
 
 from . import __version__
 from .arguments import COMMANDS, ParsedArguments, parse_arguments
+from .devconfig import configured_developer_environment
 from .doctor import DoctorService
 from .feature_cli_operations import FeatureCliOperationService
 from .feature_workflows import FeatureDecisionCollector, FeatureValidateDecisions
@@ -30,6 +32,7 @@ from .models import (
     RecoveryAction,
     RollbackResult,
     SubprocessError,
+    WarningInfo,
 )
 from .naming import infer_android_namespace, infer_javascript_name
 from .operation_lock import plugin_operation_lock
@@ -368,6 +371,26 @@ def _interactive_for(parsed: ParsedArguments, renderer: Renderer) -> bool:
     return renderer.capabilities.interactive and parsed.output_mode != "json"
 
 
+@contextmanager
+def _developer_environment(
+    root: Path, renderer: Renderer, *, report_issues: bool = True
+):
+    with configured_developer_environment(root) as application:
+        if report_issues:
+            for message in application.issues:
+                warning = WarningInfo(
+                    "devconfig",
+                    message,
+                    "preflight",
+                    f"Review {application.path}.",
+                )
+                if renderer.mode == "json":
+                    renderer.pending_warnings.append(warning)
+                else:
+                    renderer.warning(warning)
+        yield
+
+
 def _run_command(
     parsed: ParsedArguments,
     renderer: Renderer,
@@ -394,29 +417,41 @@ def _run_command(
             )
             return DoctorService(cwd, renderer).execute(collector.doctor_scope())
         with plugin_operation_lock(valid_root):
-            startup_warnings = _recover(valid_root, command, renderer)
-            collector = FeatureDecisionCollector(
+            with _developer_environment(
                 valid_root,
-                parsed,
-                interaction,
-                launched_from_menu=launched_from_menu,
-            )
-            result = DoctorService(cwd, renderer).execute(collector.doctor_scope())
-            result.warnings.extend(
-                warning for warning in startup_warnings if warning is not None
-            )
-            return result
+                renderer,
+                report_issues=not launched_from_menu,
+            ):
+                startup_warnings = _recover(valid_root, command, renderer)
+                collector = FeatureDecisionCollector(
+                    valid_root,
+                    parsed,
+                    interaction,
+                    launched_from_menu=launched_from_menu,
+                )
+                result = DoctorService(cwd, renderer).execute(
+                    collector.doctor_scope()
+                )
+                result.warnings.extend(
+                    warning for warning in startup_warnings if warning is not None
+                )
+                return result
 
     root = resolve_plugin_root(cwd)
     with plugin_operation_lock(root):
-        return _run_feature_command(
-            parsed,
+        with _developer_environment(
+            root,
             renderer,
-            root=root,
-            stdin=stdin,
-            interaction=interaction,
-            launched_from_menu=launched_from_menu,
-        )
+            report_issues=not launched_from_menu,
+        ):
+            return _run_feature_command(
+                parsed,
+                renderer,
+                root=root,
+                stdin=stdin,
+                interaction=interaction,
+                launched_from_menu=launched_from_menu,
+            )
 
 
 def _run_feature_command(
@@ -556,10 +591,13 @@ def _interactive_loop(
 
     try:
         with plugin_operation_lock(root):
-            startup = recover_pending(
-                root,
-                reconcile=lambda invocation: _startup_reconcile(root, invocation),
-            )
+            with _developer_environment(root, renderer):
+                startup = recover_pending(
+                    root,
+                    reconcile=lambda invocation: _startup_reconcile(
+                        root, invocation
+                    ),
+                )
     except PartialFailure as exc:
         renderer.render(_startup_failure("menu", exc))
         return 3

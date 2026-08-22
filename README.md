@@ -60,6 +60,20 @@ supernote-module doctor
 supernote-module remove document --yes
 ```
 
+The generator uses the plugin root's optional `devconfig.json` for plugin
+operations and Doctor. `javaHome` selects the Java used by Gradle and Doctor,
+`androidSdk` sets both Android SDK environment variables and keeps
+`android/local.properties` synchronized, and `adb` is passed to child processes
+as `ADB_BIN`. Missing or `null` values continue to use the environment that
+launched the generator. A malformed file or an unusable Java or Android SDK
+directory produces a warning and falls back to that environment. An unusable
+ADB path also produces a warning but remains available as `ADB_BIN`, matching
+the plugin scripts.
+
+The environment overrides apply only while the command is running and do not
+change the parent shell. Synchronizing `androidSdk` does update
+`android/local.properties` on disk.
+
 Removal preserves plugin build output by default. To remove the three known
 generated build directories as part of an explicit removal:
 

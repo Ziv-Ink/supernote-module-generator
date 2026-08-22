@@ -149,6 +149,7 @@ def test_wiki_links_use_known_task_pages():
 
 def test_root_readme_explains_the_v3_public_model():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
     opening = "\n".join(readme.splitlines()[:12])
     opening_words = " ".join(opening.split())
     assert "typed C/C++ and Kotlin/Java capabilities" in opening
@@ -173,6 +174,10 @@ def test_root_readme_explains_the_v3_public_model():
     assert "development line for first-class native objects" not in readme
     assert "C23" in readme and "C++23" in readme
     assert "--delete-build-files" in readme
+    assert "plugin root's optional `devconfig.json`" in readme
+    assert "remains available as `ADB_BIN`" in readme
+    assert "do not change the parent shell" in normalized_readme
+    assert "does update `android/local.properties` on disk" in normalized_readme
     assert (
         "destroys C++ receivers and resources away from the JavaScript thread"
         in " ".join(readme.split())
