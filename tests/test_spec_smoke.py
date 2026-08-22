@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 from supernote_module_generator.cli import main
+from supernote_module_generator.platform_tools import gradle_wrapper_path
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -17,6 +19,12 @@ def plugin(tmp_path: Path) -> Path:
     )
     (android / "settings.gradle").write_text("include ':app'\n", encoding="utf-8")
     (android / "app/build.gradle").write_text("plugins {}\n", encoding="utf-8")
+    gradle = gradle_wrapper_path(tmp_path)
+    if os.name == "nt":
+        gradle.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    else:
+        gradle.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        gradle.chmod(0o755)
     return tmp_path
 
 

@@ -11,6 +11,8 @@ import uuid
 
 from . import __version__
 from .feature_model import FeatureManifest, StarterFamily
+from .readme_codegen import render_feature_readme
+from .semantic import SemanticApi
 
 
 def _javascript_string(value: str) -> str:
@@ -273,7 +275,23 @@ def stage_feature(
             previous_types = preserve_sources_from / "index.d.ts"
             if previous_types.is_file():
                 shutil.copy2(previous_types, temporary / "index.d.ts")
-        _write(temporary, "README.md", _feature_readme(config))
+        implementation_roots = []
+        if (temporary / "android/src/main/cpp").is_dir():
+            implementation_roots.append(("C/C++", "android/src/main/cpp/"))
+        if (temporary / "android/src/main/java").is_dir():
+            implementation_roots.append(("Kotlin/Java", "android/src/main/java/"))
+        _write(
+            temporary,
+            "README.md",
+            render_feature_readme(
+                npm_name=config.npm_name,
+                public_name=config.public_name,
+                description=config.description,
+                generator_version=__version__,
+                implementation_roots=tuple(implementation_roots),
+                api=SemanticApi(),
+            ),
+        )
         metadata = {
             **feature.manifest(),
             "package_version": config.package_version,
@@ -296,47 +314,6 @@ def stage_feature(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-
-
-def _feature_readme(config: FeatureConfig) -> str:
-    return f"""# {config.npm_name}
-
-Generated Supernote V3 feature package. Its logical feature is language-neutral:
-C/C++ and Kotlin/Java source may coexist under `android/src/main/`.
-
-Only declarations with explicit Supernote markers enter generated APIs. Ordinary
-public source remains ordinary implementation code. `SupernotePluginExport` publishes a
-declaration to JavaScript; `SupernotePluginInternal` generates hidden cross-language
-routing; `SupernotePluginAsync` makes an accepted call return a Promise. Marker spelling
-is source-language-specific (`// @SupernotePluginExport` in C++ and
-`@SupernotePluginExport` on Kotlin/Java declarations).
-
-`SupernotePluginObject` declares reference identity and lifetime;
-`SupernotePluginValue` declares a validated copied plain-object schema. Neither exposes
-members or construction automatically. Mark each public method/field/factory explicitly
-and use `SupernoteConstructor` only when JavaScript construction is wanted.
-Returned-only objects are supported. Native-object fields are live; value fields, arrays, and nullable
-compositions are copied/validated through their declared types.
-
-Current object routes stay within one implementation family: C++ objects go to C++ and
-Kotlin/Java objects stay in the JVM family. Copied declared values may cross generated
-C++/JVM internal routes. Cross-family native-object proxies, arbitrary JavaScript
-objects/JSON trees, callbacks, maps, and untyped arrays are not supported and fail during
-generation instead of changing the public JavaScript shape.
-
-Accepted async work retains every native receiver/object argument and copied input until
-physical access ends. Failures use `TypeError`, `RangeError`, or the generated structured
-`SupernoteError` contract. Generated code does not serialize calls to user objects; their
-implementation remains responsible for thread safety.
-
-The generated TypeScript API is `index.d.ts`. Run the plugin's Android/Gradle
-generation after changing marked declarations. `supernote-module update
-{config.npm_name}` refreshes generator-owned files while preserving user-owned
-C/C++ and Kotlin/Java source.
-
-Generated runtime behavior is shared once by the whole plugin. Do not edit this
-package's generated JavaScript, TypeScript, metadata, or README directly.
-"""
 
 
 def activate_feature(staged: Path, destination: Path) -> Path | None:

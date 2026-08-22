@@ -70,18 +70,19 @@ def test_update_preserves_last_generated_types_until_common_codegen_runs(tmp_pat
     assert (staged / "index.d.ts").read_text(encoding="utf-8") == generated_types
 
 
-def test_feature_readme_explains_language_neutral_explicit_intent_model(
+def test_initial_feature_readme_explains_import_generation_and_source_ownership(
     tmp_path: Path,
 ):
     feature = generate_feature(config(tmp_path))
     readme = (feature / "README.md").read_text(encoding="utf-8")
     package = json.loads((feature / "package.json").read_text())
 
-    assert "C/C++ and Kotlin/Java source may coexist" in readme
-    assert "Ordinary" in readme
-    assert "SupernotePluginExport" in readme
-    assert "SupernotePluginInternal" in readme
-    assert "SupernotePluginAsync" in readme
+    assert "import Document from '@local/document';" in readme
+    assert "No JavaScript-public declarations are currently generated" in readme
+    assert "C/C++: `android/src/main/cpp/`" in readme
+    assert "supernote-module update @local/document" in readme
+    assert "replace this README and `index.d.ts`" in readme
+    assert "preserve the C++, Kotlin, and Java implementation source" in readme
     assert "README.md" in package["files"]
 
 

@@ -27,6 +27,7 @@ from common_support.internal_codegen import (
     internal_header_path,
     render_cpp_internal_facade,
 )
+from common_support.readme_codegen import render_feature_readme
 from common_support.semantic import (
     SemanticApi,
     merge_semantic_apis,
@@ -173,10 +174,36 @@ def generate(
             output_root / "conversions" / f"{suffix}.json",
             json.dumps(conversion_json, indent=2, sort_keys=True) + "\n",
         )
-        _atomic_write(
-            feature_root / "index.d.ts",
-            render_typescript(feature["public_name"], semantic),
+        typescript = render_typescript(feature["public_name"], semantic)
+        package_path = feature_root / "package.json"
+        package = (
+            json.loads(package_path.read_text(encoding="utf-8"))
+            if package_path.is_file()
+            else {}
         )
+        description = package.get("description", "")
+        if not isinstance(description, str):
+            description = ""
+        implementation_roots = []
+        if native_root.is_dir():
+            implementation_roots.append(
+                ("C/C++", feature["implementation_roots"]["native"] + "/")
+            )
+        jvm_root = feature_root / feature["implementation_roots"]["jvm"]
+        if jvm_root.is_dir():
+            implementation_roots.append(
+                ("Kotlin/Java", feature["implementation_roots"]["jvm"] + "/")
+            )
+        readme = render_feature_readme(
+            npm_name=feature["npm_name"],
+            public_name=feature["public_name"],
+            description=description,
+            generator_version=registry["generator_version"],
+            implementation_roots=tuple(implementation_roots),
+            api=semantic,
+        )
+        _atomic_write(feature_root / "index.d.ts", typescript)
+        _atomic_write(feature_root / "README.md", readme)
         try:
             generated_jni[f"feature_{suffix}.cpp"] = render_v2_feature_jsi(
                 feature_root,

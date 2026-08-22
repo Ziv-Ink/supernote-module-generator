@@ -296,9 +296,13 @@ def supernotePythonCommand = supernotePythonOverride
         ? ['py', '-3']
         : ['python3'])
 def supernoteCommonScript = file('common_codegen.py')
-def supernoteTypescriptOutputs = {json.dumps([
-        f"${{supernotePluginRoot}}/local_modules/{entry.feature.npm_name}/index.d.ts"
+def supernoteApiOutputs = {json.dumps([
+        output
         for entry in registry.features
+        for output in (
+            f"${{supernotePluginRoot}}/local_modules/{entry.feature.npm_name}/index.d.ts",
+            f"${{supernotePluginRoot}}/local_modules/{entry.feature.npm_name}/README.md",
+        )
     ])}.collect {{ file(it.replace('${{supernotePluginRoot}}', supernotePluginRoot.absolutePath)) }}
 
 ['Debug', 'Release'].each {{ buildVariant ->
@@ -313,7 +317,7 @@ def supernoteTypescriptOutputs = {json.dumps([
             "generated/ksp/${{variantName}}/resources"
         )))
         outputs.dir(layout.buildDirectory.dir("generated/supernote/${{variantName}}"))
-        outputs.files(supernoteTypescriptOutputs)
+        outputs.files(supernoteApiOutputs)
         commandLine(
             *supernotePythonCommand,
             supernoteCommonScript.absolutePath,
@@ -2106,6 +2110,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             "common_support/internal_codegen.py",
             "common_support/lowering.py",
             "common_support/reachability.py",
+            "common_support/readme_codegen.py",
             "common_support/semantic.py",
             "common_support/semantic_types.py",
             "common_support/v3_schemas.py",
@@ -2161,6 +2166,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         "common_support/internal_codegen.py": _support_source("internal_codegen.py"),
         "common_support/lowering.py": _support_source("lowering.py"),
         "common_support/reachability.py": _support_source("reachability.py"),
+        "common_support/readme_codegen.py": _support_source("readme_codegen.py"),
         "common_support/semantic.py": _support_source("semantic.py"),
         "common_support/semantic_types.py": _support_source("semantic_types.py"),
         "common_support/v3_schemas.py": _support_source("v3_schemas.py"),

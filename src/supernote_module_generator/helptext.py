@@ -150,7 +150,9 @@ Behavior:
   Without --yes, interactive Update shows what will be preserved and
   regenerated; confirmation defaults to Yes. Dependencies are refreshed only
   when the parent dependency entry or installed local link needs repair. Update
-  always targets one feature.
+  always targets one feature. Add and Update run the generated semantics task so
+  index.d.ts and the feature README match the marked public API. --build adds a
+  complete Android build after that generation step.
 
 Examples:
   supernote-module update

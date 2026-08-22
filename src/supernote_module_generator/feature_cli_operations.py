@@ -32,7 +32,7 @@ from .models import (
     SubprocessError,
     ValidationResult,
 )
-from .platform_tools import gradle_wrapper_path
+from .platform_tools import gradle_wrapper_command, gradle_wrapper_path
 from .naming import (
     normalize_description,
     validate_android_namespace,
@@ -86,7 +86,10 @@ class FeatureCliOperationService:
         transaction = Transaction(self.root, "add", [decisions.package_name])
         dependency: DependencyResult | None = None
         try:
-            self._snapshot_operation(transaction, [destination])
+            self._snapshot_operation(
+                transaction,
+                [destination, *self._generated_api_outputs()],
+            )
             transaction.set_phase("apply")
             with self.progress.phase("Generating feature", "Generated feature"):
                 created = self.features.add(config)
@@ -98,6 +101,10 @@ class FeatureCliOperationService:
                 manager=decisions.package_manager,
                 action="install_dependency",
             )
+            with self.progress.phase(
+                "Refreshing JavaScript API", "Refreshed JavaScript API"
+            ):
+                self._refresh_semantics()
             validation = self._validate_records(
                 [self.features.find_record(decisions.package_name)],
                 dependency_requested=decisions.install,
@@ -138,11 +145,18 @@ class FeatureCliOperationService:
         refresh = self._refresh_required(record)
         if refresh and not decisions.skip_install:
             self._health_check_manager(decisions.package_manager)
+        self._health_check_semantics()
         if decisions.build:
             self._health_check_build()
         transaction = Transaction(self.root, "update", [decisions.package_name])
         try:
-            self._snapshot_operation(transaction, [record.path])
+            self._snapshot_operation(
+                transaction,
+                [
+                    record.path,
+                    *self._generated_api_outputs(excluding=record.path),
+                ],
+            )
             transaction.set_phase("apply")
             with self.progress.phase("Updating feature", "Updated feature"):
                 self.features.update(decisions.package_name)
@@ -155,6 +169,10 @@ class FeatureCliOperationService:
                 action="refresh_dependency",
                 skipped_status="skipped" if refresh else "not_needed",
             )
+            with self.progress.phase(
+                "Refreshing JavaScript API", "Refreshed JavaScript API"
+            ):
+                self._refresh_semantics()
             updated = self.features.find_record(decisions.package_name)
             validation = self._validate_records(
                 [updated], dependency_requested=not decisions.skip_install
@@ -331,6 +349,7 @@ class FeatureCliOperationService:
                 )
         if decisions.install:
             self._health_check_manager(decisions.package_manager)
+        self._health_check_semantics()
         if decisions.build:
             self._health_check_build()
 
@@ -349,6 +368,17 @@ class FeatureCliOperationService:
             *feature_paths,
         ]
         transaction.snapshot(paths)
+
+    def _generated_api_outputs(
+        self, *, excluding: Path | None = None
+    ) -> list[Path]:
+        excluded = excluding.resolve() if excluding is not None else None
+        return [
+            output
+            for feature in self.features.feature_paths()
+            if excluded is None or feature.resolve() != excluded
+            for output in (feature / "index.d.ts", feature / "README.md")
+        ]
 
     def _validate_records(
         self, records: list[FeatureRecord], *, dependency_requested: bool
@@ -475,6 +505,50 @@ class FeatureCliOperationService:
         gradle = gradle_wrapper_path(self.root)
         if not gradle.is_file():
             raise ConfigurationError("Android Gradle wrapper is not available")
+
+    def _health_check_semantics(self) -> None:
+        gradle = gradle_wrapper_path(self.root)
+        if not gradle.is_file():
+            raise ConfigurationError(
+                "Android Gradle wrapper is required to refresh the JavaScript API"
+            )
+
+    def _refresh_semantics(self) -> None:
+        gradle = gradle_wrapper_path(self.root)
+        command = gradle_wrapper_command(
+            gradle,
+            [":supernote-v3-runtime:generateSupernoteDebugSemantics"],
+        )
+        try:
+            result = run_process(
+                command,
+                cwd=self.root / "android",
+                timeout=1200,
+                stream=self._stream if self.renderer.mode == "verbose" else None,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SubprocessFailure(
+                "Gradle could not refresh the generated JavaScript API.",
+                kind="api_generation_failed",
+                phase="api_generation",
+                subprocess={
+                    "command": command,
+                    "exit_code": 1,
+                    "relevant_lines": [str(exc)],
+                },
+            ) from exc
+        if result.returncode:
+            output = result.stderr or result.stdout
+            raise SubprocessFailure(
+                "Gradle could not refresh the generated JavaScript API.",
+                kind="api_generation_failed",
+                phase="api_generation",
+                subprocess={
+                    "command": command,
+                    "exit_code": result.returncode,
+                    "relevant_lines": output.splitlines()[-8:],
+                },
+            )
 
     def _build(self) -> None:
         success, error, _ = build_android(

@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -30,6 +31,12 @@ def plugin(tmp_path: Path, *, npm_lock: bool = False, yarn_lock: bool = False) -
     (tmp_path / "android/app/build.gradle").write_text(
         "plugins {}\n", encoding="utf-8"
     )
+    gradle = gradle_wrapper_path(tmp_path)
+    if os.name == "nt":
+        gradle.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    else:
+        gradle.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        gradle.chmod(0o755)
     if npm_lock:
         (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
     if yarn_lock:
@@ -86,6 +93,78 @@ def test_add_scaffolds_selected_families_without_backend_metadata(
     kotlin = feature / "android/src/main/java/com/example/document/FeatureApi.kt"
     assert kotlin.is_file() is jvm
     assert "supernote-v3-runtime" in (root / "android/settings.gradle").read_text()
+
+
+def test_add_and_update_refresh_the_semantic_api_without_full_android_build(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    calls: list[tuple[list[str], Path]] = []
+
+    def record(command, *, cwd, timeout, stream=None):
+        calls.append((list(command), cwd))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(
+        "supernote_module_generator.feature_cli_operations.run_process", record
+    )
+
+    assert invoke(
+        root,
+        ["add", "document", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    assert invoke(
+        root, ["update", "document", "--skip-install", "--yes"]
+    )[0] == 0
+
+    assert [call[0][-1] for call in calls] == [
+        ":supernote-v3-runtime:generateSupernoteDebugSemantics",
+        ":supernote-v3-runtime:generateSupernoteDebugSemantics",
+    ]
+    assert all(cwd == root / "android" for _, cwd in calls)
+    assert all(":app:assembleDebug" not in command for command, _ in calls)
+
+
+def test_failed_api_documentation_refresh_restores_the_previous_readme(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "other", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    assert invoke(
+        root,
+        ["add", "document", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/document"
+    readme = feature / "README.md"
+    before = readme.read_bytes()
+    other_readme = root / "local_modules/other/README.md"
+    other_before = other_readme.read_bytes()
+    source = feature / "android/src/main/cpp/feature.cpp"
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\n// @SupernotePluginExport\ndouble total(double value) { return value; }\n",
+        encoding="utf-8",
+    )
+
+    def fail(command, *, cwd, timeout, stream=None):
+        other_readme.write_text("partially regenerated\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 1, "", "forced semantic failure")
+
+    monkeypatch.setattr(
+        "supernote_module_generator.feature_cli_operations.run_process", fail
+    )
+    code, _, stderr = invoke(
+        root, ["update", "document", "--skip-install", "--yes"]
+    )
+
+    assert code == 1
+    assert "could not refresh the generated JavaScript API" in stderr
+    assert readme.read_bytes() == before
+    assert other_readme.read_bytes() == other_before
+    assert "double total" in source.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -714,13 +793,14 @@ def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
         gradle.write_text(
             "@echo off\r\n"
             'if "%1"=="--version" exit /b 0\r\n'
+            'if "%1"==":supernote-v3-runtime:generateSupernoteDebugSemantics" exit /b 0\r\n'
             'if "%1"==":app:assembleDebug" exit /b 0\r\n'
             "exit /b 1\r\n",
             encoding="utf-8",
         )
     else:
         gradle.write_text(
-            '#!/bin/sh\ncase "$1" in\n  --version|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
+            '#!/bin/sh\ncase "$1" in\n  --version|:supernote-v3-runtime:generateSupernoteDebugSemantics|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
             encoding="utf-8",
         )
         gradle.chmod(0o755)

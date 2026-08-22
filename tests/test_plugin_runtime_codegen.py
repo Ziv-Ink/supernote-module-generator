@@ -14,6 +14,13 @@ from supernote_module_generator.feature_model import (
     PluginRuntimeRegistry,
 )
 from supernote_module_generator import binding_codegen
+from supernote_module_generator.jvm_manifest import (
+    JvmSourceManifest,
+    jvm_adapter_identity,
+    jvm_declaration_identity,
+    jvm_owner_identity,
+    write_jvm_manifest,
+)
 from supernote_module_generator.plugin_runtime_codegen import (
     RUNTIME_RELATIVE_ROOT,
     activate_plugin_runtime,
@@ -22,6 +29,17 @@ from supernote_module_generator.plugin_runtime_codegen import (
     stage_plugin_runtime,
 )
 from supernote_module_generator.semantic import SemanticApi
+from supernote_module_generator.semantic import SourceProvenance
+from supernote_module_generator.source_models import (
+    DeclarationTarget,
+    JvmDeclarationSource,
+    JvmLanguage,
+    JvmOwnerForm,
+    JvmOwnerSource,
+    JvmParameterSource,
+    SourceIntent,
+    SupernoteMarker,
+)
 
 
 def entry(name: str) -> FeatureRegistryEntry:
@@ -204,6 +222,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "-DSUPERNOTE_GENERATED_ROOT=${layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}" in gradle
     assert "'--build-root'" in gradle
     assert "layout.buildDirectory.get().asFile.absolutePath" in gradle
+    assert "def supernoteApiOutputs" in gradle
+    assert "/index.d.ts" in gradle
+    assert "/README.md" in gradle
+    assert "outputs.files(supernoteApiOutputs)" in gradle
     assert "buildVariant == 'Release' ? 'RelWithDebInfo' : buildVariant" in gradle
     assert '"configureCMake${cmakeBuildType}[arm64-v8a]"' in gradle
     assert 'file(TO_CMAKE_PATH "${SUPERNOTE_GENERATED_ROOT}"' in cmake
@@ -969,6 +991,102 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     assert "install_plugin_bindings" in bootstrap
     assert "__supernoteV3FeatureRegistry_" in bootstrap
     assert '"__supernoteV3"' in bootstrap
+    readme = (feature_root / "README.md").read_text()
+    assert "import Math from '@local/math';" in readme
+    assert "`Math.add(left: number, right: number): number` — sync" in readme
+    assert "All listed calls are synchronous" in readme
+
+
+def test_common_codegen_builds_readme_from_ksp_jvm_manifest(tmp_path: Path):
+    feature = FeatureManifest.create(
+        npm_name="@local/jvm-files",
+        public_name="JvmFiles",
+        android_namespace="com.example.jvm_files",
+    )
+    feature_root = tmp_path / "local_modules/@local/jvm-files"
+    (feature_root / feature.roots.jvm).mkdir(parents=True)
+    (feature_root / "package.json").write_text(
+        '{"description":"Read files on the JVM."}\n', encoding="utf-8"
+    )
+    generated = generate_plugin_runtime(
+        tmp_path,
+        PluginRuntimeRegistry.create(
+            plugin_id="com.example.plugin",
+            generator_version="3.0.0",
+            features=(FeatureRegistryEntry.create(feature, SemanticApi()),),
+        ),
+    )
+    owner_class = "com.example.jvm_files.FeatureApiKt"
+    owner_id = jvm_owner_identity(owner_class)
+    declaration_id = jvm_declaration_identity(owner_class, "loadPage", "(I)[B")
+    exported_async = SourceIntent.from_markers(
+        DeclarationTarget.FUNCTION,
+        (SupernoteMarker.EXPORT, SupernoteMarker.ASYNC),
+    )
+    declaration = JvmDeclarationSource(
+        SourceProvenance(
+            declaration_id, "kotlin", "FeatureApi.kt", 6, 1
+        ),
+        owner_id,
+        owner_class,
+        "loadPage",
+        "(I)[B",
+        (JvmParameterSource("kotlin.Int", "page"),),
+        "kotlin.ByteArray",
+        False,
+        exported_async,
+        "public",
+        jvm_adapter_identity(declaration_id),
+        JvmLanguage.KOTLIN,
+        False,
+        True,
+    )
+    owner = JvmOwnerSource(
+        SourceProvenance(owner_id, "kotlin", "FeatureApi.kt", 1, 1),
+        JvmLanguage.KOTLIN,
+        owner_class,
+        "FeatureApiKt",
+        JvmOwnerForm.KOTLIN_TOP_LEVEL,
+        SourceIntent.from_markers(DeclarationTarget.CLASS, ()),
+        (),
+        (declaration,),
+    )
+    manifest_root = (
+        generated
+        / "build/generated/ksp/debug/resources/supernote/generated/manifests"
+    )
+    write_jvm_manifest(
+        manifest_root / "jvm-files.json",
+        JvmSourceManifest(feature.feature_id, "3.0.0", (owner,)),
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(generated / "common_codegen.py"),
+            "--plugin-root",
+            str(tmp_path),
+            "--runtime-root",
+            str(generated),
+            "--variant",
+            "debug",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    readme = (feature_root / "README.md").read_text(encoding="utf-8")
+    assert "Read files on the JVM." in readme
+    assert "import JvmFiles from '@local/jvm-files';" in readme
+    assert "`JvmFiles.loadPage(page: number): Promise<Uint8Array>` — async" in readme
+    assert "const result = await JvmFiles.loadPage(page);" in readme
+    assert "Kotlin/Java: `android/src/main/java/`" in readme
 
 
 def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):

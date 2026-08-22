@@ -330,7 +330,10 @@ class FeatureDecisionCollector:
             assert self.ui is not None
             print(f'\nUpdate "{record.manifest.npm_name}"', file=self.ui.terminal)
             print("  Preserve all user-owned C/C++ and Kotlin/Java sources", file=self.ui.terminal)
-            print("  Regenerate feature metadata and the shared plugin runtime\n", file=self.ui.terminal)
+            print(
+                "  Regenerate feature metadata, JavaScript API docs, and the shared plugin runtime\n",
+                file=self.ui.terminal,
+            )
             if not self._confirm("update", "Update this feature?", default=True):
                 raise OperationCancelled("update")
         return FeatureUpdateDecisions(

@@ -82,7 +82,6 @@ def render_typescript(feature_name: str, api: SemanticApi) -> str:
     root_properties.extend(
         _method(binding, declaration_names) for binding in public.functions
     )
-
     declaration_prefix = "\n\n".join(legacy_interfaces + declarations)
     if declaration_prefix:
         declaration_prefix += "\n\n"
@@ -144,6 +143,15 @@ def render_typescript(feature_name: str, api: SemanticApi) -> str:
         f"declare const feature: {feature_name}Feature;\n"
         "export default feature;\n"
     )
+
+
+def render_semantic_type(
+    semantic_type: SemanticType,
+    declaration_names: dict[str, str],
+) -> str:
+    """Render one public semantic type with the TypeScript generator's rules."""
+
+    return _type(semantic_type, declaration_names)
 
 
 def _declaration(item, public: PublicApi, names: dict[str, str]) -> str:

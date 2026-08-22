@@ -181,7 +181,7 @@ def test_root_readme_explains_the_v3_public_model():
     assert len(readme.splitlines()) < 280
 
 
-def test_generated_v3_feature_readme_covers_object_value_and_deferral_contracts(
+def test_initial_v3_feature_readme_is_package_specific_and_generation_owned(
     tmp_path: Path,
 ):
     from supernote_module_generator.feature_generator import (
@@ -202,17 +202,13 @@ def test_generated_v3_feature_readme_covers_object_value_and_deferral_contracts(
     )
     readme = (feature / "README.md").read_text(encoding="utf-8")
 
-    for contract in (
-        "SupernotePluginObject",
-        "SupernotePluginValue",
-        "SupernoteConstructor",
-        "Returned-only objects",
-        "arrays, and nullable",
-        "Cross-family native-object proxies",
-        "structured",
-        "thread safety",
-    ):
-        assert contract in readme
+    assert "import TypedFeature from 'typed-feature';" in readme
+    assert "C/C++: `android/src/main/cpp/`" in readme
+    assert "Kotlin/Java: `android/src/main/java/`" in readme
+    assert "No JavaScript-public declarations are currently generated" in readme
+    assert "supernote-module update typed-feature" in readme
+    assert "replace this README and `index.d.ts`" in readme
+    assert "Cross-family native-object proxies" not in readme
 
 
 @pytest.mark.parametrize(

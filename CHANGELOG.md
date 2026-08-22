@@ -6,6 +6,18 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 3.0.1 - 2026-08-22
+
+- Generate feature-specific READMEs from the same merged C++ and JVM semantic
+  API as `index.d.ts`, including imports, quick usage, public signatures,
+  synchronous and asynchronous call behavior, native objects, copied values,
+  enums, and implementation paths.
+- Refresh the JavaScript API and README during Add and Update without requiring
+  a complete Android build, while retaining `--build` for full build validation.
+- Track README and TypeScript files as Gradle outputs, render package
+  descriptions as literal text, and restore every affected feature document if
+  semantic generation fails.
+
 ## 3.0.0 - 2026-08-22
 
 - Add native reference objects for C++, Kotlin, and Java with stable JavaScript

@@ -265,6 +265,7 @@ def _exception_result(command: str, exc: Exception, debug: bool) -> CommandResul
             "stage": "Generating module",
             "apply": "Updating plugin",
             "build": "Building Android",
+            "api_generation": "Refreshing JavaScript API",
             "startup_recovery": "Startup recovery",
             "internal": "Internal error",
         }.get(exc.phase, exc.phase.replace("_", " ").capitalize())
