@@ -107,11 +107,10 @@ class SupernoteV3Module(
     val thread = Thread.currentThread()
     val previous = thread.contextClassLoader
     val runtimeDirectory =
-        File(context.codeCacheDir, "supernote-v3-runtime/${NATIVE_LIBRARY_NAME}")
-    if (!runtimeDirectory.isDirectory &&
-        !runtimeDirectory.mkdirs() &&
-        !runtimeDirectory.isDirectory) {
-      error("Cannot create generated V3 runtime directory")
+        File(libraryPath).parentFile
+            ?: error("Generated V3 runtime native-library directory is unavailable")
+    if (!runtimeDirectory.isDirectory) {
+      error("Generated V3 runtime native-library directory does not exist")
     }
     val runtimeLoadName =
         "${NATIVE_LIBRARY_NAME}_" +
@@ -125,7 +124,7 @@ class SupernoteV3Module(
       synchronized(System.getProperties()) {
         val sourcePath = runtimeDirectory.canonicalPath
         val registeredSource = System.getProperty("${NATIVE_SOURCE_PROPERTY}")
-        if (registeredSource == null) {
+        if (registeredSource != sourcePath) {
           SoLoader.prependSoSource(
               DirectorySoSource(
                   runtimeDirectory,
@@ -133,11 +132,6 @@ class SupernoteV3Module(
               ),
           )
           System.setProperty("${NATIVE_SOURCE_PROPERTY}", sourcePath)
-        } else if (registeredSource != sourcePath) {
-          error(
-              "Generated V3 runtime source mismatch: expected " +
-                  "$registeredSource but found $sourcePath",
-          )
         }
         val retainedGenerations =
             System.getProperty("${NATIVE_GENERATION_COUNT_PROPERTY}")
@@ -175,7 +169,6 @@ class SupernoteV3Module(
               ?: error("Generated V3 runtime registrar address is invalid")
           if (registrarAddress == 0L ||
               !SupernoteV3NativeRegistrationBridge.register(
-                  context,
                   File(registrationLibraryPath),
                   registrarAddress,
                   runtimeLoadName,
@@ -228,7 +221,6 @@ class SupernoteV3Module(
 
 private object SupernoteV3NativeRegistrationBridge {
   fun register(
-      context: ReactApplicationContext,
       sourceLibrary: File,
       registrarAddress: Long,
       generationIdentity: String,
@@ -238,9 +230,10 @@ private object SupernoteV3NativeRegistrationBridge {
       error("Generated V3 runtime registrar address is invalid")
     }
     val directory =
-        File(context.codeCacheDir, "supernote-v3-registration/${NATIVE_LIBRARY_NAME}")
-    if (!directory.isDirectory && !directory.mkdirs() && !directory.isDirectory) {
-      error("Cannot create generated V3 registration directory")
+        sourceLibrary.parentFile
+            ?: error("Generated V3 registration native-library directory is unavailable")
+    if (!directory.isDirectory) {
+      error("Generated V3 registration native-library directory does not exist")
     }
     val bridge =
         File.createTempFile("${NATIVE_REGISTRATION_LIBRARY_NAME}-", ".so", directory)

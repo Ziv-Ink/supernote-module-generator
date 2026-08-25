@@ -311,12 +311,16 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "nativeRunJsTask" not in module
     assert f'findLibrary("{registration_component}")' in module
     assert "SupernoteV3NativeRegistrationBridge.register" in module
-    assert f'File(context.codeCacheDir, "supernote-v3-runtime/{component}")' in module
+    assert "File(libraryPath).parentFile" in module
+    assert "sourceLibrary.parentFile" in module
+    assert "context.codeCacheDir" not in module
     assert 'Integer.toHexString(System.identityHashCode(pluginClassLoader))' in module
     assert 'java.lang.Long.toHexString(System.nanoTime())' in module
     assert 'File(runtimeDirectory, "lib$runtimeLoadName.so")' in module
     assert "DirectorySoSource.RESOLVE_DEPENDENCIES" in module
     assert "SoLoader.prependSoSource" in module
+    assert "if (registeredSource != sourcePath)" in module
+    assert "Generated V3 runtime source mismatch" not in module
     assert "SoLoader.loadLibrary(runtimeLoadName)" in module
     assert "System.load(runtimeCopy.absolutePath)" not in module
     assert "synchronized(System.getProperties())" in module

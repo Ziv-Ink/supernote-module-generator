@@ -6,6 +6,12 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 3.0.3 - 2026-08-25
+
+- Load generated V3 runtime and registration libraries from PluginHost's
+  executable native-library directory instead of `code_cache`, preserving
+  SELinux execution policy and same-process plugin upgrades.
+
 ## 3.0.2 - 2026-08-22
 
 - Use the plugin's machine-local `devconfig.json` consistently for Doctor,
