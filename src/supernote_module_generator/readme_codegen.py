@@ -1,4 +1,4 @@
-"""Generate concise, feature-specific usage documentation from V3 semantics."""
+"""Generate concise, feature-specific usage documentation from V4 semantics."""
 from __future__ import annotations
 
 from typing import Iterable

@@ -1,25 +1,15 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
-import pytest
 
-from supernote_module_generator import __version__
 from supernote_module_generator.arguments import (
     COMMAND_BOOLEAN_OPTIONS,
     COMMAND_VALUE_OPTIONS,
     GLOBAL_BOOLEANS,
 )
-from supernote_module_generator.config import (
-    ProjectConfig,
-    jsi_global_name,
-    native_library_name,
-)
-from supernote_module_generator.generator import generate
 from supernote_module_generator.helptext import COMMAND_HELP, ROOT_HELP
-from supernote_module_generator.verification import TEMPLATE_TOKEN
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,23 +28,6 @@ WIKI_PAGES = {
     "Managing-Modules",
     "Troubleshooting",
 }
-
-
-def _module_config(tmp_path: Path, backend: str) -> ProjectConfig:
-    package = f"local-docs-{backend}"
-    return ProjectConfig(
-        output=tmp_path / package,
-        npm_name=package,
-        package_version="0.1.0",
-        android_namespace=f"com.example.docs_{backend}",
-        module_name=f"Docs{backend.title()}",
-        description="Documentation fixture",
-        backend=backend,
-        native_library_name=(
-            native_library_name(package) if backend in {"jni", "jsi"} else None
-        ),
-        jsi_global_name=jsi_global_name(package) if backend == "jsi" else None,
-    )
 
 
 def _repository_documents() -> list[Path]:
@@ -147,7 +120,7 @@ def test_wiki_links_use_known_task_pages():
             assert page in WIKI_PAGES
 
 
-def test_root_readme_explains_the_v3_public_model():
+def test_root_readme_explains_the_v4_public_model():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     normalized_readme = " ".join(readme.split())
     opening = "\n".join(readme.splitlines()[:12])
@@ -175,18 +148,18 @@ def test_root_readme_explains_the_v3_public_model():
     assert "C23" in readme and "C++23" in readme
     assert "--delete-build-files" in readme
     assert "plugin root's optional `devconfig.json`" in readme
-    assert "remains available as `ADB_BIN`" in readme
+    assert "preserves the corresponding launch-environment value" in normalized_readme
     assert "do not change the parent shell" in normalized_readme
-    assert "does update `android/local.properties` on disk" in normalized_readme
+    assert "do not change the parent shell or `android/local.properties` on disk" in normalized_readme
     assert (
         "destroys C++ receivers and resources away from the JavaScript thread"
         in " ".join(readme.split())
     )
     assert "https://docs.supernote.com/" in readme
-    assert len(readme.splitlines()) < 280
+    assert len(readme.splitlines()) < 320
 
 
-def test_initial_v3_feature_readme_is_package_specific_and_generation_owned(
+def test_initial_v4_feature_readme_is_package_specific_and_generation_owned(
     tmp_path: Path,
 ):
     from supernote_module_generator.feature_generator import (
@@ -199,7 +172,7 @@ def test_initial_v3_feature_readme_is_package_specific_and_generation_owned(
         FeatureConfig(
             output=tmp_path / "typed-feature",
             npm_name="typed-feature",
-            package_version="3.0.0.dev0",
+            package_version="4.0.0-dev.0",
             public_name="TypedFeature",
             android_namespace="com.example.typed_feature",
             starters=(StarterFamily.NATIVE, StarterFamily.JVM),
@@ -216,110 +189,11 @@ def test_initial_v3_feature_readme_is_package_specific_and_generation_owned(
     assert "Cross-family native-object proxies" not in readme
 
 
-@pytest.mark.parametrize(
-    ("backend", "source", "call", "call_model", "backend_page", "help_page"),
-    (
-        (
-            "kotlin",
-            "android/src/main/java/com/example/docs_kotlin/",
-            "await DocsKotlin.add(20, 22)",
-            "Promises (`await`)",
-            "Kotlin-and-Java-Modules",
-            "Managing-Modules",
-        ),
-        (
-            "jni",
-            "android/src/main/cpp/",
-            "await DocsJni.add(20, 22)",
-            "Promises (`await`)",
-            "JNI-Modules",
-            "Managing-Modules",
-        ),
-        (
-            "jsi",
-            "android/src/main/cpp/",
-            "const total = DocsJsi.add(20, 22)",
-            "synchronous; do not use `await`",
-            "JSI-Modules",
-            "Troubleshooting",
-        ),
-    ),
-)
-def test_generated_readmes_are_package_specific_wiki_supplements(
-    tmp_path: Path,
-    backend: str,
-    source: str,
-    call: str,
-    call_model: str,
-    backend_page: str,
-    help_page: str,
-):
-    module = generate(_module_config(tmp_path, backend))
-    readme = (module / "README.md").read_text(encoding="utf-8")
-    metadata = json.loads((module / ".supernote-module.json").read_text())
-
-    assert f"Generator `{__version__}`" in readme
-    assert source in readme
-    assert call in readme
-    assert call_model in readme
-    assert "Update replaces this README" in readme
-    assert "Remove deletes the complete module" in readme
-    assert f"{WIKI_ROOT}/{backend_page}" in readme
-    assert f"{WIKI_ROOT}/{help_page}" in readme
-    assert readme.count(f"{WIKI_ROOT}/") == 2
-    assert "Canonical guidance" not in readme
-    assert "--build --verbose" not in readme
-    maximum_lines = 80 if backend == "jsi" else 45
-    assert len(readme.splitlines()) <= maximum_lines
-    assert "/blob/" not in readme
-    assert "/docs/" not in readme
-    assert metadata["generator_version"] == __version__
-
-
-def test_generated_jsi_readme_documents_native_objects(tmp_path: Path):
-    module = generate(_module_config(tmp_path, "jsi"))
-    readme = (module / "README.md").read_text(encoding="utf-8")
-
-    assert "## Persistent C++ objects" in readme
-    assert readme.count("// @SupernotePluginExport") >= 3
-    assert "SupernoteExportObject" not in readme
-    assert "android/src/main/cpp/" in readme
-    assert "class Counter" in readme
-    assert "DocsJsi.Counter.create(10)" in readme
-    assert "persistent native C++ instance" in readme
-    assert "Only explicitly marked methods" in readme
-    assert "unmarked public methods" in readme
-    assert "JSI-only" in readme
-    assert "remain synchronous" in readme
-    assert f"{WIKI_ROOT}/JSI-Modules" in readme
-
-
-@pytest.mark.parametrize("backend", ["kotlin", "jni", "jsi"])
-def test_no_generated_text_file_contains_a_template_value(tmp_path: Path, backend: str):
-    module = generate(_module_config(tmp_path, backend))
-    for path in module.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeError:
-            continue
-        assert TEMPLATE_TOKEN.search(text) is None, path.relative_to(module)
-
-
-def test_native_initial_declaration_uses_the_configured_interface_name(tmp_path: Path):
-    module = generate(_module_config(tmp_path, "kotlin"))
-    declarations = (module / "index.d.ts").read_text(encoding="utf-8")
-    assert "export interface DocsKotlinModule" in declarations
-    assert "declare const DocsKotlin: DocsKotlinModule" in declarations
-    assert "$MODULE" not in declarations
-
-
-def test_repository_docs_define_v3_architecture_without_migration_tooling():
-    architecture = (ROOT / "docs/V3-ARCHITECTURE.md").read_text()
-    assert "V3 architecture" in architecture
-    assert "not a V2" in architecture
-    assert "automatic converter" in architecture
+def test_repository_docs_define_v4_architecture_without_migration_tooling():
+    architecture = (ROOT / "docs/V4-ARCHITECTURE.md").read_text()
+    assert "V4 architecture" in architecture
+    assert "V1, V2, and V3" in architecture
+    assert "provides no converter, migrator, compatibility mode, or downgrade" in architecture
     assert "Cross-family object proxies" in architecture
     assert not (ROOT / "docs/V1-TO-V2-ARCHITECTURE.md").exists()
     assert not (ROOT / "docs/Add-a-Feature.md").exists()
@@ -330,11 +204,30 @@ def test_repository_docs_define_v3_architecture_without_migration_tooling():
     )
 
 
+def test_accepted_v4_policies_forbid_positive_legacy_migration_claims():
+    policies = (
+        ROOT / "architecture/decisions/0003-v4-owner-confirmed-policies.md"
+    ).read_text(encoding="utf-8")
+    transactions = (
+        ROOT / "architecture/decisions/0001-generated-ownership-and-transactions.md"
+    ).read_text(encoding="utf-8")
+
+    assert "V1, V2, and V3 layouts are unsupported" in policies
+    assert "does not provide migration" in policies
+    assert "supports previewable transactional migration" not in policies
+    assert "migration tests" not in transactions
+
+
 def test_release_guide_uses_the_language_neutral_feature_model():
     guide = (ROOT / "maintainers/releasing.md").read_text(encoding="utf-8")
     assert "C/C++ starter" in guide
     assert "Kotlin/Java starter" in guide
     assert "one plugin runtime component" in guide
+    assert "exact release commit" in guide
+    assert "true no-op" in guide
+    assert "Gradle, KSP, Kotlin, CMake, JNI, and JSI" in guide
+    assert "official plugin build and package-verification scripts" in guide
+    assert "never rebuilds an unqualified artifact" in guide
     assert "all three module types" not in guide
     assert "Add a Module" not in guide
 
@@ -374,12 +267,12 @@ def test_jsi_is_supported_without_overstating_runtime_availability():
         ROOT / "README.md",
         ROOT / "src/supernote_module_generator/cli.py",
         ROOT / "src/supernote_module_generator/helptext.py",
-        ROOT / "src/supernote_module_generator/workflows.py",
-        ROOT / "src/supernote_module_generator/templates/jsi.README.md.tmpl",
+        ROOT / "src/supernote_module_generator/feature_workflows.py",
+        ROOT / "src/supernote_module_generator/plugin_runtime_codegen.py",
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in current_material)
     lower = combined.lower()
     assert "experimental" not in lower
-    assert "requires target PluginHost support" in combined
+    assert "not that a particular Supernote firmware" in combined
     for runtime_constraint in ("compile", "pluginhost", "selinux"):
         assert runtime_constraint in lower

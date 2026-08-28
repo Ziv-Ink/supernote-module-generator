@@ -1,4 +1,4 @@
-"""Public V3 CLI decisions for language-neutral logical features."""
+"""Public V4 CLI decisions for language-neutral logical features."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -305,6 +305,7 @@ class FeatureDecisionCollector:
     def update(self) -> FeatureUpdateDecisions | None:
         records = self.features.records()
         if not records:
+            self._reject_missing_explicit_target()
             return None
         record = self._choose_one("Update feature", records)
         if not self.interactive and not self.args.has("yes"):
@@ -312,8 +313,6 @@ class FeatureDecisionCollector:
         refresh = self._refresh_required(record)
         if not refresh:
             irrelevant = []
-            if self.args.has("skip_install"):
-                irrelevant.append("--skip-install")
             if self.args.value("package_manager") is not None:
                 irrelevant.append("--package-manager")
             if irrelevant:
@@ -346,6 +345,7 @@ class FeatureDecisionCollector:
     def validate(self) -> FeatureValidateDecisions | None:
         records = self.features.records()
         if not records:
+            self._reject_missing_explicit_target()
             return None
         if self.args.has("all"):
             selected = records
@@ -378,6 +378,7 @@ class FeatureDecisionCollector:
     def remove(self) -> FeatureRemoveDecisions | None:
         records = self.features.records()
         if not records:
+            self._reject_missing_explicit_target()
             return None
         if self.args.has("yes") and not self.args.has("all") and not self.args.positional:
             raise ConfigurationError("--yes requires an explicit module or --all")
@@ -431,7 +432,7 @@ class FeatureDecisionCollector:
         if self.interactive:
             assert self.ui is not None
             self.ui.header("Doctor")
-            self.ui.info("Checking the tool requirements for this V3 plugin.", dim=True)
+            self.ui.info("Checking the tool requirements for this V4 plugin.", dim=True)
         return "plugin"
 
     def _choose_one(self, heading: str, records: list[FeatureRecord]) -> FeatureRecord:
@@ -444,6 +445,13 @@ class FeatureDecisionCollector:
         record = self._menu_record(heading, records, include_all=False)
         assert record is not None
         return record
+
+    def _reject_missing_explicit_target(self) -> None:
+        """Resolve a supplied target before the valid empty-project outcome."""
+
+        target = self._provided_identifier(self.args.positional)
+        if target is not None:
+            self.features.find_record(target)
 
     def _menu_record(
         self, heading: str, records: list[FeatureRecord], *, include_all: bool

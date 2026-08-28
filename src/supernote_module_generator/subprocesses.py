@@ -7,7 +7,7 @@ import signal
 import subprocess
 import threading
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence
+from typing import Callable, Iterator, List, Mapping, Optional, Sequence
 
 from .platform_tools import host_command
 
@@ -99,6 +99,7 @@ def run_process(
     cwd: Path,
     timeout: int,
     stream: Optional[Callable[[str, str], None]] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> subprocess.CompletedProcess[str]:
     resolved_command = list(command)
     if resolved_command:
@@ -112,6 +113,7 @@ def run_process(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        env=dict(env) if env is not None else None,
         **_popen_options(),
     )
     if stream is None:

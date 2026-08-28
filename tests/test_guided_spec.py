@@ -151,7 +151,8 @@ def test_invalid_explicit_value_is_rejected_before_wizard_header(tmp_path: Path)
     )
     assert code == 2
     assert "Supernote Module Generator" not in stderr.getvalue()
-    assert 'error: invalid JavaScript name "1Math"' in stderr.getvalue()
+    assert "Collect decisions failed" in stderr.getvalue()
+    assert 'invalid JavaScript name "1Math"' in stderr.getvalue()
 
 
 def test_invalid_root_menu_exposes_only_doctor_help_exit(tmp_path: Path):

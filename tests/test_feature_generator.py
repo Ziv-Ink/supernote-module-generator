@@ -14,7 +14,7 @@ def config(tmp_path: Path, *starters: StarterFamily) -> FeatureConfig:
     return FeatureConfig(
         output=tmp_path / "document",
         npm_name="@local/document",
-        package_version="2.0.0.dev0",
+        package_version="2.0.0-dev.0",
         android_namespace="com.example.document",
         public_name="Document",
         starters=starters or (StarterFamily.NATIVE,),
@@ -91,7 +91,7 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
     index = (feature / "index.js").read_text()
     package = json.loads((feature / "package.json").read_text())
 
-    assert "globalThis.__supernoteV3" in index
+    assert "globalThis.__supernoteV4" in index
     assert index.startswith("/* global globalThis */\n")
     assert "if (property === ERROR_CONSTRUCTOR_PROPERTY) return" not in index
     assert "{...descriptor, configurable: true}" in index
@@ -100,6 +100,12 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
     assert "export function isFeatureAvailable()" in index
     assert "export function getFeatureStatus()" in index
     assert "export function nativeObjectInfo(value)" in index
+    assert "if (current.status !== 'available') {" in index
+    assert "if (typeof inspect !== 'function') {" in index
+    assert "if (info !== undefined) {" in index
+    assert "if (current.status !== 'available') return" not in index
+    assert "if (typeof inspect !== 'function') continue" not in index
+    assert "if (info !== undefined) return" not in index
     assert "__supernoteCppObjectInfo" in index
     assert "__supernoteJvmObjectInfo" in index
     assert "new Proxy(" in index
@@ -138,7 +144,7 @@ try {{
   earlyError = error;
 }}
 if (!earlyError || earlyError.message !==
-    'Document is not installed in the Supernote V3 runtime') {{
+    'Document is not installed in the Supernote V4 runtime') {{
   throw new Error(`unexpected early-access result: ${{earlyError}}`);
 }}
 
@@ -152,7 +158,7 @@ const first = {{
       : undefined;
   }},
 }};
-globalThis.__supernoteV3 = {{
+globalThis.__supernoteV4 = {{
   feature(id) {{
     if (id !== {json.dumps(feature_id)}) throw new Error(`wrong id: ${{id}}`);
     return first;
@@ -212,7 +218,7 @@ if (generated.default.__supernoteErrorConstructor !== undefined ||
 }}
 
 const second = {{greet: name => `second:${{name}}`, secondOnly: 2}};
-globalThis.__supernoteV3 = {{feature: () => second}};
+globalThis.__supernoteV4 = {{feature: () => second}};
 if (generated.default.greet('Ada') !== 'second:Ada') {{
   throw new Error('feature wrapper retained a stale runtime binding');
 }}

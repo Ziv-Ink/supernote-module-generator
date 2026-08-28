@@ -433,7 +433,7 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
         feature_id=FEATURE_ID,
         module_name="Documents",
     )
-    assert "GeneratedV3JvmObject0HostObject" in generated
+    assert "GeneratedV4JvmObject0HostObject" in generated
     assert "Object::createFromHostObject" in generated
     assert 'property == "pageCount"' in generated
     assert 'property == "hiddenCache"' not in generated
@@ -707,7 +707,6 @@ def test_manifest_rejects_incompatible_or_guessed_boundary_data(
 def test_projection_rejects_noncanonical_jvm_types(
     unsupported: str, diagnostic: str
 ):
-    owner = ordinary_kotlin_owner()
     language = (
         JvmLanguage.JAVA if unsupported.startswith("java.") else JvmLanguage.KOTLIN
     )

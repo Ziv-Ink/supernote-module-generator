@@ -123,7 +123,9 @@ def test_every_plain_command_route_is_ascii(tmp_path: Path):
         assert_ascii(stdout, stderr)
 
 
-def test_plain_interactive_routes_and_dynamic_values_are_ascii(tmp_path: Path):
+def test_plain_interactive_routes_and_dynamic_values_are_ascii(
+    tmp_path: Path, stub_ksp_frontend
+):
     root = plugin(tmp_path)
     code, stdout, stderr = run_plain(
         root,

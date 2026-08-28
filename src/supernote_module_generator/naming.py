@@ -8,14 +8,45 @@ from pathlib import Path
 from typing import List
 
 from .errors import ValidationError
-from .validation import (
-    ANDROID_PACKAGE_RESERVED,
-    JAVASCRIPT_RESERVED,
-    IDENTIFIER,
-    MODULE,
-    NPM_NAME,
-    SEMVER,
-)
+
+NPM_NAME = re.compile(r"^(?:@[-a-z0-9~][-_a-z0-9.~]*/)?[a-z0-9~][-_a-z0-9.~]*$")
+SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$")
+IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MODULE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+JAVASCRIPT_RESERVED = {
+    "await", "break", "case", "catch", "class", "const", "continue",
+    "debugger", "default", "delete", "do", "else", "enum", "export",
+    "extends", "false", "finally", "for", "function", "if", "implements",
+    "import", "in", "instanceof", "interface", "let", "new", "null",
+    "package", "private", "protected", "public", "return", "static",
+    "super", "switch", "this", "throw", "true", "try", "typeof", "var",
+    "void", "while", "with", "yield",
+}
+JAVA_RESERVED = {
+    "_", "abstract", "assert", "boolean", "break", "byte", "case", "catch",
+    "char", "class", "const", "continue", "default", "do", "double", "else",
+    "enum", "exports", "extends", "false", "final", "finally", "float", "for",
+    "goto", "if", "implements", "import", "instanceof", "int", "interface",
+    "long", "module", "native", "new", "non-sealed", "null", "open", "opens",
+    "package", "permits", "private", "protected", "provides", "public",
+    "record", "requires", "return", "sealed", "short", "static", "strictfp",
+    "super", "switch", "synchronized", "this", "throw", "throws", "to",
+    "transient", "transitive", "true", "try", "uses", "var", "void",
+    "volatile", "while", "with", "yield",
+}
+KOTLIN_RESERVED = {
+    "_", "actual", "abstract", "annotation", "as", "break", "by", "catch",
+    "class", "companion", "const", "constructor", "continue", "crossinline",
+    "data", "delegate", "do", "dynamic", "else", "enum", "expect", "external",
+    "false", "field", "file", "final", "finally", "for", "fun", "get", "if",
+    "import", "in", "infix", "init", "inline", "inner", "interface",
+    "internal", "is", "it", "lateinit", "noinline", "null", "object", "open",
+    "operator", "out", "override", "package", "param", "private", "property",
+    "protected", "public", "receiver", "reified", "return", "sealed", "set",
+    "setparam", "super", "suspend", "tailrec", "this", "throw", "true", "try",
+    "typealias", "typeof", "val", "var", "vararg", "when", "where", "while",
+}
+ANDROID_PACKAGE_RESERVED = JAVA_RESERVED | KOTLIN_RESERVED
 
 SEPARATORS = re.compile(r"[-_.~]+")
 ASCII_WHITESPACE = " \t\r\n\v\f"

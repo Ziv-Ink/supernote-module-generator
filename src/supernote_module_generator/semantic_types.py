@@ -1,4 +1,4 @@
-"""Recursive, backend-neutral V3 semantic types.
+"""Recursive, backend-neutral V4 semantic types.
 
 Source spellings and lowering ownership never appear here.  Named references
 carry only the stable logical type identity that JavaScript and TypeScript use.
@@ -56,36 +56,19 @@ class SemanticType:
         if not isinstance(self.kind, SemanticTypeKind):
             raise SemanticTypeError(f"unknown semantic type kind {self.kind!r}")
         if self.kind is SemanticTypeKind.SCALAR:
-            if not isinstance(self.scalar, ScalarKind):
-                raise SemanticTypeError("a scalar semantic type requires a scalar kind")
-            if self.type_id is not None or self.element is not None:
-                raise SemanticTypeError("a scalar semantic type forbids reference payload")
+            _validate_scalar_payload(self)
             return
         if self.kind in {
             SemanticTypeKind.ENUM_REF,
             SemanticTypeKind.VALUE_REF,
             SemanticTypeKind.OBJECT_REF,
         }:
-            if not isinstance(self.type_id, str) or not self.type_id:
-                raise SemanticTypeError("a named semantic reference requires a type ID")
-            if self.scalar is not None or self.element is not None:
-                raise SemanticTypeError("a named semantic reference has only a type ID")
+            _validate_named_payload(self)
             return
         if self.kind in {SemanticTypeKind.ARRAY, SemanticTypeKind.NULLABLE}:
-            if not isinstance(self.element, SemanticType):
-                raise SemanticTypeError("a semantic wrapper requires an element type")
-            if self.scalar is not None or self.type_id is not None:
-                raise SemanticTypeError("a semantic wrapper has only an element type")
-            if self.element.is_void:
-                raise SemanticTypeError("void cannot be nested in a semantic type")
-            if (
-                self.kind is SemanticTypeKind.NULLABLE
-                and self.element.kind is SemanticTypeKind.NULLABLE
-            ):
-                raise SemanticTypeError("nested nullable semantic types are forbidden")
+            _validate_wrapper_payload(self)
             return
-        if self.scalar is not None or self.type_id is not None or self.element is not None:
-            raise SemanticTypeError("void has no semantic type payload")
+        _validate_void_payload(self)
 
     @classmethod
     def enum_ref(cls, type_id: str) -> "SemanticType":
@@ -130,6 +113,39 @@ class SemanticType:
         return {"kind": self.kind.value, key: self.element.manifest()}
 
 
+def _validate_scalar_payload(value: SemanticType) -> None:
+    if not isinstance(value.scalar, ScalarKind):
+        raise SemanticTypeError("a scalar semantic type requires a scalar kind")
+    if value.type_id is not None or value.element is not None:
+        raise SemanticTypeError("a scalar semantic type forbids reference payload")
+
+
+def _validate_named_payload(value: SemanticType) -> None:
+    if not isinstance(value.type_id, str) or not value.type_id:
+        raise SemanticTypeError("a named semantic reference requires a type ID")
+    if value.scalar is not None or value.element is not None:
+        raise SemanticTypeError("a named semantic reference has only a type ID")
+
+
+def _validate_wrapper_payload(value: SemanticType) -> None:
+    if not isinstance(value.element, SemanticType):
+        raise SemanticTypeError("a semantic wrapper requires an element type")
+    if value.scalar is not None or value.type_id is not None:
+        raise SemanticTypeError("a semantic wrapper has only an element type")
+    if value.element.is_void:
+        raise SemanticTypeError("void cannot be nested in a semantic type")
+    if (
+        value.kind is SemanticTypeKind.NULLABLE
+        and value.element.kind is SemanticTypeKind.NULLABLE
+    ):
+        raise SemanticTypeError("nested nullable semantic types are forbidden")
+
+
+def _validate_void_payload(value: SemanticType) -> None:
+    if value.scalar is not None or value.type_id is not None or value.element is not None:
+        raise SemanticTypeError("void has no semantic type payload")
+
+
 SemanticType.VOID = SemanticType(SemanticTypeKind.VOID)
 SemanticType.BOOL = SemanticType(SemanticTypeKind.SCALAR, ScalarKind.BOOL)
 SemanticType.INT32 = SemanticType(SemanticTypeKind.SCALAR, ScalarKind.INT32)
@@ -154,16 +170,32 @@ _SCALAR_TYPES = {
 
 
 def semantic_type_from_manifest(raw: object, label: str = "semantic type") -> SemanticType:
+    value = _semantic_type_object(raw, label)
+    kind = _semantic_type_kind(value, label)
+    _require_keys(value, _semantic_type_fields(kind), label)
+    try:
+        return _semantic_type_payload(value, kind, label)
+    except (KeyError, ValueError) as exc:
+        raise SemanticTypeError(f"{label} is invalid: {exc}") from exc
+
+
+def _semantic_type_object(raw: object, label: str) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise SemanticTypeError(f"{label} must be an object")
+    return raw
+
+
+def _semantic_type_kind(raw: Dict[str, Any], label: str) -> SemanticTypeKind:
     kind_value = raw.get("kind")
     if not isinstance(kind_value, str) or not kind_value:
         raise SemanticTypeError(f"{label}.kind must be a non-empty string")
     try:
-        kind = SemanticTypeKind(kind_value)
+        return SemanticTypeKind(kind_value)
     except ValueError as exc:
         raise SemanticTypeError(f"{label}.kind is invalid: {kind_value!r}") from exc
 
+
+def _semantic_type_fields(kind: SemanticTypeKind) -> set[str]:
     expected = {"kind"}
     if kind is SemanticTypeKind.SCALAR:
         expected.add("name")
@@ -177,32 +209,41 @@ def semantic_type_from_manifest(raw: object, label: str = "semantic type") -> Se
         expected.add("element")
     elif kind is SemanticTypeKind.NULLABLE:
         expected.add("inner")
-    _require_keys(raw, expected, label)
+    return expected
 
-    try:
-        if kind is SemanticTypeKind.VOID:
-            return SemanticType.VOID
-        if kind is SemanticTypeKind.SCALAR:
-            name = raw["name"]
-            if not isinstance(name, str):
-                raise SemanticTypeError(f"{label}.name must be a string")
-            return _SCALAR_TYPES[ScalarKind(name)]
-        if kind in {
-            SemanticTypeKind.ENUM_REF,
-            SemanticTypeKind.VALUE_REF,
-            SemanticTypeKind.OBJECT_REF,
-        }:
-            type_id = raw["type_id"]
-            if not isinstance(type_id, str) or not type_id:
-                raise SemanticTypeError(f"{label}.type_id must be a non-empty string")
-            return SemanticType(kind, type_id=type_id)
-        key = "element" if kind is SemanticTypeKind.ARRAY else "inner"
-        return SemanticType(
-            kind,
-            element=semantic_type_from_manifest(raw[key], f"{label}.{key}"),
-        )
-    except (KeyError, ValueError) as exc:
-        raise SemanticTypeError(f"{label} is invalid: {exc}") from exc
+
+def _semantic_type_payload(
+    raw: Dict[str, Any], kind: SemanticTypeKind, label: str
+) -> SemanticType:
+    if kind is SemanticTypeKind.VOID:
+        return SemanticType.VOID
+    if kind is SemanticTypeKind.SCALAR:
+        return _scalar_type_from_manifest(raw["name"], label)
+    if kind in {
+        SemanticTypeKind.ENUM_REF,
+        SemanticTypeKind.VALUE_REF,
+        SemanticTypeKind.OBJECT_REF,
+    }:
+        return _named_type_from_manifest(raw["type_id"], kind, label)
+    key = "element" if kind is SemanticTypeKind.ARRAY else "inner"
+    return SemanticType(
+        kind,
+        element=semantic_type_from_manifest(raw[key], f"{label}.{key}"),
+    )
+
+
+def _scalar_type_from_manifest(raw: object, label: str) -> SemanticType:
+    if not isinstance(raw, str):
+        raise SemanticTypeError(f"{label}.name must be a string")
+    return _SCALAR_TYPES[ScalarKind(raw)]
+
+
+def _named_type_from_manifest(
+    raw: object, kind: SemanticTypeKind, label: str
+) -> SemanticType:
+    if not isinstance(raw, str) or not raw:
+        raise SemanticTypeError(f"{label}.type_id must be a non-empty string")
+    return SemanticType(kind, type_id=raw)
 
 
 def _require_keys(value: Dict[str, Any], expected: set[str], label: str) -> None:

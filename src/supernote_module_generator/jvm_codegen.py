@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 from .binding_codegen import (
     Parameter,
@@ -119,28 +119,28 @@ def render_jvm_feature_jsi(
         object_wrappers.append(wrapper)
         object_registrations.append(registration)
     try:
-        v3_jvm_routes = plan_jvm_routes(semantic, manifest.owners)
-        v3_wrappers, v3_registrations = render_jvm_object_bindings(
-            v3_jvm_routes,
+        v4_jvm_routes = plan_jvm_routes(semantic, manifest.owners)
+        v4_wrappers, v4_registrations = render_jvm_object_bindings(
+            v4_jvm_routes,
             feature_id=feature_id,
             module_name=module_name,
         )
     except JvmRouteError as exc:
         raise JvmCodegenError(str(exc)) from exc
-    object_wrappers.extend(v3_wrappers)
-    object_registrations.extend(v3_registrations)
-    has_v3_jvm_objects = bool(v3_jvm_routes.objects) or any(
+    object_wrappers.extend(v4_wrappers)
+    object_registrations.extend(v4_registrations)
+    has_v4_jvm_objects = bool(v4_jvm_routes.objects) or any(
         item.kind.value not in {"void", "scalar"}
-        for route in v3_jvm_routes.functions
+        for route in v4_jvm_routes.functions
         for item in (*route.parameters, route.result)
     )
     registrations: list[str] = []
     has_async = any(
         route.execution is ExecutionMode.ASYNC
-        for route in v3_jvm_routes.functions
+        for route in v4_jvm_routes.functions
     ) or any(
         route.execution is ExecutionMode.ASYNC
-        for item in v3_jvm_routes.objects
+        for item in v4_jvm_routes.objects
         for route in item.methods
     )
     for owner in manifest.owners:
@@ -170,7 +170,7 @@ def render_jvm_feature_jsi(
                     binding.result,
                 )
             ):
-                # Recursive V3 JVM routes own object/value/enum/array/nullable
+                # Recursive V4 JVM routes own object/value/enum/array/nullable
                 # conversion.  The retained scalar renderer must not guess
                 # descriptors for those types.
                 continue
@@ -212,23 +212,23 @@ def render_jvm_feature_jsi(
         len(conversion_digest) != 64
         or any(value not in "0123456789abcdef" for value in conversion_digest)
     ):
-        raise JvmCodegenError("invalid V3 conversion-plan digest")
+        raise JvmCodegenError("invalid V4 conversion-plan digest")
     digest_comment = (
         ""
         if conversion_digest is None
         else (
-            f"// Supernote V3 conversion plan SHA-256: {conversion_digest}\n"
+            f"// Supernote V4 conversion plan SHA-256: {conversion_digest}\n"
             "#include <supernote/conversion.hpp>\n"
         )
     )
     object_runtime = render_jvm_object_runtime()
-    v3_registry_setup = (
+    v4_registry_setup = (
         "  auto object_registry = std::make_shared<JvmObjectRegistry>();\n"
         "  exports.setProperty(\n"
         "      runtime, kJvmObjectRegistryProperty,\n"
         "      Object::createFromHostObject(\n"
         "          runtime, std::make_shared<JvmObjectRegistryOwner>(object_registry)));\n"
-        if has_v3_jvm_objects
+        if has_v4_jvm_objects
         else ""
     )
     return digest_comment + f'''#include <jni.h>
@@ -261,12 +261,12 @@ def render_jvm_feature_jsi(
 namespace supernote::generated::jvm_feature_{suffix} {{
 namespace {{
 
-constexpr char kLogTag[] = "SupernoteV3Jvm";
+constexpr char kLogTag[] = "SupernoteV4Jvm";
 constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV3FeatureRegistry_63f6999c8c67";
+    "__supernoteV4FeatureRegistry_63f6999c8c67";
 constexpr char kFeatureId[] = {json.dumps(feature_id)};
 constexpr char kJvmObjectRegistryProperty[] =
-    "__supernoteV3JvmObjectRegistry_2cfbc9ce6375";
+    "__supernoteV4JvmObjectRegistry_2cfbc9ce6375";
 
 {helpers}
 
@@ -546,7 +546,7 @@ void register_jvm_feature(
   using facebook::jsi::Value;
 
   auto exports = feature_registry.getPropertyAsObject(runtime, kFeatureId);
-{v3_registry_setup}{chr(10).join(registrations)}
+{v4_registry_setup}{chr(10).join(registrations)}
 {chr(10).join(object_registrations)}
 }}
 
@@ -2506,7 +2506,6 @@ def _argument_lines(parameters, offset: int) -> list[str]:
 
 
 def _render_owner_setup(owner: JvmOwnerSource) -> str:
-    constructor = _owner_constructor(owner)
     return (
         "            auto owner = feature_session->service<JvmOwner>(\n"
         f"                {json.dumps(owner.provenance.declaration_id)}, [&] {{\n"

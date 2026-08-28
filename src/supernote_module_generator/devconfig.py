@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 from typing import Iterator
-import uuid
+
+from .errors import FilesystemError
+from .filesystem import lexists, read_regular_bytes_no_follow
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,54 @@ class DevConfigApplication:
     path: Path
     applied: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
+
+
+def _executable(path: Path) -> bool:
+    return path.is_file() and (os.name == "nt" or os.access(path, os.X_OK))
+
+
+def _java_executable(java_home: Path) -> Path:
+    name = "java.exe" if os.name == "nt" else "java"
+    return java_home / "bin" / name
+
+
+def _valid_android_sdk(android_sdk: Path) -> tuple[bool, str]:
+    if not android_sdk.is_dir():
+        return False, "is not a directory"
+    required_directories = (
+        android_sdk / "platform-tools",
+        android_sdk / "platforms",
+        android_sdk / "build-tools",
+    )
+    missing = [path.name for path in required_directories if not path.is_dir()]
+    if missing:
+        return False, "is missing " + ", ".join(missing)
+    try:
+        platforms = tuple(
+            path
+            for path in (android_sdk / "platforms").iterdir()
+            if path.is_dir() and (path / "android.jar").is_file()
+        )
+    except OSError as exc:
+        return False, f"could not inspect Android platforms: {exc}"
+    if not platforms:
+        return False, "has no installed Android platform with android.jar"
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    signer = "apksigner.bat" if os.name == "nt" else "apksigner"
+    try:
+        build_tools = tuple(
+            path
+            for path in (android_sdk / "build-tools").iterdir()
+            if path.is_dir()
+            and _executable(path / f"aapt2{executable_suffix}")
+            and _executable(path / f"zipalign{executable_suffix}")
+            and _executable(path / signer)
+        )
+    except OSError as exc:
+        return False, f"could not inspect Android build tools: {exc}"
+    if not build_tools:
+        return False, "has no complete installed Android build-tools version"
+    return True, ""
 
 
 def _configured_path(
@@ -40,11 +90,12 @@ def _configured_path(
 
 def _read_config(path: Path, root: Path) -> tuple[dict[str, Path | None], list[str]]:
     issues: list[str] = []
-    if not path.is_file():
+    if not lexists(path):
         return {}, issues
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, ValueError) as exc:
+        content, _metadata = read_regular_bytes_no_follow(path)
+        value = json.loads(content.decode("utf-8-sig"))
+    except (FilesystemError, OSError, UnicodeError, ValueError) as exc:
         issues.append(
             f"Could not read {path.name}; the existing environment will be used: {exc}"
         )
@@ -66,37 +117,6 @@ def _read_config(path: Path, root: Path) -> tuple[dict[str, Path | None], list[s
     )
 
 
-def _write_local_properties(path: Path, android_sdk: Path) -> None:
-    sdk_line = f"sdk.dir={str(android_sdk).replace(chr(92), '/')}"
-    if path.is_file():
-        original = path.read_text(encoding="utf-8")
-        lines = original.splitlines()
-        updated: list[str] = []
-        found = False
-        for line in lines:
-            if line.startswith("sdk.dir="):
-                updated.append(sdk_line)
-                found = True
-            else:
-                updated.append(line)
-        if not found:
-            updated.append(sdk_line)
-        content = "\n".join(updated) + "\n"
-    else:
-        content = sdk_line + "\n"
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-        if path.exists():
-            temporary.chmod(path.stat().st_mode)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 @contextmanager
 def configured_developer_environment(root: Path) -> Iterator[DevConfigApplication]:
     """Temporarily apply a plugin's devconfig.json to this process and children.
@@ -105,6 +125,7 @@ def configured_developer_environment(root: Path) -> Iterator[DevConfigApplicatio
     and fall back to the launching environment for absent or unusable values. The
     generator follows the same selection rules here, restores its environment after
     the command, and gives every subprocess and Doctor lookup one configuration.
+    V4 never rewrites ``android/local.properties`` while applying this environment.
     """
 
     plugin_root = root.expanduser().resolve()
@@ -115,7 +136,8 @@ def configured_developer_environment(root: Path) -> Iterator[DevConfigApplicatio
 
     java_home = configured.get("javaHome")
     if java_home is not None:
-        if java_home.is_dir():
+        java = _java_executable(java_home)
+        if java_home.is_dir() and _executable(java):
             updates["JAVA_HOME"] = str(java_home)
             java_bin = str(java_home / "bin")
             current_path = os.environ.get("PATH", "")
@@ -125,39 +147,33 @@ def configured_developer_environment(root: Path) -> Iterator[DevConfigApplicatio
             applied.append("javaHome")
         else:
             issues.append(
-                f"devconfig.json javaHome is not a directory: {java_home}; "
+                f"devconfig.json javaHome does not contain an executable "
+                f"{java.relative_to(java_home)}: {java_home}; "
                 "the existing JAVA_HOME and PATH will be used."
             )
 
     android_sdk = configured.get("androidSdk")
     if android_sdk is not None:
-        if android_sdk.is_dir():
+        sdk_valid, sdk_reason = _valid_android_sdk(android_sdk)
+        if sdk_valid:
             updates["ANDROID_HOME"] = str(android_sdk)
             updates["ANDROID_SDK_ROOT"] = str(android_sdk)
             applied.append("androidSdk")
-            try:
-                _write_local_properties(
-                    plugin_root / "android/local.properties", android_sdk
-                )
-            except (OSError, UnicodeError) as exc:
-                issues.append(
-                    "Could not synchronize android/local.properties with "
-                    f"devconfig.json: {exc}"
-                )
         else:
             issues.append(
-                f"devconfig.json androidSdk is not a directory: {android_sdk}; "
+                f"devconfig.json androidSdk {sdk_reason}: {android_sdk}; "
                 "the existing Android SDK environment will be used."
             )
 
     adb = configured.get("adb")
     if adb is not None:
-        updates["ADB_BIN"] = str(adb)
-        applied.append("adb")
-        if not adb.is_file():
+        if _executable(adb):
+            updates["ADB_BIN"] = str(adb)
+            applied.append("adb")
+        else:
             issues.append(
-                f"devconfig.json adb is not a file: {adb}; ADB_BIN will still use "
-                "this configured path, so child commands that use ADB may fail."
+                f"devconfig.json adb is not an executable file: {adb}; "
+                "the existing ADB_BIN will be used."
             )
 
     previous = {name: os.environ.get(name) for name in updates}

@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import textwrap
 
 import pytest
@@ -13,13 +12,16 @@ from supernote_module_generator.feature_model import (
     FeatureRegistryEntry,
     PluginRuntimeRegistry,
 )
-from supernote_module_generator import binding_codegen
+from supernote_module_generator.feature_generator import FeatureConfig
+from supernote_module_generator.feature_model import StarterFamily
+from supernote_module_generator.feature_operations import FeatureOperationService
+from supernote_module_generator.generation_service import GenerationService
+from supernote_module_generator.transaction import Transaction
 from supernote_module_generator.jvm_manifest import (
     JvmSourceManifest,
     jvm_adapter_identity,
     jvm_declaration_identity,
     jvm_owner_identity,
-    write_jvm_manifest,
 )
 from supernote_module_generator.plugin_runtime_codegen import (
     RUNTIME_RELATIVE_ROOT,
@@ -54,7 +56,7 @@ def entry(name: str) -> FeatureRegistryEntry:
 def registry(*names: str) -> PluginRuntimeRegistry:
     return PluginRuntimeRegistry.create(
         plugin_id="com.example.plugin",
-        generator_version="3.0.0.dev0",
+        generator_version="4.0.0.dev0",
         features=(entry(name) for name in names),
     )
 
@@ -104,14 +106,19 @@ def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
         assert '"${CMAKE_CURRENT_LIST_DIR}/../../../local_modules"' in cmake
 
 
-def test_common_codegen_skips_cross_family_renderer_for_jvm_only_feature(
+def test_generated_runtime_does_not_vendor_the_python_compiler(
     tmp_path: Path,
 ):
     generated = generate_plugin_runtime(tmp_path, registry("jvm"))
-    common_codegen = (generated / "common_codegen.py").read_text()
+    gradle = (generated / "build.gradle").read_text()
 
-    assert "if source_manifest is not None and native_root.is_dir():" in common_codegen
-    assert "include_prefix=native_include_prefix" in common_codegen
+    assert not (generated / "common_codegen.py").exists()
+    assert not (generated / "common_support").exists()
+    assert "checkSupernote${buildVariant}State" in gradle
+    assert "workingDir supernotePluginRoot" in gradle
+    assert "'check'" in gradle
+    assert "'--build-hook'" in gradle
+    assert "outputs.files" not in gradle
 
 
 def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Path):
@@ -128,7 +135,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     consumer_rules = (generated / "consumer-rules.pro").read_text()
     processor = (
         generated
-        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV3Processor.kt"
+        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV4Processor.kt"
     ).read_text()
     bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
     registration_bridge = (
@@ -136,7 +143,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     ).read_text()
     module = (
         generated
-        / "src/main/java/supernote/generated/runtime/SupernoteV3Module.kt"
+        / "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt"
     ).read_text()
     coroutine_bridge = (
         generated
@@ -154,8 +161,8 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "VISIBILITY_INLINES_HIDDEN YES" in cmake
     assert 'target_link_options' in cmake
     assert '"-Wl,-Bsymbolic-functions"' in cmake
-    assert "if(SUPERNOTE_V3_WEAK_OBJECT_PROBE)" in cmake
-    assert "SUPERNOTE_V3_WEAK_OBJECT_PROBE=1" in cmake
+    assert "if(SUPERNOTE_V4_WEAK_OBJECT_PROBE)" in cmake
+    assert "SUPERNOTE_V4_WEAK_OBJECT_PROBE=1" in cmake
     assert "runtime_services.cpp" in cmake
     assert "feature_registry.cpp" in cmake
     assert "local_modules/@local/alpha/android/src/main/cpp" in cmake
@@ -169,11 +176,17 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "runtime_registration_bridge.c" in cmake
     assert services.count("static ProcessServices services") == 1
     assert "void BoundedExecutor::ensure_started()" in services
-    assert "DeferredDestruction::DeferredDestruction()" in services
+    assert "DeferredDestruction::DeferredDestruction(std::size_t queue_capacity)" in services
+    assert "state->queue.size() >= state->capacity" in services
+    assert "DeferredDestruction::high_water_mark()" in services
+    assert "DeferredDestruction::oldest_item_age_ms()" in services
+    assert "DeferredDestruction::processed_count()" in services
+    assert "DeferredDestruction::failure_count()" in services
     assert "ProcessServices::thread_count() const noexcept" in services
     assert "ProcessServices::shutdown() noexcept" in services
     assert "class FeatureCallScope" in services_header
     assert "claim_internal_completion" in services_header
+    assert "queue_depth() const noexcept" in services_header
     assert "set_retained_state" in services_header
     assert "thread_local std::weak_ptr<FeatureSession>" in services
     assert "enum class ErrorCode" in public_header
@@ -212,27 +225,23 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
     assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
-    assert "gradleProperty('supernoteV3WeakObjectProbe')" in gradle
-    assert "-DSUPERNOTE_V3_WEAK_OBJECT_PROBE=" in gradle
+    assert "gradleProperty('supernoteV4WeakObjectProbe')" in gradle
+    assert "-DSUPERNOTE_V4_WEAK_OBJECT_PROBE=" in gradle
     assert "def supernoteIsWindows" in gradle
-    assert "'supernote-v3/sn_supernote_runtime_" in gradle
+    assert "'supernote-v4/sn_supernote_runtime_" in gradle
     assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
     assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
-    assert 'file("${rootProject.projectDir}/.cxx/snv3")' in gradle
-    assert "-DSUPERNOTE_GENERATED_ROOT=${layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}" in gradle
-    assert "'--build-root'" in gradle
-    assert "layout.buildDirectory.get().asFile.absolutePath" in gradle
-    assert "def supernoteApiOutputs" in gradle
-    assert "/index.d.ts" in gradle
-    assert "/README.md" in gradle
-    assert "outputs.files(supernoteApiOutputs)" in gradle
+    assert 'file("${rootProject.projectDir}/.cxx/snv4")' in gradle
+    assert "checkSupernote${buildVariant}State" in gradle
+    assert "workingDir supernotePluginRoot" in gradle
+    assert "'--jvm-manifest-root'" in gradle
+    assert "outputs.files" not in gradle
+    assert "common_codegen.py" not in gradle
     assert "buildVariant == 'Release' ? 'RelWithDebInfo' : buildVariant" in gradle
     assert '"configureCMake${cmakeBuildType}[arm64-v8a]"' in gradle
-    assert 'file(TO_CMAKE_PATH "${SUPERNOTE_GENERATED_ROOT}"' in cmake
-    assert '"${SUPERNOTE_GENERATED_ROOT}/${SUPERNOTE_VARIANT}/jni/*.cpp"' in cmake
-    assert "? ['py', '-3']" in gradle
-    assert ": ['python3']" in gradle
-    assert "*supernotePythonCommand" in gradle
+    assert 'set(SUPERNOTE_GENERATED_ROOT "${CMAKE_CURRENT_LIST_DIR}/generated")' in cmake
+    assert '"${SUPERNOTE_GENERATED_ROOT}/jni/*.cpp"' in cmake
+    assert "supernotePythonCommand" not in gradle
     assert 'optionPrefix = "supernoteFeatureRoot_"' in processor
     assert "toSortedMap()" in processor
     assert "catch (_: SupernoteSourceDiagnostic)" in processor
@@ -243,14 +252,19 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "Kotlin suspend requires explicit SupernotePluginAsync" in processor
     assert "org.jspecify.annotations.Nullable" in processor
     assert "androidx.annotation.Nullable" not in processor
+    assert "SNV4_RESTART_REQUIRED" in module
+    assert "SNV4_GENERATION_STATE_CORRUPT" in module
+    assert "retainedIds.size != retainedGenerations" in module
+    assert "MessageDigest.getInstance(\"SHA-256\")" in module
+    assert "cachedPublication != null" in module
+    assert "Reused native generation" in module
+    assert "logical invalidation completed" in bootstrap
+    assert "process_services().shutdown();" not in bootstrap
     assert "Java nullability requires org.jspecify.annotations.Nullable" in processor
     assert "ReactMethod" not in processor
     assert "TypeScript" not in processor
     assert "nativeInstall" in bootstrap
     assert "nativeInvalidate" in bootstrap
-    assert "last_session = g_sessions.empty()" in bootstrap
-    assert "process_services().shutdown()" in bootstrap
-    assert "stopped process services for runtime generation" in bootstrap
     assert "nativeRunJsTask" not in bootstrap
     assert "RegisterNatives" in bootstrap
     assert "register_coroutine_bridge(env, class_loader)" in bootstrap
@@ -270,10 +284,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     jni_on_load_end = bootstrap.index("\n}\n", jni_on_load) + 3
     jni_on_load_body = bootstrap[jni_on_load:jni_on_load_end]
     assert "return publish_runtime_registrar(env)" in jni_on_load_body
-    assert f"supernote.v3.load-request.{component}.v1" in bootstrap
-    assert f"supernote.v3.registrar.{component}.v2" in bootstrap
+    assert f"supernote.v4.load-request.{component}.v1" in bootstrap
+    assert f"supernote.v4.registrar.{component}.v1" in bootstrap
     assert "generated runtime generation identity mismatch" in bootstrap
-    assert "supernote.generated.runtime.SupernoteV3Module" in bootstrap
+    assert "supernote.generated.runtime.SupernoteV4Module" in bootstrap
     assert "(JLjava/lang/ClassLoader;" in bootstrap
     assert "Lcom/facebook/react/bridge/ReactApplicationContext;" in bootstrap
     assert "CallInvokerHolder;)J" in bootstrap
@@ -310,7 +324,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "sessionId.also { sessionId = 0L }" in invalidate_guard
     assert "nativeRunJsTask" not in module
     assert f'findLibrary("{registration_component}")' in module
-    assert "SupernoteV3NativeRegistrationBridge.register" in module
+    assert "SupernoteV4NativeRegistrationBridge.register" in module
     assert "File(libraryPath).parentFile" in module
     assert "sourceLibrary.parentFile" in module
     assert "context.codeCacheDir" not in module
@@ -320,23 +334,27 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "DirectorySoSource.RESOLVE_DEPENDENCIES" in module
     assert "SoLoader.prependSoSource" in module
     assert "if (registeredSource != sourcePath)" in module
-    assert "Generated V3 runtime source mismatch" not in module
+    assert "Generated V4 runtime source mismatch" not in module
     assert "SoLoader.loadLibrary(runtimeLoadName)" in module
     assert "System.load(runtimeCopy.absolutePath)" not in module
     assert "synchronized(System.getProperties())" in module
     assert "publishedGeneration != runtimeLoadName" in module
-    assert f"supernote.v3.source.{component}.v1" in module
-    assert f"supernote.v3.generations.{component}.v1" in module
+    assert f"supernote.v4.source.{component}.v1" in module
+    assert f"supernote.v4.generations.{component}.v1" in module
+    assert f"supernote.v4.binary.{component}.v1." in module
     assert "MAX_RETAINED_GENERATIONS = 32" in module
     assert "retainedGenerations !in 0 until MAX_RETAINED_GENERATIONS" in module
-    assert "restart PluginHost before loading another native generation" in module
+    assert "restart PluginHost" in module
+    reservation = module.index("(retainedGenerations + 1).toString()")
+    native_load = module.index("SoLoader.loadLibrary(runtimeLoadName)")
+    assert reservation < native_load
     assert "runtimeCopy.delete()" in module
     assert f'SoLoader.loadLibrary("{component}")' not in module
     assert "File.createTempFile" in module
     assert "System.load(bridge.absolutePath)" in module
     assert "bridge.delete()" in module
-    assert f"supernote.v3.load-request.{component}.v1" in module
-    assert f"supernote.v3.registrar.{component}.v2" in module
+    assert f"supernote.v4.load-request.{component}.v1" in module
+    assert f"supernote.v4.registrar.{component}.v1" in module
     assert (
         "nativeRegister(registrarAddress, generationIdentity, classLoader)"
         in module
@@ -344,11 +362,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "SupernoteRuntimeRegistrar" in registration_bridge
     assert "nativeRegister" in registration_bridge
     assert "dladdr((void *)registrar, &registrar_info)" in registration_bridge
-    assert "SupernoteV3Registration" in registration_bridge
+    assert "SupernoteV4Registration" in registration_bridge
     assert "published runtime registrar is no longer mapped" in registration_bridge
     assert "jsi" not in registration_bridge
     assert "RuntimeSession" not in registration_bridge
-    assert "class SupernoteV3Package" in module
+    assert "class SupernoteV4Package" in module
     assert (
         generated
         / "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java"
@@ -455,6 +473,15 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
             };
 
             int main() {
+              auto wait_until = [](auto predicate) {
+                const auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(2);
+                while (!predicate()) {
+                  if (std::chrono::steady_clock::now() >= deadline) return false;
+                  std::this_thread::yield();
+                }
+                return true;
+              };
               std::vector<RuntimeSession::JsTask> js_queue;
               auto runtime = RuntimeSession::create(
                   [&](RuntimeSession::JsTask task) {
@@ -529,6 +556,9 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                   return 35;
                 }
                 race_runtime->invalidate();
+                if (!wait_until([&] {
+                      return process_services().retired_runtime_count() == 0;
+                    })) return 47;
               }
 
               for (int iteration = 0; iteration < 1000; ++iteration) {
@@ -559,10 +589,14 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                 go.store(true, std::memory_order_release);
                 completing.join();
                 closing.join();
+                if (!wait_until([&] {
+                      return race_operation->winner() != OperationWinner::PENDING;
+                    })) return 48;
                 const auto winner = race_operation->winner();
                 if (winner == OperationWinner::COMPLETING) {
                   if (completed != 1 || race_cancelled != 0) return 36;
                 } else if (winner == OperationWinner::CANCELLED_BY_RUNTIME) {
+                  if (!wait_until([&] { return race_cancelled == 1; })) return 50;
                   if (completed != 0 || race_cancelled != 1) return 37;
                 } else {
                   return 38;
@@ -592,6 +626,10 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               auto dropped = replacement_feature->accept(
                   [&](void *) { ++rejected; });
               replacement->invalidate();
+              if (!wait_until([&] {
+                    return dropped->winner() != OperationWinner::PENDING &&
+                        cancelled >= 1;
+                  })) return 49;
               if (!js_queue.empty() || !dropped->cancellation_token().is_cancelled() ||
                   dropped->winner() != OperationWinner::CANCELLED_BY_RUNTIME) return 6;
 
@@ -603,7 +641,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
                 FeatureCallScope scope(scoped_feature);
                 scoped_runtime->invalidate();
                 scoped_feature.reset();
-                if (!scoped_weak.expired()) return 22;
+                if (!wait_until([&] { return scoped_weak.expired(); })) return 22;
                 if (current_feature_session()) return 23;
               }
 
@@ -655,7 +693,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
               if (executor.thread_count() != 0) return 42;
 
               std::atomic<int> jvm_completions{0};
-              if (process_services().thread_count() != 0) return 43;
+              if (process_services().thread_count() > 1) return 43;
               auto completion_id = process_services().register_jvm_async_completion(
                   [&](void *, void *, std::string code, std::string message) {
                     if (code == "IMPLEMENTATION_ERROR" && message == "failed") {
@@ -749,7 +787,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     thread_flags = [] if os.name == "nt" else ["-pthread"]
     sanitizer_flags = (
         ["-fsanitize=thread", "-g"]
-        if os.environ.get("SUPERNOTE_V3_TSAN") == "1"
+        if os.environ.get("SUPERNOTE_V4_TSAN") == "1"
         else []
     )
     compiled = subprocess.run(
@@ -774,6 +812,296 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
         [str(executable)], capture_output=True, text=True, check=False, timeout=60
     )
     assert executed.returncode == 0, executed.stderr
+
+
+def test_saturated_cleanup_queue_never_destroys_on_invalidating_thread(tmp_path: Path):
+    compiler = host_cxx_compiler()
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the saturation harness")
+    generated = generate_plugin_runtime(tmp_path, registry("alpha"))
+    kotlin = (
+        generated
+        / "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt"
+    ).read_text()
+    bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
+    services = (generated / "src/runtime_services.cpp").read_text()
+    assert "sessionId.also { sessionId = 0L }" in kotlin
+    assert kotlin.count("nativeInvalidate(invalidated)") == 1
+    assert bootstrap.count("session->invalidate()") == 1
+    assert "ensure_retirement_retry_worker" in services
+    harness = tmp_path / "runtime_cleanup_saturation.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            r"""
+            #include "runtime_services.hpp"
+
+            #include <chrono>
+            #include <future>
+            #include <thread>
+
+            using namespace supernote::runtime;
+
+            struct SlowService {
+              explicit SlowService(std::promise<std::thread::id>* destroyed)
+                  : destroyed(destroyed) {}
+              ~SlowService() { destroyed->set_value(std::this_thread::get_id()); }
+              std::promise<std::thread::id>* destroyed;
+            };
+
+            int main() {
+              auto cleanup = process_services().cleanup();
+              std::promise<void> blocker_started;
+              std::promise<void> release_blocker;
+              auto release = release_blocker.get_future().share();
+              if (!cleanup->submit([&] {
+                    blocker_started.set_value();
+                    release.wait();
+                  })) return 1;
+              if (blocker_started.get_future().wait_for(std::chrono::seconds(2)) !=
+                  std::future_status::ready) return 2;
+
+              auto runtime = RuntimeSession::create([](RuntimeSession::JsTask) {});
+              auto feature = FeatureSession::create(runtime, cleanup);
+              std::promise<std::thread::id> destroyed;
+              auto destroyed_future = destroyed.get_future();
+              auto service = feature->service<SlowService>(
+                  "cpp:SlowService",
+                  [&] { return std::make_shared<SlowService>(&destroyed); });
+              service.reset();
+              for (std::size_t index = 1; index < 1024; ++index) {
+                if (!cleanup->submit([] {})) return 3;
+              }
+
+              const auto caller = std::this_thread::get_id();
+              const auto started = std::chrono::steady_clock::now();
+              if (!runtime->invalidate()) return 4;
+              const auto elapsed = std::chrono::steady_clock::now() - started;
+              if (elapsed > std::chrono::milliseconds(100)) return 5;
+              if (destroyed_future.wait_for(std::chrono::milliseconds(20)) !=
+                  std::future_status::timeout) return 6;
+              if (process_services().restart_required() ||
+                  process_services().retired_runtime_count() != 1) return 7;
+
+              release_blocker.set_value();
+              if (destroyed_future.wait_for(std::chrono::seconds(5)) !=
+                  std::future_status::ready) return 8;
+              if (destroyed_future.get() == caller) return 9;
+              if (process_services().retired_runtime_count() != 0) return 10;
+              process_services().shutdown();
+              return 0;
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    executable = tmp_path / (
+        "runtime_cleanup_saturation.exe"
+        if os.name == "nt"
+        else "runtime_cleanup_saturation"
+    )
+    thread_flags = [] if os.name == "nt" else ["-pthread"]
+    compiled = subprocess.run(
+        [
+            compiler,
+            "-std=c++23",
+            *thread_flags,
+            str(generated / "src/runtime_services.cpp"),
+            str(harness),
+            "-I",
+            str(generated / "src"),
+            "-o",
+            str(executable),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    executed = subprocess.run(
+        [str(executable)], capture_output=True, text=True, check=False, timeout=15
+    )
+    assert executed.returncode == 0, executed.stderr
+
+
+def test_retry_worker_allocation_failure_is_restart_required_after_one_invalidate(
+    tmp_path: Path,
+):
+    compiler = host_cxx_compiler()
+    if compiler is None:
+        pytest.skip("a host C++ compiler is required for the retry fault harness")
+    generated = generate_plugin_runtime(tmp_path, registry("alpha"))
+    kotlin = (
+        generated
+        / "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt"
+    ).read_text()
+    bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
+    services = (generated / "src/runtime_services.cpp").read_text()
+    assert kotlin.count("nativeInvalidate(invalidated)") == 1
+    assert bootstrap.count("session->invalidate()") == 1
+    assert "if (retained)" in bootstrap
+    assert "g_sessions.erase(found);" in bootstrap
+    assert (
+        "SNV4_RESTART_REQUIRED: runtime retirement could not be guaranteed"
+        in bootstrap
+    )
+    assert "restart PluginHost" in bootstrap
+    assert (
+        "bool ProcessServices::ensure_retirement_retry_worker() noexcept"
+        in services
+    )
+    assert "!ensure_retirement_retry_worker()" in services
+
+    harness = tmp_path / "runtime_retry_worker_allocation_failure.cpp"
+    harness.write_text(
+        textwrap.dedent(
+            r"""
+            #include "runtime_services.hpp"
+
+            #include <atomic>
+            #include <chrono>
+            #include <cstdlib>
+            #include <future>
+            #include <iostream>
+            #include <new>
+            #include <thread>
+
+            namespace {
+            std::atomic<bool> fault_window{false};
+            std::atomic<std::size_t> allocation_count{0};
+            std::atomic<std::size_t> fail_at{0};
+            }
+
+            void* operator new(std::size_t size) {
+              if (fault_window.load(std::memory_order_acquire)) {
+                const auto current =
+                    allocation_count.fetch_add(1, std::memory_order_acq_rel) + 1;
+                if (current == fail_at.load(std::memory_order_acquire)) {
+                  throw std::bad_alloc();
+                }
+              }
+              if (void* value = std::malloc(size)) return value;
+              throw std::bad_alloc();
+            }
+
+            void operator delete(void* value) noexcept { std::free(value); }
+            void operator delete(void* value, std::size_t) noexcept {
+              std::free(value);
+            }
+
+            int main(int argc, char** argv) {
+              if (argc != 2) return 2;
+              using namespace supernote::runtime;
+              const auto requested_failure = static_cast<std::size_t>(
+                  std::strtoull(argv[1], nullptr, 10));
+              auto cleanup = process_services().cleanup();
+              std::promise<void> blocker_started;
+              std::promise<void> release_blocker;
+              auto release = release_blocker.get_future().share();
+              if (!cleanup->submit([&] {
+                    blocker_started.set_value();
+                    release.wait();
+                  })) return 3;
+              if (blocker_started.get_future().wait_for(std::chrono::seconds(2)) !=
+                  std::future_status::ready) return 4;
+              for (std::size_t index = 0; index < 1024; ++index) {
+                if (!cleanup->submit([] {})) return 5;
+              }
+
+              auto runtime = RuntimeSession::create([](RuntimeSession::JsTask) {});
+              auto feature = FeatureSession::create(runtime, cleanup);
+              (void)feature;
+              fail_at.store(requested_failure, std::memory_order_release);
+              allocation_count.store(0, std::memory_order_release);
+              fault_window.store(requested_failure != 0, std::memory_order_release);
+              const bool returned = runtime->invalidate();
+              fault_window.store(false, std::memory_order_release);
+              const auto allocations =
+                  allocation_count.load(std::memory_order_acquire);
+              const bool restart = process_services().restart_required();
+              const auto before = process_services().retired_runtime_count();
+
+              release_blocker.set_value();
+              const auto deadline =
+                  std::chrono::steady_clock::now() + std::chrono::seconds(3);
+              while (process_services().retired_runtime_count() != 0 &&
+                     std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+              }
+              const auto after = process_services().retired_runtime_count();
+              const bool eventual = after == 0;
+              std::cout << "fail=" << requested_failure
+                        << " allocations=" << allocations
+                        << " return=" << returned
+                        << " restart=" << restart
+                        << " before=" << before
+                        << " eventual=" << eventual
+                        << " after=" << after << '\n';
+
+              if (returned) {
+                if (restart || before != 1 || !eventual) return 6;
+              } else {
+                if (!restart) return 7;
+                if (before == 1 && eventual) return 8;
+              }
+              process_services().shutdown();
+              return 0;
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    assert harness.read_text().count("runtime->invalidate()") == 1
+    executable = tmp_path / (
+        "runtime_retry_worker_allocation_failure.exe"
+        if os.name == "nt"
+        else "runtime_retry_worker_allocation_failure"
+    )
+    thread_flags = [] if os.name == "nt" else ["-pthread"]
+    compiled = subprocess.run(
+        [
+            compiler,
+            "-std=c++23",
+            *thread_flags,
+            str(generated / "src/runtime_services.cpp"),
+            str(harness),
+            "-I",
+            str(generated / "src"),
+            "-o",
+            str(executable),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+
+    observed_retry_start_failure = False
+    for failure_index in range(0, 33):
+        executed = subprocess.run(
+            [str(executable), str(failure_index)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert executed.returncode == 0, (
+            f"failure_index={failure_index}: {executed.stdout}\n{executed.stderr}"
+        )
+        fields = dict(
+            item.split("=", 1) for item in executed.stdout.strip().split()
+        )
+        if (
+            fields.get("return") == "0"
+            and fields.get("restart") == "1"
+            and fields.get("before") == "1"
+        ):
+            assert fields.get("eventual") == "0"
+            assert fields.get("after") == "1"
+            observed_retry_start_failure = True
+    assert observed_retry_start_failure, (
+        "fault sweep did not reach retry-thread construction; expand or adapt the "
+        "isolated allocation window for this standard library"
+    )
 
 
 def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
@@ -850,7 +1178,7 @@ def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
               } else {
                 return 3;
               }
-              runtime->invalidate();
+              if (mode != "invalidate") runtime->invalidate();
               cleanup->drain_and_shutdown();
               return 0;
             }
@@ -900,92 +1228,44 @@ def test_generated_runtime_teardown_survives_allocation_failure(tmp_path: Path):
 
 def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: Path):
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
-    feature = tmp_path / "local_modules/@local/alpha"
-    feature.mkdir(parents=True)
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(generated / "common_codegen.py"),
-            "--plugin-root",
-            str(tmp_path),
-            "--runtime-root",
-            str(generated),
-            "--variant",
-            "debug",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    ownership = json.loads((generated / "ownership.json").read_text())
 
-    assert result.returncode == 0, result.stderr
-    assert (feature / "index.d.ts").is_file()
-    semantic_registry = json.loads(
-        (
-            generated
-            / "build/generated/supernote/debug/semantic-registry.json"
-        ).read_text()
-    )
-    assert semantic_registry["features"][0]["feature_id"] == entry(
-        "alpha"
-    ).feature.feature_id
-    jni = generated / "build/generated/supernote/debug/jni"
-    assert (jni / "plugin_bindings.cpp").is_file()
-    feature_source = next(jni.glob("feature_*.cpp")).read_text()
-    assert "register_feature" in feature_source
-    assert "JNI_OnLoad" not in feature_source
+    assert not any(path.endswith(".py") for path in ownership["generated_files"])
+    assert not list(generated.rglob("*.py"))
+    assert "supernote-module" in (generated / "build.gradle").read_text()
 
 
 def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
-    feature = FeatureManifest.create(
-        npm_name="@local/math",
-        public_name="Math",
-        android_namespace="com.example.math",
+    (tmp_path / "android/app").mkdir(parents=True)
+    (tmp_path / "android/settings.gradle").write_text("include ':app'\n")
+    (tmp_path / "android/app/build.gradle").write_text("plugins {}\n")
+    (tmp_path / "package.json").write_text('{"name":"fixture"}\n')
+    service = FeatureOperationService(tmp_path)
+    feature_root = service.add(
+        FeatureConfig(
+            tmp_path / "local_modules/@local/math",
+            "@local/math",
+            "4.0.0-dev.0",
+            "com.example.math",
+            "Math",
+            starters=(StarterFamily.NATIVE,),
+        )
     )
-    feature_root = tmp_path / "local_modules/@local/math"
+    feature = service.find_record("@local/math").manifest
     cpp = feature_root / feature.roots.native
-    cpp.mkdir(parents=True)
     (cpp / "math.cpp").write_text(
         "// @SupernotePluginExport\n"
         "double add(double left, double right) { return left + right; }\n"
     )
-    api = binding_codegen.scan_cpp_semantic_model(
-        feature_root, module_name=feature.public_name
+    generator = GenerationService(tmp_path)
+    plan = generator.plan(
+        operation="update",
+        requested_targets=("@local/math",),
+        allow_unmanifested_bootstrap=True,
     )
-    generated = generate_plugin_runtime(
-        tmp_path,
-        PluginRuntimeRegistry.create(
-            plugin_id="com.example.plugin",
-            generator_version="3.0.0.dev0",
-            features=(FeatureRegistryEntry.create(feature, api),),
-        ),
-    )
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(generated / "common_codegen.py"),
-            "--plugin-root",
-            str(tmp_path),
-            "--runtime-root",
-            str(generated),
-            "--variant",
-            "debug",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    jni = generated / "build/generated/supernote/debug/jni"
+    generator.execute(plan, Transaction(tmp_path, "update", ("@local/math",)))
+    generated = tmp_path / RUNTIME_RELATIVE_ROOT
+    jni = generated / "generated/jni"
     source = next(jni.glob("feature_*.cpp")).read_text()
     assert "createFromHostFunction" in source
     assert 'exports.setProperty(runtime, "add"' in source
@@ -993,8 +1273,8 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     assert "JNI_OnLoad" not in source
     bootstrap = (jni / "plugin_bindings.cpp").read_text()
     assert "install_plugin_bindings" in bootstrap
-    assert "__supernoteV3FeatureRegistry_" in bootstrap
-    assert '"__supernoteV3"' in bootstrap
+    assert "__supernoteV4FeatureRegistry_" in bootstrap
+    assert '"__supernoteV4"' in bootstrap
     readme = (feature_root / "README.md").read_text()
     assert "import Math from '@local/math';" in readme
     assert "`Math.add(left: number, right: number): number` — sync" in readme
@@ -1002,24 +1282,23 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
 
 
 def test_common_codegen_builds_readme_from_ksp_jvm_manifest(tmp_path: Path):
-    feature = FeatureManifest.create(
-        npm_name="@local/jvm-files",
-        public_name="JvmFiles",
-        android_namespace="com.example.jvm_files",
+    (tmp_path / "android/app").mkdir(parents=True)
+    (tmp_path / "android/settings.gradle").write_text("include ':app'\n")
+    (tmp_path / "android/app/build.gradle").write_text("plugins {}\n")
+    (tmp_path / "package.json").write_text('{"name":"fixture"}\n')
+    service = FeatureOperationService(tmp_path)
+    feature_root = service.add(
+        FeatureConfig(
+            tmp_path / "local_modules/@local/jvm-files",
+            "@local/jvm-files",
+            "4.0.0-dev.0",
+            "com.example.jvm_files",
+            "JvmFiles",
+            description="Read files on the JVM.",
+            starters=(StarterFamily.JVM,),
+        )
     )
-    feature_root = tmp_path / "local_modules/@local/jvm-files"
-    (feature_root / feature.roots.jvm).mkdir(parents=True)
-    (feature_root / "package.json").write_text(
-        '{"description":"Read files on the JVM."}\n', encoding="utf-8"
-    )
-    generated = generate_plugin_runtime(
-        tmp_path,
-        PluginRuntimeRegistry.create(
-            plugin_id="com.example.plugin",
-            generator_version="3.0.0",
-            features=(FeatureRegistryEntry.create(feature, SemanticApi()),),
-        ),
-    )
+    feature = service.find_record("@local/jvm-files").manifest
     owner_class = "com.example.jvm_files.FeatureApiKt"
     owner_id = jvm_owner_identity(owner_class)
     declaration_id = jvm_declaration_identity(owner_class, "loadPage", "(I)[B")
@@ -1055,53 +1334,50 @@ def test_common_codegen_builds_readme_from_ksp_jvm_manifest(tmp_path: Path):
         (),
         (declaration,),
     )
-    manifest_root = (
-        generated
-        / "build/generated/ksp/debug/resources/supernote/generated/manifests"
+    source_manifest = JvmSourceManifest(
+        feature.feature_id, "4.0.0-dev.0", (owner,)
     )
-    write_jvm_manifest(
-        manifest_root / "jvm-files.json",
-        JvmSourceManifest(feature.feature_id, "3.0.0", (owner,)),
+    generator = GenerationService(tmp_path)
+    plan = generator.plan(
+        operation="update",
+        requested_targets=("@local/jvm-files",),
+        jvm_manifests={feature.feature_id: source_manifest},
+        allow_unmanifested_bootstrap=True,
     )
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(generated / "common_codegen.py"),
-            "--plugin-root",
-            str(tmp_path),
-            "--runtime-root",
-            str(generated),
-            "--variant",
-            "debug",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
+    generator.execute(plan, Transaction(tmp_path, "update", ("@local/jvm-files",)))
     readme = (feature_root / "README.md").read_text(encoding="utf-8")
     assert "Read files on the JVM." in readme
     assert "import JvmFiles from '@local/jvm-files';" in readme
     assert "`JvmFiles.loadPage(page: number): Promise<Uint8Array>` — async" in readme
     assert "const result = await JvmFiles.loadPage(page);" in readme
     assert "Kotlin/Java: `android/src/main/java/`" in readme
+    suffix = feature.feature_id.removeprefix("supernote:feature:")
+    assert (
+        tmp_path
+        / RUNTIME_RELATIVE_ROOT
+        / f"generated/jni/jvm_feature_{suffix}.cpp"
+    ).is_file()
 
 
 def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):
-    feature = FeatureManifest.create(
-        npm_name="@local/documents",
-        public_name="Documents",
-        android_namespace="com.example.documents",
+    (tmp_path / "android/app").mkdir(parents=True)
+    (tmp_path / "android/settings.gradle").write_text("include ':app'\n")
+    (tmp_path / "android/app/build.gradle").write_text("plugins {}\n")
+    (tmp_path / "package.json").write_text('{"name":"fixture"}\n')
+    service = FeatureOperationService(tmp_path)
+    feature_root = service.add(
+        FeatureConfig(
+            tmp_path / "local_modules/@local/documents",
+            "@local/documents",
+            "4.0.0-dev.0",
+            "com.example.documents",
+            "Documents",
+            starters=(StarterFamily.NATIVE,),
+        )
     )
-    feature_root = tmp_path / "local_modules/@local/documents"
+    feature = service.find_record("@local/documents").manifest
     cpp = feature_root / feature.roots.native
-    cpp.mkdir(parents=True)
+    (cpp / "feature.cpp").unlink()
     (cpp / "documents.hpp").write_text(
         """#pragma once
 #include <cstdint>
@@ -1119,45 +1395,20 @@ public:
 std::int32_t pageCount(std::int32_t page) { return page; }
 """
     )
-    api = binding_codegen.scan_cpp_semantic_model(
-        feature_root, module_name=feature.public_name
+    generator = GenerationService(tmp_path)
+    plan = generator.plan(
+        operation="update",
+        requested_targets=("@local/documents",),
+        allow_unmanifested_bootstrap=True,
     )
-    generated = generate_plugin_runtime(
-        tmp_path,
-        PluginRuntimeRegistry.create(
-            plugin_id="com.example.plugin",
-            generator_version="3.0.0.dev0",
-            features=(FeatureRegistryEntry.create(feature, api),),
-        ),
-    )
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(generated / "common_codegen.py"),
-            "--plugin-root",
-            str(tmp_path),
-            "--runtime-root",
-            str(generated),
-            "--variant",
-            "debug",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
+    generator.execute(plan, Transaction(tmp_path, "update", ("@local/documents",)))
+    generated = tmp_path / RUNTIME_RELATIVE_ROOT
     suffix = feature.feature_id.removeprefix("supernote:feature:")
     header = (
         generated / f"include/supernote/{suffix}/internal.hpp"
     ).read_text()
     source = (
-        generated
-        / f"build/generated/supernote/debug/jni/internal_{suffix}.cpp"
+        generated / f"generated/jni/internal_{suffix}.cpp"
     ).read_text()
     typescript = (feature_root / "index.d.ts").read_text()
     assert "std::int32_t pageCount(std::int32_t page);" in header

@@ -6,6 +6,27 @@ should also check their installed version with `supernote-module --version`.
 
 ## Unreleased
 
+## 4.0.0 - 2026-08-27
+
+- Make one validated, versioned semantic model authoritative for every generated
+  source, declaration, runtime, wiring, dependency, and documentation artifact.
+- Preview, stage, validate, and atomically commit one complete generation plan;
+  record its owned results in a strict integrity manifest and make read-only
+  checks reconstruct and compare the same plan.
+- Preserve user-owned POSIX file and directory symlinks without dereferencing
+  them, reject unsafe managed destinations, and retain exact transactional
+  recovery authority through interruption and conflict handling.
+- Keep Gradle and KSP read-only with respect to committed plugin sources while
+  compiling mixed C++ and Kotlin features through the external V4 generator.
+- Add bounded native generation and cleanup accounting, immediate logical
+  invalidation, stale-completion suppression, and deterministic restart-required
+  behavior at the same-process generation ceiling.
+- Reject V1, V2, V3, malformed, mixed, and unmanifested generated layouts before
+  mutation. V4 intentionally provides no legacy migration or compatibility path.
+- Add structured V4 JSON results, project-selected Android toolchain diagnostics,
+  generated-source quality gates, reproducible release qualification, and a
+  scoped Nomad lifecycle canary record.
+
 ## 3.0.3 - 2026-08-25
 
 - Load generated V3 runtime and registration libraries from PluginHost's

@@ -175,7 +175,7 @@ def _render(api: SemanticApi | None = None) -> str:
         npm_name="local-drawing",
         public_name="Drawing",
         description="Draw and transform native strokes.",
-        generator_version="3.0.0",
+        generator_version="4.0.0",
         implementation_roots=(
             ("C/C++", "android/src/main/cpp/"),
             ("Kotlin/Java", "android/src/main/java/"),
@@ -273,7 +273,7 @@ def test_readme_preserves_very_long_valid_api_names_without_truncation():
         npm_name="@extreme/" + "feature-" * 16 + "docs",
         public_name="Feature" + "Surface" * 20,
         description="Long but valid generated names.",
-        generator_version="3.0.0",
+        generator_version="4.0.0",
         implementation_roots=(("C/C++", "android/src/main/cpp/"),),
         api=api,
     )
@@ -339,7 +339,7 @@ def test_readme_renders_package_description_as_plain_text():
         npm_name="safe-description",
         public_name="SafeDescription",
         description="# **Fast** [docs](https://example.com) <script> `code`",
-        generator_version="3.0.0",
+        generator_version="4.0.0",
         implementation_roots=(("C/C++", "android/src/main/cpp/"),),
         api=SemanticApi(),
     )

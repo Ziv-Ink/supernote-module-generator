@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
+import os
 import subprocess
 import sys
 import time
@@ -17,7 +19,12 @@ from .doctor import DoctorService
 from .feature_cli_operations import FeatureCliOperationService
 from .feature_workflows import FeatureDecisionCollector, FeatureValidateDecisions
 from .errors import ConfigurationError, GeneratorError, OperationCancelled, PartialFailure
+from .filesystem import (
+    contained_entry_kind_no_follow,
+    read_contained_regular_bytes_no_follow,
+)
 from .helptext import help_for
+from .integrity_manifest import IntegrityManifestError, load_integrity_manifest
 from .interaction import (
     BackRequested,
     CancelRequested,
@@ -36,11 +43,13 @@ from .models import (
 )
 from .naming import infer_android_namespace, infer_javascript_name
 from .operation_lock import plugin_operation_lock
-from .project import managed_modules, resolve_plugin_root
+from .project import resolve_plugin_root
+from .project_model import assert_public_v4_project
 from .rendering import Renderer, TerminalCapabilities
+from .v4_cli_operations import V4CliOperationService
+from .template_contract import TemplateContractService
 from .subprocesses import run_process
-from .transaction import recover_pending
-from .workflows import ReturnToMenu
+from .transaction import JOURNAL_NAME, recover_pending
 
 # Public starter choices describe source developers write, not backends.
 STARTER_CHOICES = [
@@ -231,7 +240,7 @@ def _usage_recovery(command: str, message: str) -> str:
 
 def _exception_result(command: str, exc: Exception, debug: bool) -> CommandResult:
     if isinstance(exc, GeneratorError):
-        if exc.exit_code == 2:
+        if exc.kind == "usage" and exc.phase == "parse":
             return _usage_result(command, exc.message)
         subprocess_error = None
         if exc.subprocess:
@@ -280,6 +289,17 @@ def _exception_result(command: str, exc: Exception, debug: bool) -> CommandResul
             result.metadata["next_action"] = (
                 "Rerun with --debug and report the resulting traceback."
             )
+        elif exc.kind == "unsupported_legacy_project":
+            result.metadata["next_action"] = (
+                "Create a clean V4 plugin and copy only reviewed user-owned source files; "
+                "V4 does not migrate legacy generated state."
+            )
+        elif exc.kind == "unmanifested_generated_project":
+            result.metadata["next_action"] = (
+                "Preserve the unmanifested files. Restore the exact schema-4 integrity "
+                "manifest that owns them, or create a clean V4 plugin and copy only "
+                "reviewed user-owned source files."
+            )
         elif result.recovery is None:
             result.metadata["next_action"] = (
                 f"Correct the reported problem and rerun {command.capitalize()}."
@@ -321,13 +341,17 @@ def _recover(root: Path, command: str, renderer: Renderer) -> List[object]:
         renderer.render(result)
         raise SystemExit(3)
     if outcome.rollback.status == "partial":
+        recovery_summary = (
+            outcome.recovery_summary
+            or "Automatic startup recovery is incomplete."
+        )
         result = CommandResult(
             command,
             status="partial",
             exit_code=3,
             rollback=outcome.rollback,
             recovery=RecoveryAction(
-                "Automatic startup recovery is incomplete.",
+                recovery_summary,
                 outcome.recovery_command or ["supernote-module", "doctor"],
             ),
             error=ErrorInfo(
@@ -335,6 +359,7 @@ def _recover(root: Path, command: str, renderer: Renderer) -> List[object]:
                 "startup_recovery",
                 "The previous interrupted operation could not be fully recovered.",
             ),
+            next_action=recovery_summary,
             metadata={"phase_label": "Startup recovery"},
         )
         renderer.render(result)
@@ -415,8 +440,12 @@ def _run_command(
                 interaction,
                 launched_from_menu=launched_from_menu,
             )
-            return DoctorService(cwd, renderer).execute(collector.doctor_scope())
+            return DoctorService(cwd, renderer).execute(
+                collector.doctor_scope(),
+                build=parsed.has("build"),
+            )
         with plugin_operation_lock(valid_root):
+            assert_public_v4_project(valid_root)
             with _developer_environment(
                 valid_root,
                 renderer,
@@ -430,7 +459,8 @@ def _run_command(
                     launched_from_menu=launched_from_menu,
                 )
                 result = DoctorService(cwd, renderer).execute(
-                    collector.doctor_scope()
+                    collector.doctor_scope(),
+                    build=parsed.has("build"),
                 )
                 result.warnings.extend(
                     warning for warning in startup_warnings if warning is not None
@@ -438,7 +468,14 @@ def _run_command(
                 return result
 
     root = resolve_plugin_root(cwd)
+    assert_public_v4_project(root)
+    if _trusted_parent_build_hook(parsed, root):
+        manifest_root = parsed.value("jvm_manifest_root")
+        return V4CliOperationService(root).check(
+            jvm_manifest_root=(Path(manifest_root) if manifest_root else None),
+        )
     with plugin_operation_lock(root):
+        assert_public_v4_project(root)
         with _developer_environment(
             root,
             renderer,
@@ -452,6 +489,49 @@ def _run_command(
                 interaction=interaction,
                 launched_from_menu=launched_from_menu,
             )
+
+
+def _trusted_parent_build_hook(parsed: ParsedArguments, root: Path) -> bool:
+    """Allow only a matching read-only child hook to reuse its parent check."""
+
+    if parsed.command != "check" or not parsed.has("build_hook"):
+        return False
+    generation_id = os.environ.get("SUPERNOTE_MODULE_PARENT_GENERATION_ID")
+    if not generation_id:
+        return False
+    try:
+        manifest = load_integrity_manifest(root)
+    except (IntegrityManifestError, GeneratorError):
+        return False
+    generation_matches = manifest.generation_id == generation_id
+    if not generation_matches:
+        return False
+    journal_path = root / JOURNAL_NAME
+    transaction_id = os.environ.get("SUPERNOTE_MODULE_PARENT_TRANSACTION_ID")
+    try:
+        journal_kind = contained_entry_kind_no_follow(root, journal_path)
+    except GeneratorError:
+        return False
+    if journal_kind is None:
+        return transaction_id is None
+    if journal_kind != "file":
+        return False
+    if not transaction_id:
+        return False
+    try:
+        journal_bytes, _metadata = read_contained_regular_bytes_no_follow(
+            root, journal_path
+        )
+        journal = json.loads(journal_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, GeneratorError):
+        return False
+    return bool(
+        isinstance(journal, dict)
+        and journal.get("schema") == 1
+        and journal.get("id") == transaction_id
+        and journal.get("root") == str(root)
+        and journal.get("phase") != "commit"
+    )
 
 
 def _run_feature_command(
@@ -472,10 +552,52 @@ def _run_feature_command(
         launched_from_menu=launched_from_menu,
     )
     service = FeatureCliOperationService(root, renderer)
-    if command == "add":
+    if command == "check":
+        manifest_root = parsed.value("jvm_manifest_root")
+        result = V4CliOperationService(root).check(
+            build=parsed.has("build"),
+            jvm_manifest_root=(Path(manifest_root) if manifest_root else None),
+        )
+    elif command == "repair":
+        result = V4CliOperationService(root).update(
+            (record.manifest.npm_name for record in service.features.records()),
+            dry_run=parsed.has("dry_run") or not parsed.has("yes"),
+            include_diff=parsed.has("diff"),
+            command="repair",
+        )
+    elif command == "add":
         decisions = collector.add()
         result = service.add(decisions)
     elif command == "update":
+        if parsed.has("all") or parsed.has("dry_run") or parsed.has("diff"):
+            records = service.features.records()
+            if parsed.has("all"):
+                requested = tuple(
+                    record.manifest.npm_name for record in records
+                )
+            elif parsed.positional is not None:
+                requested = (
+                    service.features.find_record(parsed.positional).manifest.npm_name,
+                )
+            else:
+                raise ConfigurationError(
+                    "update preview needs a feature or --all"
+                )
+            if not parsed.has("dry_run") and not parsed.has("yes"):
+                raise ConfigurationError(
+                    "non-interactive V4 update execution requires --yes; use --dry-run to preview"
+                )
+            result = V4CliOperationService(root).update(
+                requested,
+                dry_run=parsed.has("dry_run"),
+                include_diff=parsed.has("diff"),
+            )
+            result.warnings = [
+                *(warning for warning in startup_warnings if warning is not None),
+                *collector.warnings,
+                *result.warnings,
+            ]
+            return result
         decisions = collector.update()
         if decisions is None:
             if renderer.mode == "json":
@@ -508,7 +630,19 @@ def _run_feature_command(
             elif interaction is None:
                 print(empty, file=renderer.stdout)
             return CommandResult("validate", metadata={"empty": True, "already_rendered": True})
-        result = service.validate(decisions)
+        result = V4CliOperationService(root).check(
+            build=decisions.build,
+            command="validate",
+            requested_targets=decisions.package_names,
+        )
+        records = [
+            service.features.find_record(name) for name in decisions.package_names
+        ]
+        infos = [record.info() for record in records]
+        if decisions.all:
+            result.modules = infos
+        elif infos:
+            result.module = infos[0]
     elif command == "remove":
         decisions = collector.remove()
         if decisions is None:
@@ -521,6 +655,14 @@ def _run_feature_command(
                 print(empty, file=renderer.stdout)
             return CommandResult("remove", metadata={"empty": True, "already_rendered": True})
         result = service.remove(decisions)
+    elif command == "template":
+        template_service = TemplateContractService(root)
+        if parsed.positional == "status":
+            result = template_service.status()
+        else:
+            result = template_service.sync(
+                dry_run=parsed.has("dry_run") or not parsed.has("yes")
+            )
     else:
         raise ConfigurationError(f'unknown command "{command}"')
     result.warnings = [
@@ -605,16 +747,21 @@ def _interactive_loop(
         renderer.render(_exception_result("menu", exc, renderer.debug))
         return exc.exit_code
     if startup.rollback.status == "partial":
+        recovery_summary = (
+            startup.recovery_summary
+            or "Automatic startup recovery is incomplete."
+        )
         result = CommandResult(
             "menu",
             status="partial",
             exit_code=3,
             rollback=startup.rollback,
             recovery=RecoveryAction(
-                "Automatic startup recovery is incomplete.",
+                recovery_summary,
                 startup.recovery_command or ["supernote-module", "doctor"],
             ),
             error=ErrorInfo("startup_recovery_failed", "startup_recovery", "The interrupted operation could not be recovered."),
+            next_action=recovery_summary,
             metadata={"phase_label": "Startup recovery"},
         )
         renderer.render(result)
@@ -649,8 +796,6 @@ def _interactive_loop(
                 stdin=stdin,
                 launched_from_menu=True,
             )
-        except ReturnToMenu:
-            continue
         except InterruptRequested:
             result = CommandResult(
                 choice,

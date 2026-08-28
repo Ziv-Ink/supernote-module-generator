@@ -1,12 +1,205 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
+
+import pytest
 
 from supernote_module_generator.cli import main
+from supernote_module_generator.errors import FilesystemError
+import supernote_module_generator.transaction as transaction_module
+import supernote_module_generator.filesystem as filesystem_module
+from supernote_module_generator.errors import ConfigurationError
+from supernote_module_generator.project import read_parent_package
 from supernote_module_generator.transaction import JOURNAL_NAME, Transaction, recover_pending
+from supernote_module_generator.filesystem import (
+    ProtectedSourceGuard,
+    read_contained_regular_bytes_no_follow,
+    copy_entry_no_follow,
+    protected_directory_metadata,
+    restore_protected_directory_metadata,
+    retain_directory_metadata_recovery,
+    hash_entry_no_follow,
+    source_tree_inventory,
+)
+from v4_project_inventory import inventory_project
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
+def test_contained_read_rejects_final_symlink_substitution_without_external_read(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "plugin"
+    state = root / ".supernote-module/manifest.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("inside\n")
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside\n")
+    before = outside.lstat()
+    original_open = os.open
+    substituted = False
+
+    def substituting_open(path, flags, *args, **kwargs):
+        nonlocal substituted
+        if path == "manifest.json" and kwargs.get("dir_fd") is not None:
+            substituted = True
+            state.unlink()
+            state.symlink_to(outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(filesystem_module.os, "open", substituting_open)
+
+    with pytest.raises(FilesystemError):
+        read_contained_regular_bytes_no_follow(root, state)
+
+    after = outside.lstat()
+    assert substituted
+    assert outside.read_bytes() == b"outside\n"
+    assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+        before.st_mode,
+        before.st_atime_ns,
+        before.st_mtime_ns,
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
+def test_contained_read_stays_on_open_root_after_ancestor_substitution(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "plugin"
+    state = root / ".supernote-module/manifest.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("inside\n")
+    outside = tmp_path / "outside-state"
+    outside.mkdir()
+    external = outside / "manifest.json"
+    external.write_text("outside\n")
+    before = external.lstat()
+    original_open = os.open
+    substituted = False
+
+    def substituting_open(path, flags, *args, **kwargs):
+        nonlocal substituted
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if path == ".supernote-module" and kwargs.get("dir_fd") is not None:
+            substituted = True
+            state.parent.rename(root / ".supernote-module-detached")
+            state.parent.symlink_to(outside, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(filesystem_module.os, "open", substituting_open)
+
+    content, _metadata = read_contained_regular_bytes_no_follow(root, state)
+
+    after = external.lstat()
+    assert substituted
+    assert content == b"inside\n"
+    assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+        before.st_mode,
+        before.st_atime_ns,
+        before.st_mtime_ns,
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
+def test_contained_metadata_restore_uses_open_directory_not_replacement_symlink(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "plugin"
+    protected = root / "android/app"
+    protected.mkdir(parents=True)
+    (protected / "source.kt").write_text("class Source\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o751)
+    outside_stat = outside.lstat()
+    baseline = protected_directory_metadata(root)
+    original_open = os.open
+    substituted = False
+
+    def substituting_open(path, flags, *args, **kwargs):
+        nonlocal substituted
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if (
+            path == "app"
+            and kwargs.get("dir_fd") is not None
+            and not substituted
+        ):
+            substituted = True
+            protected.rename(root / "android/app-detached")
+            protected.symlink_to(outside, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(filesystem_module.os, "open", substituting_open)
+
+    try:
+        failures = restore_protected_directory_metadata(root, baseline)
+    except FilesystemError:
+        failures = ("rejected",)
+
+    after = outside.lstat()
+    assert substituted
+    assert failures
+    assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+        outside_stat.st_mode,
+        outside_stat.st_atime_ns,
+        outside_stat.st_mtime_ns,
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
+def test_contained_metadata_restore_rejects_replaced_ancestor_without_external_write(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "plugin"
+    protected = root / "android/app"
+    protected.mkdir(parents=True)
+    (protected / "source.kt").write_text("class Source\n")
+    outside = tmp_path / "outside"
+    (outside / "app").mkdir(parents=True)
+    outside.chmod(0o751)
+    (outside / "app").chmod(0o750)
+    outside_before = {
+        ".": outside.lstat(),
+        "app": (outside / "app").lstat(),
+    }
+    baseline = protected_directory_metadata(root)
+    original_open = os.open
+    substituted = False
+
+    def substituting_open(path, flags, *args, **kwargs):
+        nonlocal substituted
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if path == "android" and kwargs.get("dir_fd") is not None and not substituted:
+            substituted = True
+            (root / "android").rename(root / "android-detached")
+            (root / "android").symlink_to(outside, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(filesystem_module.os, "open", substituting_open)
+
+    try:
+        failures = restore_protected_directory_metadata(root, baseline)
+    except FilesystemError:
+        failures = ("rejected",)
+
+    assert substituted
+    assert failures
+    for relative, before in outside_before.items():
+        after = (outside if relative == "." else outside / relative).lstat()
+        assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+            before.st_mode,
+            before.st_atime_ns,
+            before.st_mtime_ns,
+        )
 
 
 def test_rollback_restores_files_and_removes_created_tree(tmp_path: Path):
@@ -26,6 +219,108 @@ def test_rollback_restores_files_and_removes_created_tree(tmp_path: Path):
     assert parent.read_text(encoding="utf-8") == '{"before": true}\n'
     assert not (tmp_path / "local_modules").exists()
     assert not (tmp_path / JOURNAL_NAME).exists()
+
+
+def test_completed_rollback_restores_exact_whole_project_inventory(tmp_path: Path):
+    package = tmp_path / "package.json"
+    package.write_text('{"before":true}\n', encoding="utf-8")
+    package.chmod(0o640)
+    settings = tmp_path / "android/settings.gradle"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("include ':app'\n", encoding="utf-8")
+    source = tmp_path / "local_modules/existing/source.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_text("int preserved = 1;\n", encoding="utf-8")
+    before = inventory_project(tmp_path)
+
+    transaction = Transaction(tmp_path, "update", ["existing"])
+    transaction.snapshot([package, settings])
+    generated_parent = tmp_path / "android/.supernote-module"
+    generated_child = generated_parent / "v4-staging/generated.cpp"
+    transaction.track_created_directory(generated_parent)
+    transaction.track_created_directory(generated_child.parent)
+    generated_child.parent.mkdir(parents=True)
+    generated_child.write_text("int generated = 2;\n", encoding="utf-8")
+    transaction.track_created(generated_child.parent)
+    package.write_text('{"after":true}\n', encoding="utf-8")
+    package.chmod(0o600)
+    settings.write_text("include ':changed'\n", encoding="utf-8")
+    transaction.mark_write()
+
+    rollback = transaction.rollback()
+
+    assert rollback.status == "completed"
+    assert inventory_project(tmp_path) == before
+
+
+def test_transaction_snapshot_and_rollback_preserve_direct_symlink_entries(
+    tmp_path: Path,
+):
+    target_file = tmp_path / "target.txt"
+    target_file.write_text("target remains\n", encoding="utf-8")
+    target_directory = tmp_path / "target-directory"
+    target_directory.mkdir()
+    (target_directory / "sentinel").write_text("untouched\n", encoding="utf-8")
+    links = {
+        tmp_path / "relative-file": ("target.txt", False),
+        tmp_path / "absolute-directory": (str(target_directory), True),
+        tmp_path / "broken-file": ("missing.txt", False),
+        tmp_path / "broken-directory": ("missing-directory", True),
+    }
+    for link, (target, target_is_directory) in links.items():
+        try:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symbolic links are unavailable on this host: {exc}")
+    before = inventory_project(tmp_path)
+
+    transaction = Transaction(tmp_path, "update", ["links"])
+    transaction.snapshot(links)
+    for link in links:
+        link.unlink()
+        link.write_text("wrong entry kind\n", encoding="utf-8")
+    transaction.mark_write()
+
+    rollback = transaction.rollback()
+
+    assert rollback.status == "completed"
+    assert inventory_project(tmp_path) == before
+    assert (target_directory / "sentinel").read_text(encoding="utf-8") == (
+        "untouched\n"
+    )
+
+
+def test_snapshot_deduplicates_repeated_lexical_paths_in_one_call(tmp_path: Path):
+    path = tmp_path / "package.json"
+    path.write_text("before\n", encoding="utf-8")
+    transaction = Transaction(tmp_path, "update", ["feature"])
+
+    transaction.snapshot([path, path, tmp_path / "." / "package.json"])
+
+    entries = transaction.data["entries"]
+    assert isinstance(entries, list)
+    assert len(entries) == 1
+    assert entries[0]["path"] == str(path)
+    assert transaction.rollback().status == "completed"
+
+
+def test_transaction_rejects_managed_destination_below_escaping_symlink_parent(
+    tmp_path: Path,
+):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-managed"
+    outside.mkdir()
+    parent = tmp_path / "managed-parent"
+    try:
+        parent.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symbolic links are unavailable on this host: {exc}")
+    transaction = Transaction(tmp_path, "update", ["feature"])
+
+    with pytest.raises(FilesystemError, match="escapes the plugin root"):
+        transaction.snapshot([parent / "generated.cpp"])
+
+    assert not (outside / "generated.cpp").exists()
+    assert transaction.rollback().status == "completed"
 
 
 def test_rollback_removes_only_empty_generator_created_parent_directories(
@@ -60,6 +355,149 @@ def test_startup_recovery_uses_persistent_journal(tmp_path: Path):
     assert path.read_text(encoding="utf-8") == "before"
     assert outcome.warning is not None
     assert 'interrupted Update for "local-math"' in outcome.warning.message
+
+
+def test_fresh_process_rollback_restores_persisted_directory_metadata(tmp_path: Path):
+    source = tmp_path / "local_modules/alpha/source.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n")
+    metadata = protected_directory_metadata(tmp_path)
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.record_directory_metadata(metadata)
+    transaction.snapshot([source])
+    source.write_text("after\n")
+    os.utime(source.parent, ns=(1_000_000_000, 2_000_000_000))
+    transaction.mark_write()
+
+    outcome = recover_pending(tmp_path)
+
+    assert outcome.rollback.status == "completed"
+    assert protected_directory_metadata(tmp_path) == metadata
+    assert source.read_text() == "before\n"
+
+
+def test_startup_recovery_finishes_durable_abandon_without_restoring_snapshot(
+    tmp_path: Path,
+):
+    package = tmp_path / "package.json"
+    package.write_text('{"baseline":true}\n')
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.snapshot([package])
+    staging = tmp_path / ".v4-plan-staging"
+    staging.mkdir()
+    (staging / "generated").write_text("staged\n")
+    transaction.track_created(staging)
+    package.write_text('{"concurrent_user_edit":true}\n')
+    transaction.data["phase"] = "abandon"
+    transaction._persist()
+
+    outcome = recover_pending(tmp_path)
+
+    assert outcome.rollback.status == "not_needed"
+    assert json.loads(package.read_text()) == {"concurrent_user_edit": True}
+    assert not staging.exists()
+    assert not (tmp_path / JOURNAL_NAME).exists()
+    assert not transaction.state_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "../outside",
+        "/tmp/outside",
+        "C:/outside",
+        "//server/share",
+        r"..\outside",
+    ],
+)
+def test_startup_recovery_rejects_unsafe_persisted_directory_metadata_before_mutation(
+    tmp_path: Path,
+    unsafe_path: str,
+):
+    source = tmp_path / "source.txt"
+    source.write_text("before\n")
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    outside_before = outside.lstat()
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.snapshot([source])
+    source.write_text("after\n")
+    transaction.mark_write()
+    transaction.data["directory_metadata"] = {
+        unsafe_path: [0o700, 1_000_000_000, 2_000_000_000]
+    }
+    transaction._persist()
+
+    with pytest.raises(Exception, match="recovery|metadata|path"):
+        recover_pending(tmp_path)
+
+    assert source.read_text() == "after\n"
+    outside_after = outside.lstat()
+    assert (outside_after.st_mode, outside_after.st_mtime_ns) == (
+        outside_before.st_mode,
+        outside_before.st_mtime_ns,
+    )
+    assert (tmp_path / JOURNAL_NAME).exists()
+
+
+def test_startup_recovery_rejects_directory_metadata_symlink_ancestor(tmp_path: Path):
+    outside = tmp_path.parent / "outside-link-target"
+    child = outside / "child"
+    child.mkdir(parents=True)
+    before = child.lstat()
+    (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.data["directory_metadata"] = {
+        "link/child": [0o700, 1_000_000_000, 2_000_000_000]
+    }
+    transaction._persist()
+
+    with pytest.raises(Exception, match="recovery|metadata|symbolic-link"):
+        recover_pending(tmp_path)
+
+    after = child.lstat()
+    assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
+    assert (tmp_path / JOURNAL_NAME).exists()
+
+
+def test_restore_directory_metadata_verifies_atime(tmp_path: Path, monkeypatch):
+    metadata = protected_directory_metadata(tmp_path)
+    original_utime = os.utime
+
+    def wrong_atime(path, *, ns, follow_symlinks=None):
+        options = (
+            {}
+            if follow_symlinks is None
+            else {"follow_symlinks": follow_symlinks}
+        )
+        original_utime(
+            path,
+            ns=(ns[0] + 1_000_000_000, ns[1]),
+            **options,
+        )
+
+    monkeypatch.setattr(os, "utime", wrong_atime)
+    assert restore_protected_directory_metadata(tmp_path, metadata) == ("modified:.",)
+
+
+@pytest.mark.parametrize("phase", ["commit", "abandon"])
+def test_fresh_process_durable_cleanup_restores_directory_metadata(
+    tmp_path: Path,
+    phase: str,
+):
+    metadata = protected_directory_metadata(tmp_path)
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.record_directory_metadata(metadata)
+    transaction.data["phase"] = phase
+    transaction._persist()
+    os.chmod(tmp_path, 0o750)
+    os.utime(tmp_path, ns=(1_000_000_000, 2_000_000_000))
+
+    outcome = recover_pending(tmp_path)
+
+    assert outcome.rollback.status == "not_needed"
+    assert protected_directory_metadata(tmp_path) == metadata
+    assert not (tmp_path / JOURNAL_NAME).exists()
 
 
 def test_external_reconciliation_failure_remains_recoverable(tmp_path: Path):
@@ -206,3 +644,825 @@ def test_startup_finalizes_a_transaction_that_reached_commit(tmp_path: Path):
     assert path.read_text(encoding="utf-8") == "committed"
     assert outcome.warning is not None
     assert "already committed" in outcome.warning.message
+
+
+@pytest.mark.parametrize(
+    "phase", ["stage", "apply", "rollback", "rollback_partial", "commit", "abandon"]
+)
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "false_existed",
+        "wrong_restore_slot",
+        "duplicate",
+        "plugin_root",
+        "unrelated_source",
+    ],
+)
+def test_startup_recovery_rejects_unauthorized_transaction_entries_without_mutation(
+    tmp_path: Path,
+    phase: str,
+    corruption: str,
+):
+    sentinel = tmp_path / "local_modules/existing/source.cpp"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("keep\n", encoding="utf-8")
+    transaction = Transaction(tmp_path, "update", ["existing"])
+    transaction.snapshot([sentinel])
+    transaction.data["phase"] = phase
+    transaction._persist()
+    journal_path = tmp_path / JOURNAL_NAME
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    entry = journal["entries"][0]
+    if corruption == "false_existed":
+        entry["existed"] = False
+    elif corruption == "wrong_restore_slot":
+        entry["restore"] = str(transaction.state_dir / "restore/999")
+    elif corruption == "duplicate":
+        journal["entries"].append(dict(entry))
+    elif corruption == "plugin_root":
+        entry["path"] = str(tmp_path)
+    else:
+        unrelated = tmp_path / "android/app/src/main/App.kt"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("keep app\n", encoding="utf-8")
+        entry["path"] = str(unrelated)
+    journal_path.write_text(json.dumps(journal, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(Exception, match="recovery|authority|entry|transaction"):
+        recover_pending(tmp_path)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+    if corruption == "unrelated_source":
+        assert (tmp_path / "android/app/src/main/App.kt").read_text() == "keep app\n"
+    assert journal_path.exists()
+    assert transaction.state_dir.exists()
+
+
+@pytest.mark.parametrize("phase", ["commit", "abandon"])
+def test_fresh_process_durable_metadata_failure_exposes_retained_recovery_authority(
+    tmp_path: Path,
+    monkeypatch,
+    phase: str,
+):
+    metadata = protected_directory_metadata(tmp_path)
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.record_directory_metadata(metadata)
+    transaction.data["phase"] = phase
+    transaction._persist()
+    calls = 0
+
+    def fail_final_root_restore(_root, current):
+        nonlocal calls
+        calls += 1
+        return ("modified:.",) if "." in current else ()
+
+    monkeypatch.setattr(
+        "supernote_module_generator.filesystem.restore_protected_directory_metadata",
+        fail_final_root_restore,
+    )
+
+    with pytest.raises(Exception) as raised:
+        recover_pending(tmp_path)
+
+    message = str(raised.value)
+    match = re.search(r"Recovery authority remains at ([^.]\S*)", message)
+    assert calls >= 1
+    assert match is not None, message
+    assert Path(match.group(1).rstrip(".")).is_dir()
+    monkeypatch.setattr(
+        "supernote_module_generator.filesystem.restore_protected_directory_metadata",
+        restore_protected_directory_metadata,
+    )
+    recover_pending(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "transaction_id",
+        "outcome",
+        "guard_bundle",
+        "nonempty_entries",
+        "tampered_manifest",
+        "unsafe_ancestry",
+    ],
+)
+def test_recovery_pointer_is_bound_to_transaction_metadata_bundle_before_mutation(
+    tmp_path: Path,
+    corruption: str,
+):
+    sentinel = tmp_path / "source.cpp"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    metadata = protected_directory_metadata(tmp_path)
+    transaction.record_directory_metadata(metadata)
+    transaction.data["phase"] = "commit"
+    transaction._persist()
+    recovery, bundle_id, digest = retain_directory_metadata_recovery(
+        tmp_path,
+        metadata,
+        transaction_id=transaction.identifier,
+        outcome="commit",
+    )
+    pointer = transaction_module._publish_recovery_pointer(
+        tmp_path,
+        transaction.data,
+        recovery,
+        "commit",
+        bundle_id=bundle_id,
+        manifest_sha256=digest,
+    )
+    pointer_data = json.loads(pointer.read_text(encoding="utf-8"))
+    if corruption == "transaction_id":
+        pointer_data["transaction_id"] = "0" * 32
+    elif corruption == "outcome":
+        pointer_data["outcome"] = "abandon"
+    elif corruption == "guard_bundle":
+        guard = ProtectedSourceGuard(tmp_path)
+        pointer_data["recovery_path"] = str(guard._temporary.resolve(strict=True))
+        manifest_payload = (guard._temporary / "recovery-manifest.json").read_bytes()
+        pointer_data["manifest_sha256"] = hashlib.sha256(manifest_payload).hexdigest()
+    elif corruption in {"nonempty_entries", "tampered_manifest"}:
+        manifest_path = recovery / "recovery-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if corruption == "nonempty_entries":
+            manifest["entries"] = [{"destination": "source.cpp"}]
+        else:
+            manifest["directories"][0]["mode"] ^= 0o111
+        payload = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+        manifest_path.write_bytes(payload)
+        if corruption == "nonempty_entries":
+            pointer_data["manifest_sha256"] = hashlib.sha256(payload).hexdigest()
+    else:
+        unsafe = tmp_path / "unsafe-bundle"
+        unsafe.mkdir()
+        (unsafe / "recovery-manifest.json").write_bytes(
+            (recovery / "recovery-manifest.json").read_bytes()
+        )
+        pointer_data["recovery_path"] = str(unsafe)
+    pointer.write_text(json.dumps(pointer_data, indent=2) + "\n", encoding="utf-8")
+    journal_before = transaction.journal_path.read_bytes()
+    authority = transaction.state_dir / str(transaction.data["entry_authority"])
+    authority_before = authority.read_bytes()
+    sentinel_before = sentinel.read_bytes()
+
+    with pytest.raises(Exception, match="recovery|pointer|binding|manifest|unsafe"):
+        recover_pending(tmp_path)
+
+    assert sentinel.read_bytes() == sentinel_before
+    assert transaction.journal_path.read_bytes() == journal_before
+    assert authority.read_bytes() == authority_before
+    assert pointer.exists()
+    assert recovery.exists()
+
+
+def test_hash_inventory_snapshot_and_guard_preserve_directory_atimes(tmp_path: Path):
+    nested = tmp_path / "local_modules/alpha/src/deep"
+    nested.mkdir(parents=True)
+    (nested / "source.cpp").write_text("int value = 1;\n", encoding="utf-8")
+    directories = [tmp_path, *[path for path in tmp_path.rglob("*") if path.is_dir()]]
+    expected: dict[Path, tuple[int, int, int]] = {}
+    for index, directory in enumerate(reversed(directories)):
+        values = (0o750, 20_000_000_000 + index, 30_000_000_000 + index)
+        directory.chmod(values[0])
+        os.utime(directory, ns=values[1:])
+        expected[directory] = values
+
+    assert hash_entry_no_follow(tmp_path) is not None
+    source_tree_inventory(tmp_path)
+    guard = ProtectedSourceGuard(tmp_path)
+    assert guard.finish() == ()
+    transaction = Transaction(tmp_path, "check", [])
+    transaction.record_directory_metadata(
+        {
+            "." if directory == tmp_path else directory.relative_to(tmp_path).as_posix(): values
+            for directory, values in expected.items()
+        }
+    )
+    transaction.snapshot([tmp_path / "local_modules"])
+    transaction.commit()
+
+    for directory, values in expected.items():
+        current = directory.lstat()
+        assert current.st_mode & 0o7777 == values[0]
+        assert current.st_atime_ns == values[1]
+        assert current.st_mtime_ns == values[2]
+
+
+@pytest.mark.parametrize("concurrent_change", ["mode_mtime", "replacement"])
+def test_directory_observation_never_restores_over_concurrent_metadata_or_entry(
+    tmp_path: Path,
+    monkeypatch,
+    concurrent_change: str,
+):
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    (observed / "source.cpp").write_text("int value = 1;\n")
+    original_scandir = filesystem_module.os.scandir
+    injected = False
+
+    class RacingScandir:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __enter__(self):
+            return self.wrapped.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            nonlocal injected
+            result = self.wrapped.__exit__(exc_type, exc, traceback)
+            if not injected:
+                injected = True
+                if concurrent_change == "mode_mtime":
+                    observed.chmod(0o711)
+                    os.utime(observed, ns=(41_000_000_000, 42_000_000_000))
+                else:
+                    displaced = tmp_path / "observed-before"
+                    os.replace(observed, displaced)
+                    observed.mkdir(mode=0o700)
+                    (observed / "concurrent").write_text("replacement remains\n")
+            return result
+
+    def racing_scandir(path):
+        wrapped = original_scandir(path)
+        return RacingScandir(wrapped) if Path(path) == observed else wrapped
+
+    monkeypatch.setattr(filesystem_module.os, "scandir", racing_scandir)
+    with pytest.raises(FilesystemError, match="changed while"):
+        list(filesystem_module.iter_tree_no_follow(observed))
+
+    if concurrent_change == "mode_mtime":
+        current = observed.lstat()
+        assert current.st_mode & 0o7777 == 0o711
+        assert current.st_mtime_ns == 42_000_000_000
+    else:
+        assert (observed / "concurrent").read_text() == "replacement remains\n"
+
+
+@pytest.mark.parametrize("reader", ["hash", "package"])
+@pytest.mark.parametrize("concurrent_change", ["mode_mtime", "replacement"])
+def test_file_observation_never_restores_over_concurrent_metadata_or_entry(
+    tmp_path: Path,
+    monkeypatch,
+    reader: str,
+    concurrent_change: str,
+):
+    source = tmp_path / ("package.json" if reader == "package" else "source.cpp")
+    source.write_text(
+        '{"name":"fixture","dependencies":{}}\n'
+        if reader == "package"
+        else "int value = 1;\n",
+        encoding="utf-8",
+    )
+    original_read = filesystem_module.os.read
+    injected = False
+
+    def racing_read(descriptor, size):
+        nonlocal injected
+        content = original_read(descriptor, size)
+        if content and not injected:
+            injected = True
+            if concurrent_change == "mode_mtime":
+                source.chmod(0o611)
+                os.utime(source, ns=(51_000_000_000, 52_000_000_000))
+            else:
+                replacement = source.with_name(f"{source.name}.replacement")
+                replacement.write_text("replacement remains\n", encoding="utf-8")
+                os.replace(replacement, source)
+        return content
+
+    monkeypatch.setattr(filesystem_module.os, "read", racing_read)
+    expected_exception = ConfigurationError if reader == "package" else FilesystemError
+    with pytest.raises(expected_exception, match="changed while|could not be read"):
+        if reader == "package":
+            read_parent_package(tmp_path)
+        else:
+            filesystem_module.hash_entry_no_follow(source)
+
+    if concurrent_change == "mode_mtime":
+        current = source.lstat()
+        assert current.st_mode & 0o7777 == 0o611
+        assert current.st_mtime_ns == 52_000_000_000
+    else:
+        assert source.read_text() == "replacement remains\n"
+
+
+@pytest.mark.parametrize("phase", ["stage", "commit", "abandon"])
+@pytest.mark.parametrize("authority_kind", ["missing", "directory", "symlink"])
+def test_every_recovery_phase_requires_regular_state_authority_before_mutation(
+    tmp_path: Path,
+    phase: str,
+    authority_kind: str,
+):
+    if authority_kind == "symlink" and os.name == "nt":
+        pytest.skip("Windows symlink capability is environment-specific")
+    sentinel = tmp_path / "local_modules/existing/source.cpp"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("baseline\n", encoding="utf-8")
+    staged = tmp_path / ".generator-stage"
+    staged.write_text("internal\n", encoding="utf-8")
+    transaction = Transaction(tmp_path, "update", ["existing"])
+    transaction.snapshot([sentinel])
+    transaction.track_created(staged)
+    sentinel.write_text("live mutation\n", encoding="utf-8")
+    transaction.data["phase"] = phase
+    transaction._persist()
+    journal_before = (tmp_path / JOURNAL_NAME).read_bytes()
+    authority = transaction.state_dir / str(transaction.data["entry_authority"])
+    authority_bytes = authority.read_bytes()
+    authority.unlink()
+    if authority_kind == "directory":
+        authority.mkdir()
+    elif authority_kind == "symlink":
+        external = tmp_path.parent / f"{tmp_path.name}-external-authority.json"
+        external.write_bytes(authority_bytes)
+        os.symlink(external, authority)
+
+    with pytest.raises(Exception, match="authority|recovery"):
+        recover_pending(tmp_path)
+
+    assert sentinel.read_text(encoding="utf-8") == "live mutation\n"
+    assert staged.read_text(encoding="utf-8") == "internal\n"
+    assert (tmp_path / JOURNAL_NAME).read_bytes() == journal_before
+    assert transaction.state_dir.is_dir()
+    assert os.path.lexists(authority) is (authority_kind != "missing")
+
+
+@pytest.mark.parametrize("payload_kind", ["missing", "directory", "symlink", "corrupt"])
+def test_complete_restore_set_is_validated_before_any_live_rollback_mutation(
+    tmp_path: Path,
+    payload_kind: str,
+):
+    if payload_kind == "symlink" and os.name == "nt":
+        pytest.skip("Windows symlink capability is environment-specific")
+    first = tmp_path / "local_modules/alpha/first.cpp"
+    second = tmp_path / "local_modules/beta/second.cpp"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text("first baseline\n", encoding="utf-8")
+    second.write_text("second baseline\n", encoding="utf-8")
+    transaction = Transaction(tmp_path, "update", ["alpha", "beta"])
+    transaction.snapshot([first, second])
+    first.write_text("first live\n", encoding="utf-8")
+    second.write_text("second live\n", encoding="utf-8")
+    transaction.mark_write()
+    journal_before = (tmp_path / JOURNAL_NAME).read_bytes()
+    authority = transaction.state_dir / str(transaction.data["entry_authority"])
+    authority_before = authority.read_bytes()
+    payload = Path(str(transaction.data["entries"][0]["restore"]))
+    if payload_kind == "missing":
+        payload.unlink()
+    elif payload_kind == "directory":
+        payload.unlink()
+        payload.mkdir()
+    elif payload_kind == "symlink":
+        external = tmp_path.parent / f"{tmp_path.name}-payload.cpp"
+        external.write_text("first baseline\n", encoding="utf-8")
+        payload.unlink()
+        os.symlink(external, payload)
+    else:
+        payload.write_text("corrupt baseline\n", encoding="utf-8")
+
+    with pytest.raises(Exception, match="Restore|recovery|payload"):
+        recover_pending(tmp_path)
+
+    assert first.read_text(encoding="utf-8") == "first live\n"
+    assert second.read_text(encoding="utf-8") == "second live\n"
+    assert (tmp_path / JOURNAL_NAME).read_bytes() == journal_before
+    assert authority.read_bytes() == authority_before
+
+
+@pytest.mark.parametrize("phase", ["commit", "abandon"])
+@pytest.mark.parametrize(
+    "interrupt_point",
+    ["after_abandon_journal_unlink", "after_abandon_state_removal"],
+)
+def test_fresh_process_discovers_durable_cleanup_after_internal_authority_removal(
+    tmp_path: Path,
+    phase: str,
+    interrupt_point: str,
+):
+    baseline_metadata = protected_directory_metadata(tmp_path)
+    fired = False
+
+    def interrupt(name: str) -> None:
+        nonlocal fired
+        if name == interrupt_point and not fired:
+            fired = True
+            raise KeyboardInterrupt
+
+    transaction = Transaction(
+        tmp_path,
+        "update",
+        ["alpha"],
+        fault_injector=interrupt,
+    )
+    transaction.record_directory_metadata(baseline_metadata)
+    if phase == "commit":
+        with pytest.raises(KeyboardInterrupt):
+            transaction.commit()
+    else:
+        staged = tmp_path / ".planned-stage"
+        staged.write_text("temporary\n", encoding="utf-8")
+        transaction.track_created(staged)
+        with pytest.raises(KeyboardInterrupt):
+            transaction.abandon_unmutated()
+        assert not staged.exists()
+    assert fired is True
+
+    outcome = recover_pending(tmp_path)
+
+    assert outcome.rollback.status in {"not_needed", "completed"}
+    assert not (tmp_path / JOURNAL_NAME).exists()
+    assert not list(tmp_path.glob(".supernote-module-transaction-*"))
+    assert _directory_metadata_matches(tmp_path, baseline_metadata)
+
+
+def test_rollback_metadata_failure_is_discoverable_and_retryable_in_a_new_process(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sentinel = tmp_path / "source.cpp"
+    sentinel.write_text("before\n", encoding="utf-8")
+    baseline_metadata = protected_directory_metadata(tmp_path)
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.record_directory_metadata(baseline_metadata)
+    transaction.snapshot([sentinel])
+    sentinel.write_text("after\n", encoding="utf-8")
+    transaction.mark_write()
+    original_restore = restore_protected_directory_metadata
+    monkeypatch.setattr(
+        "supernote_module_generator.filesystem.restore_protected_directory_metadata",
+        lambda *_args, **_kwargs: ("modified:.",),
+    )
+
+    first = transaction.rollback()
+
+    assert first.status == "partial"
+    assert sentinel.read_text(encoding="utf-8") == "before\n"
+    monkeypatch.setattr(
+        "supernote_module_generator.filesystem.restore_protected_directory_metadata",
+        original_restore,
+    )
+    second = recover_pending(tmp_path)
+    assert second.rollback.status == "completed"
+    assert _directory_metadata_matches(tmp_path, baseline_metadata)
+
+
+def _entry_stat(path: Path) -> tuple[int, int, int]:
+    value = path.lstat()
+    return value.st_mode & 0o7777, value.st_atime_ns, value.st_mtime_ns
+
+
+def _directory_metadata_matches(root: Path, expected) -> bool:
+    for relative, metadata in expected.items():
+        path = root if relative == "." else root.joinpath(*relative.split("/"))
+        if _entry_stat(path) != metadata:
+            return False
+    return True
+
+
+def test_file_and_tree_snapshots_preserve_source_and_destination_metadata(tmp_path: Path):
+    source_file = tmp_path / "source.txt"
+    source_file.write_text("content\n", encoding="utf-8")
+    source_file.chmod(0o600)
+    os.utime(source_file, ns=(3_000_000_000, 4_000_000_000))
+    file_before = _entry_stat(source_file)
+    copied_file = tmp_path / "copied.txt"
+
+    copy_entry_no_follow(source_file, copied_file)
+
+    assert _entry_stat(source_file) == file_before
+    assert _entry_stat(copied_file) == file_before
+
+    source_tree = tmp_path / "tree"
+    child_directory = source_tree / "nested"
+    child_directory.mkdir(parents=True)
+    child_file = child_directory / "value.txt"
+    child_file.write_text("tree content\n", encoding="utf-8")
+    child_file.chmod(0o640)
+    os.utime(child_file, ns=(5_000_000_000, 6_000_000_000))
+    os.utime(child_directory, ns=(7_000_000_000, 8_000_000_000))
+    os.utime(source_tree, ns=(9_000_000_000, 10_000_000_000))
+    tree_before = {
+        path.relative_to(source_tree).as_posix(): _entry_stat(path)
+        for path in (source_tree, child_directory, child_file)
+    }
+    copied_tree = tmp_path / "tree-copy"
+
+    copy_entry_no_follow(source_tree, copied_tree)
+
+    assert {
+        path.relative_to(source_tree).as_posix(): _entry_stat(path)
+        for path in (source_tree, child_directory, child_file)
+    } == tree_before
+    assert {
+        path.relative_to(copied_tree).as_posix(): _entry_stat(path)
+        for path in (copied_tree, copied_tree / "nested", copied_tree / "nested/value.txt")
+    } == tree_before
+
+
+def test_successful_transaction_and_read_only_guard_do_not_advance_file_atime(
+    tmp_path: Path,
+):
+    source = tmp_path / "source.cpp"
+    source.write_text("int value = 1;\n", encoding="utf-8")
+    os.utime(source, ns=(11_000_000_000, 12_000_000_000))
+    before = _entry_stat(source)
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    transaction.snapshot([source])
+    transaction.commit()
+    assert _entry_stat(source) == before
+
+    guard = ProtectedSourceGuard(tmp_path)
+    assert guard.finish() == ()
+    assert _entry_stat(source) == before
+
+
+@pytest.mark.parametrize("source_kind", ["file", "tree"])
+@pytest.mark.parametrize("race_point", ["during_copy", "after_copy"])
+def test_snapshot_versions_a_stable_recovery_payload_across_copy_races(
+    tmp_path: Path,
+    monkeypatch,
+    source_kind: str,
+    race_point: str,
+):
+    source = tmp_path / ("source.cpp" if source_kind == "file" else "source-tree")
+    leaf = source
+    if source_kind == "tree":
+        leaf = source / "nested/source.cpp"
+        leaf.parent.mkdir(parents=True)
+    leaf.write_text("before\n", encoding="utf-8")
+    transaction = Transaction(tmp_path, "update", ["alpha"])
+    injected = False
+
+    def concurrent_change() -> None:
+        nonlocal injected
+        if injected:
+            return
+        injected = True
+        leaf.write_text("concurrent\n", encoding="utf-8")
+        leaf.chmod(0o600)
+        os.utime(leaf, ns=(61_000_000_000, 62_000_000_000))
+        if source_kind == "tree":
+            source.chmod(0o710)
+            os.utime(source, ns=(63_000_000_000, 64_000_000_000))
+
+    if race_point == "during_copy":
+        original_read = filesystem_module.os.read
+        source_inode = leaf.lstat().st_ino
+
+        def racing_read(descriptor, size):
+            content = original_read(descriptor, size)
+            if content and os.fstat(descriptor).st_ino == source_inode:
+                concurrent_change()
+            return content
+
+        monkeypatch.setattr(filesystem_module.os, "read", racing_read)
+    else:
+        original_copy = transaction_module._copy_verified_entry
+
+        def racing_copy(source_path, destination, *, attempts=3):
+            result = original_copy(source_path, destination, attempts=attempts)
+            if Path(source_path) == source:
+                concurrent_change()
+            return result
+
+        monkeypatch.setattr(transaction_module, "_copy_verified_entry", racing_copy)
+
+    transaction.snapshot([source])
+    expected = transaction_module._exact_entry_state(source)
+    leaf.write_text("generator\n", encoding="utf-8")
+    transaction.mark_write()
+
+    rollback = recover_pending(tmp_path).rollback
+
+    assert rollback.status == "completed"
+    assert transaction_module._exact_entry_state(source) == expected
+    assert leaf.read_text(encoding="utf-8") == "concurrent\n"
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+
+
+def test_conflict_adoption_never_replays_stale_live_metadata_after_copy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source_root = tmp_path / "local_modules/existing"
+    source = source_root / "source.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n", encoding="utf-8")
+    baseline = source_tree_inventory(tmp_path)
+    directory_baseline = protected_directory_metadata(tmp_path)
+    transaction = Transaction(tmp_path, "add", ["safe"])
+    transaction.record_directory_metadata(directory_baseline)
+    transaction.snapshot([source_root])
+    source.write_text("external\n", encoding="utf-8")
+    source.chmod(0o640)
+    os.utime(source, ns=(71_000_000_000, 72_000_000_000))
+    injected = False
+    original_copy = transaction_module._copy_verified_entry
+    expected_source_times = (73_000_000_000, 74_000_000_000)
+    expected_parent_times = (75_000_000_000, 76_000_000_000)
+
+    def racing_copy(source_path, destination, *, attempts=3):
+        nonlocal injected
+        result = original_copy(source_path, destination, attempts=attempts)
+        if Path(source_path) == source and not injected:
+            injected = True
+            source.chmod(0o600)
+            os.utime(source, ns=expected_source_times)
+            source_root.chmod(0o710)
+            os.utime(source_root, ns=expected_parent_times)
+        return result
+
+    monkeypatch.setattr(transaction_module, "_copy_verified_entry", racing_copy)
+
+    transaction.preserve_external_source_changes(baseline)
+    source.write_text("generator\n", encoding="utf-8")
+    transaction.mark_write()
+    rollback = recover_pending(tmp_path).rollback
+
+    assert rollback.status == "completed"
+    assert _entry_stat(source) == (0o600, *expected_source_times)
+    assert _entry_stat(source_root) == (0o710, *expected_parent_times)
+    assert source.read_text(encoding="utf-8") == "external\n"
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+
+
+def test_tree_conflict_adoption_versions_post_copy_changes_before_recovery(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source_root = tmp_path / "local_modules/existing"
+    source_root.mkdir(parents=True)
+    (source_root / "baseline.cpp").write_text("before\n", encoding="utf-8")
+    baseline = source_tree_inventory(tmp_path)
+    directory_baseline = protected_directory_metadata(tmp_path)
+    transaction = Transaction(tmp_path, "add", ["safe"])
+    transaction.record_directory_metadata(directory_baseline)
+    transaction.snapshot([source_root])
+    external_tree = source_root / "concurrent/nested"
+    external_tree.mkdir(parents=True)
+    external_file = external_tree / "value.txt"
+    external_file.write_text("external first\n", encoding="utf-8")
+    original_copy = transaction_module._copy_verified_entry
+    injected = False
+    expected_tree_times = (85_000_000_000, 86_000_000_000)
+
+    def racing_copy(source_path, destination, *, attempts=3):
+        nonlocal injected
+        result = original_copy(source_path, destination, attempts=attempts)
+        if Path(source_path) == source_root / "concurrent" and not injected:
+            injected = True
+            external_file.write_text("external final\n", encoding="utf-8")
+            external_tree.chmod(0o710)
+            os.utime(external_tree, ns=expected_tree_times)
+        return result
+
+    monkeypatch.setattr(transaction_module, "_copy_verified_entry", racing_copy)
+
+    transaction.preserve_external_source_changes(baseline)
+    remove_entry_no_follow = filesystem_module.remove_entry_no_follow
+    remove_entry_no_follow(source_root / "concurrent")
+    transaction.mark_write()
+    rollback = recover_pending(tmp_path).rollback
+    tree_metadata = external_tree.lstat()
+
+    assert rollback.status == "completed"
+    assert external_file.read_text(encoding="utf-8") == "external final\n"
+    assert tree_metadata.st_mode & 0o7777 == 0o710
+    assert (tree_metadata.st_atime_ns, tree_metadata.st_mtime_ns) == expected_tree_times
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+
+
+def test_failed_adoption_keeps_the_previous_recovery_payload_actionable(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source_root = tmp_path / "local_modules/existing"
+    source = source_root / "source.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_text("baseline\n", encoding="utf-8")
+    baseline = source_tree_inventory(tmp_path)
+    transaction = Transaction(tmp_path, "add", ["safe"])
+    transaction.snapshot([source_root])
+    entry = transaction.data["entries"][0]
+    assert isinstance(entry, dict)
+    original_restore = Path(str(entry["restore"]))
+    original_payload = transaction_module._exact_entry_state(original_restore)
+    source.write_text("external racing state\n", encoding="utf-8")
+    attempted = tmp_path / "local_modules/safe"
+    attempted.mkdir()
+    (attempted / "generated.txt").write_text("remove me\n", encoding="utf-8")
+    transaction.track_created(attempted)
+    original_copy = transaction_module._copy_verified_entry
+
+    def failing_external_copy(source_path, destination, *, attempts=3):
+        if Path(source_path) == source:
+            raise FilesystemError("persistent external copy race")
+        return original_copy(source_path, destination, attempts=attempts)
+
+    monkeypatch.setattr(
+        transaction_module, "_copy_verified_entry", failing_external_copy
+    )
+
+    with pytest.raises(FilesystemError, match="persistent external copy race"):
+        transaction.preserve_external_source_changes(baseline)
+
+    current_entry = transaction.data["entries"][0]
+    assert isinstance(current_entry, dict)
+    assert Path(str(current_entry["restore"])) == original_restore
+    assert transaction_module._exact_entry_state(original_restore) == original_payload
+    outcome = recover_pending(tmp_path)
+
+    assert outcome.rollback.status == "completed"
+    assert source.read_text(encoding="utf-8") == "baseline\n"
+    assert not attempted.exists()
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "interrupt_point",
+    [
+        "after_package_baseline_payload_creation",
+        "after_package_baseline_entry_update",
+        "after_package_baseline_state_authority_write",
+        "after_package_baseline_journal_write",
+    ],
+)
+def test_package_baseline_switch_is_recoverable_at_every_durable_boundary(
+    tmp_path: Path,
+    interrupt_point: str,
+):
+    package = tmp_path / "package.json"
+    package.write_bytes(b'{"generator":"visible"}\n')
+    fired = False
+
+    def interrupt(name: str) -> None:
+        nonlocal fired
+        if name == interrupt_point and not fired:
+            fired = True
+            raise KeyboardInterrupt
+
+    transaction = Transaction(
+        tmp_path,
+        "add",
+        ["safe"],
+        fault_injector=interrupt,
+    )
+    transaction.snapshot([package])
+    external = b'{\n\t"external": true\n}\n'
+    external_times = (91_000_000_000, 92_000_000_000)
+
+    with pytest.raises(KeyboardInterrupt):
+        transaction.replace_snapshot_file_baseline(
+            package,
+            external,
+            mode=0o600,
+            atime_ns=external_times[0],
+            mtime_ns=external_times[1],
+        )
+
+    assert fired is True
+    outcome = recover_pending(tmp_path)
+    metadata = package.lstat()
+    assert outcome.rollback.status == "completed"
+    assert metadata.st_mode & 0o7777 == 0o600
+    assert (metadata.st_atime_ns, metadata.st_mtime_ns) == external_times
+    assert package.read_bytes() == external
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [KeyboardInterrupt, SystemExit, FilesystemError],
+)
+def test_recovery_copy_retries_only_explicit_concurrent_source_mutations(
+    tmp_path: Path,
+    monkeypatch,
+    failure,
+):
+    source = tmp_path / "source.cpp"
+    source.write_text("source remains\n", encoding="utf-8")
+    destination = tmp_path / "prospective-baseline"
+    attempts = 0
+
+    def fail_copy(_source, _destination):
+        nonlocal attempts
+        attempts += 1
+        raise failure("stop immediately")
+
+    monkeypatch.setattr(transaction_module, "copy_entry_no_follow", fail_copy)
+
+    with pytest.raises(failure, match="stop immediately"):
+        transaction_module._copy_verified_entry(source, destination)
+
+    assert attempts == 1
+    assert source.read_text(encoding="utf-8") == "source remains\n"
+    assert not destination.exists()

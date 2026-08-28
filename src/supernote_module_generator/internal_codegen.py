@@ -1,4 +1,4 @@
-"""Generate typed handwritten-C++ facades for hidden V3 bindings."""
+"""Generate typed handwritten-C++ facades for hidden V4 bindings."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ from .semantic import (
     SemanticClassKind,
     SemanticType,
 )
-from .source_models import CppClassSource, CppFunctionSource, CppMethodSource
+from .source_models import CppClassSource, CppFunctionSource
 
 if TYPE_CHECKING:
     from .cross_family_codegen import CrossFamilyRenderer
@@ -157,7 +157,7 @@ namespace supernote::internal::{namespace} {{
 namespace supernote::internal::{namespace} {{
 namespace {{
 
-constexpr char kInternalLogTag[] = "SupernoteV3Internal";
+constexpr char kInternalLogTag[] = "SupernoteV4Internal";
 
 std::shared_ptr<supernote::runtime::FeatureSession> require_feature() {{
   auto feature = supernote::runtime::current_feature_session();

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .semantic import SourceProvenance
-from .v3_schemas import (
+from .v4_schemas import (
     JVM_SOURCE_MANIFEST_KIND as JVM_MANIFEST_KIND,
     JVM_SOURCE_MANIFEST_SCHEMA_VERSION as JVM_MANIFEST_SCHEMA_VERSION,
 )

@@ -45,14 +45,46 @@ class DestinationConflict(GeneratorError):
     phase = "preflight"
 
 
+class UnsupportedLegacyProject(GeneratorError):
+    """A pre-V4 generated layout was found at the public command boundary."""
+
+    exit_code = 1
+    kind = "unsupported_legacy_project"
+    phase = "preflight"
+
+
+class UnmanifestedGeneratedProject(GeneratorError):
+    """Current-layout generated state exists without V4 ownership authority."""
+
+    exit_code = 1
+    kind = "unmanifested_generated_project"
+    phase = "preflight"
+
+
 class TemplateError(GeneratorError):
     kind = "template_failed"
     phase = "generate"
 
 
+class TemplateStateError(GeneratorError):
+    """The live official-template capability cannot be inspected or synchronized."""
+
+    kind = "template_state_failed"
+    phase = "template_preflight"
+
+
 class FilesystemError(GeneratorError):
     kind = "filesystem_failed"
     phase = "filesystem"
+
+
+class ConcurrentSourceMutation(FilesystemError):
+    """A source entry changed during one bounded observational capture."""
+
+
+class SymlinkPreservationError(GeneratorError):
+    kind = "invalid_source"
+    phase = "preflight"
 
 
 class OperationCancelled(GeneratorError):

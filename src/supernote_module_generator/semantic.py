@@ -1,4 +1,4 @@
-"""Backend-neutral Supernote API semantics for V3.
+"""Backend-neutral Supernote API semantics for V4.
 
 The records in this module answer what a Supernote API means.  They contain no
 JNI descriptors, C++ include paths, adapter symbols, or generated source text.
@@ -12,12 +12,11 @@ from enum import Enum
 import re
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
-from .v3_schemas import (
+from .v4_schemas import (
     SEMANTIC_MANIFEST_KIND,
     SEMANTIC_MANIFEST_SCHEMA_VERSION,
 )
 from .semantic_types import (
-    ScalarKind,
     SemanticType,
     SemanticTypeError,
     SemanticTypeKind,
@@ -297,6 +296,8 @@ class SemanticBinding:
             raise SemanticModelError("methods cannot have top-level scope")
 
     def manifest(self) -> Dict[str, object]:
+        member_scope = self.member_scope
+        assert member_scope is not None
         value: Dict[str, object] = {
             "binding_id": self.binding_id,
             "source_declaration_id": self.source.declaration_id,
@@ -307,7 +308,7 @@ class SemanticBinding:
             "execution": self.execution.value,
             "parameters": [parameter.manifest() for parameter in self.parameters],
             "result": self.result.manifest(),
-            "member_scope": self.member_scope.value,
+            "member_scope": member_scope.value,
             "source": self.source.manifest(),
         }
         if self.owner_id is not None:
@@ -576,11 +577,11 @@ class SemanticApi:
                 )
 
         all_bindings = list(self.functions)
-        for item in self.classes:
-            all_bindings.extend(item.methods)
-        for item in self.declarations:
-            if isinstance(item, SemanticObjectDeclaration):
-                all_bindings.extend(item.methods)
+        for legacy_class in self.classes:
+            all_bindings.extend(legacy_class.methods)
+        for declaration in self.declarations:
+            if isinstance(declaration, SemanticObjectDeclaration):
+                all_bindings.extend(declaration.methods)
 
         semantic_ids = [binding.binding_id for binding in all_bindings]
         semantic_ids.extend(item.class_id for item in self.classes)
@@ -598,16 +599,21 @@ class SemanticApi:
         source_ids.extend(
             item.constructor.source.declaration_id for item in self.classes
         )
-        for item in self.declarations:
+        for declaration in self.declarations:
             source_ids.extend(
-                projection.source.declaration_id for projection in item.projections
+                projection.source.declaration_id
+                for projection in declaration.projections
             )
-            if isinstance(item, SemanticObjectDeclaration):
-                if item.constructor is not None:
-                    source_ids.append(item.constructor.source.declaration_id)
-                source_ids.extend(field.source.declaration_id for field in item.fields)
-            elif isinstance(item, SemanticValueDeclaration):
-                source_ids.extend(field.source.declaration_id for field in item.fields)
+            if isinstance(declaration, SemanticObjectDeclaration):
+                if declaration.constructor is not None:
+                    source_ids.append(declaration.constructor.source.declaration_id)
+                source_ids.extend(
+                    field.source.declaration_id for field in declaration.fields
+                )
+            elif isinstance(declaration, SemanticValueDeclaration):
+                source_ids.extend(
+                    field.source.declaration_id for field in declaration.fields
+                )
         _reject_duplicates(source_ids, "source declaration identity")
 
         public_names = [
@@ -1100,7 +1106,9 @@ def _validate_named_references(api: SemanticApi) -> None:
             declaration_class = expected.get(item.kind)
             if declaration_class is None:
                 continue
-            declaration = declarations.get(item.type_id)
+            type_id = item.type_id
+            assert type_id is not None
+            declaration = declarations.get(type_id)
             if declaration is None:
                 raise SemanticModelError(
                     f"unknown semantic {item.kind.value} type ID {item.type_id!r}"
@@ -1218,7 +1226,12 @@ def validate_semantic_route(
     declarations = {item.type_id: item for item in api.declarations}
     checked_values: set[tuple[str, BackendFamily, BackendFamily]] = set()
 
-    def fail(message: str, *, declaration=None, position: str = "value") -> None:
+    def fail(
+        message: str,
+        *,
+        declaration: SemanticDeclaration | None = None,
+        position: str = "value",
+    ) -> None:
         declared_at = ""
         if declaration is not None:
             locations = ", ".join(
@@ -1248,7 +1261,7 @@ def validate_semantic_route(
                 fail(
                     f"native object {declaration.name!r} cannot cross "
                     f"{source_backend.value}->{target_backend.value}; cross-family "
-                    "object proxies are deferred in current V3",
+                    "object proxies are deferred in current V4",
                     declaration=declaration,
                     position=position,
                 )

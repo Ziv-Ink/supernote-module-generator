@@ -1,0 +1,38 @@
+{
+  "android": {
+    "model": "Supernote Nomad",
+    "sdk": 30
+  },
+  "check_count": 15,
+  "check_ids": [
+    "cpp-scalar",
+    "cpp-string-bool",
+    "cpp-async",
+    "cpp-object",
+    "jvm-string",
+    "android-build-info",
+    "jvm-async",
+    "mixed-cpp-jvm",
+    "plugin-name",
+    "plugin-private-directory",
+    "device-type",
+    "current-file",
+    "current-page-handwriting",
+    "host-specific-api",
+    "permission-status-request-result"
+  ],
+  "current_file": "/storage/emulated/0/Document/SNV4_Bounded_Acceptance.pdf",
+  "host": "doc",
+  "log_sha256": "659a2cb11a7f815f778ad6fb4e6b2a932954c782cc884ad440fa2062aded0bf6",
+  "permission": {
+    "action": "allow_once",
+    "after": 1,
+    "before": 0,
+    "permission": "plugin.permission.FILE:READ",
+    "requested": 1
+  },
+  "plugin_name": "snv4-doc-acceptance-finala",
+  "schema_version": 1,
+  "status": "pass",
+  "suite": "v4-bounded-note-doc-final"
+}

@@ -10,12 +10,18 @@ import pytest
 
 from supernote_module_generator.arguments import parse_arguments
 from supernote_module_generator.cli import main
-from supernote_module_generator.errors import SubprocessFailure
+from supernote_module_generator.errors import SubprocessFailure, SymlinkPreservationError
 from supernote_module_generator.feature_cli_operations import FeatureCliOperationService
+from supernote_module_generator.feature_generator import FeatureConfig, stage_feature
+from supernote_module_generator.feature_model import StarterFamily
+from supernote_module_generator.filesystem import entry_kind, source_tree_inventory
 from supernote_module_generator.feature_workflows import FeatureDecisionCollector
+from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.platform_tools import gradle_wrapper_path
 from supernote_module_generator.plugin_build_integration import set_runtime_wiring
+import supernote_module_generator.transaction as transaction_module
 from supernote_module_generator.transaction import Transaction, recover_pending
+from v4_project_inventory import inventory_project
 
 
 def plugin(tmp_path: Path, *, npm_lock: bool = False, yarn_lock: bool = False) -> Path:
@@ -51,6 +57,14 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def tree_mtimes(root: Path) -> dict[str, int]:
+    return {".": root.lstat().st_mtime_ns, **{
+        path.relative_to(root).as_posix(): path.lstat().st_mtime_ns
+        for path in root.rglob("*")
+        if not path.is_symlink()
+    }}
+
+
 def main_application(root: Path) -> Path:
     source = (
         root
@@ -67,6 +81,41 @@ def main_application(root: Path) -> Path:
     return source
 
 
+def _source_symlink_matrix(root: Path, feature: Path) -> dict[str, str]:
+    source = feature / "android/src/main/cpp"
+    targets = source / "link-targets"
+    targets.mkdir()
+    (targets / "relative.txt").write_text("relative target\n", encoding="utf-8")
+    directory = targets / "directory"
+    directory.mkdir()
+    (directory / "ordinary.txt").write_text("directory target\n", encoding="utf-8")
+    outside_file = root.parent / f"{root.name}-outside-source.txt"
+    outside_file.write_text("absolute target\n", encoding="utf-8")
+    outside_directory = root.parent / f"{root.name}-outside-source-directory"
+    outside_directory.mkdir()
+    (outside_directory / "ignored.hpp").write_text(
+        "// @SupernotePluginObject\nclass MustNotBeDiscovered {};\n",
+        encoding="utf-8",
+    )
+    links = {
+        "relative-file-link": ("link-targets/relative.txt", False),
+        "absolute-file-link": (str(outside_file), False),
+        "relative-directory-link": ("link-targets/directory", True),
+        "absolute-directory-link": (str(outside_directory), True),
+        "broken-file-link": ("missing-file.txt", False),
+        "broken-directory-link": ("missing-directory", True),
+    }
+    for name, (target, target_is_directory) in links.items():
+        try:
+            (source / name).symlink_to(
+                target,
+                target_is_directory=target_is_directory,
+            )
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symbolic links are unavailable on this host: {exc}")
+    return {name: os.readlink(source / name) for name in links}
+
+
 @pytest.mark.parametrize(
     ("arguments", "native", "jvm"),
     [
@@ -76,7 +125,11 @@ def main_application(root: Path) -> Path:
     ],
 )
 def test_add_scaffolds_selected_families_without_backend_metadata(
-    tmp_path: Path, arguments: list[str], native: bool, jvm: bool
+    tmp_path: Path,
+    arguments: list[str],
+    native: bool,
+    jvm: bool,
+    stub_ksp_frontend,
 ):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(
@@ -92,10 +145,10 @@ def test_add_scaffolds_selected_families_without_backend_metadata(
     assert (feature / "android/src/main/cpp/feature.cpp").is_file() is native
     kotlin = feature / "android/src/main/java/com/example/document/FeatureApi.kt"
     assert kotlin.is_file() is jvm
-    assert "supernote-v3-runtime" in (root / "android/settings.gradle").read_text()
+    assert "supernote-v4-runtime" in (root / "android/settings.gradle").read_text()
 
 
-def test_add_and_update_refresh_the_semantic_api_without_full_android_build(
+def test_add_and_update_render_semantic_api_without_gradle_source_writes(
     tmp_path: Path, monkeypatch
 ):
     root = plugin(tmp_path)
@@ -117,12 +170,8 @@ def test_add_and_update_refresh_the_semantic_api_without_full_android_build(
         root, ["update", "document", "--skip-install", "--yes"]
     )[0] == 0
 
-    assert [call[0][-1] for call in calls] == [
-        ":supernote-v3-runtime:generateSupernoteDebugSemantics",
-        ":supernote-v3-runtime:generateSupernoteDebugSemantics",
-    ]
-    assert all(cwd == root / "android" for _, cwd in calls)
-    assert all(":app:assembleDebug" not in command for command, _ in calls)
+    assert calls == []
+    assert (root / ".supernote-module/manifest.json").is_file()
 
 
 def test_failed_api_documentation_refresh_restores_the_previous_readme(
@@ -149,19 +198,22 @@ def test_failed_api_documentation_refresh_restores_the_previous_readme(
         encoding="utf-8",
     )
 
-    def fail(command, *, cwd, timeout, stream=None):
+    original_execute = GenerationService.execute
+
+    def fail(self, plan, transaction, *, commit=True):
+        original_execute(self, plan, transaction, commit=False)
         other_readme.write_text("partially regenerated\n", encoding="utf-8")
-        return subprocess.CompletedProcess(command, 1, "", "forced semantic failure")
+        raise RuntimeError("forced semantic failure")
 
     monkeypatch.setattr(
-        "supernote_module_generator.feature_cli_operations.run_process", fail
+        GenerationService, "execute", fail
     )
     code, _, stderr = invoke(
         root, ["update", "document", "--skip-install", "--yes"]
     )
 
     assert code == 1
-    assert "could not refresh the generated JavaScript API" in stderr
+    assert "forced semantic failure" in stderr
     assert readme.read_bytes() == before
     assert other_readme.read_bytes() == other_before
     assert "double total" in source.read_text(encoding="utf-8")
@@ -219,7 +271,9 @@ def test_add_rejects_feature_identity_collisions_without_mutation(
     assert (root / "android/settings.gradle").read_bytes() == before
 
 
-def test_update_preserves_both_source_roots_and_deleted_starter(tmp_path: Path):
+def test_update_preserves_both_source_roots_and_deleted_starter(
+    tmp_path: Path, stub_ksp_frontend
+):
     root = plugin(tmp_path)
     assert invoke(
         root,
@@ -252,8 +306,329 @@ def test_update_preserves_both_source_roots_and_deleted_starter(tmp_path: Path):
     assert not starter.exists()
 
 
-def test_v3_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
-    tmp_path: Path, make_directory_symlink
+def test_update_and_repeated_update_preserve_every_user_source_symlink_kind(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "links", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/links"
+    expected_links = _source_symlink_matrix(root, feature)
+
+    for iteration in range(2):
+        before_noop = inventory_project(root) if iteration == 1 else None
+        code, _, stderr = invoke(
+            root,
+            ["update", "links", "--skip-install", "--yes"],
+        )
+        assert code == 0, stderr
+        source = feature / "android/src/main/cpp"
+        assert {
+            name: os.readlink(source / name) for name in expected_links
+        } == expected_links
+        assert all((source / name).is_symlink() for name in expected_links)
+        if before_noop is not None:
+            assert inventory_project(root) == before_noop
+
+
+def test_failed_update_restores_exact_symlinks_and_whole_project_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "links", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/links"
+    _source_symlink_matrix(root, feature)
+    source = feature / "android/src/main/cpp/feature.cpp"
+    source.write_text(
+        source.read_text()
+        + "\n// @SupernotePluginExport\n"
+        + "double checkpoint_change(double value) { return value; }\n"
+    )
+    before = inventory_project(root)
+    original_execute = GenerationService.execute
+
+    def fail(self, plan, transaction, *, commit=True):
+        original_execute(self, plan, transaction, commit=False)
+        raise RuntimeError("forced post-update failure")
+
+    monkeypatch.setattr(GenerationService, "execute", fail)
+
+    code, _, stderr = invoke(
+        root,
+        ["update", "links", "--skip-install", "--yes"],
+    )
+
+    assert code == 1
+    assert "forced post-update failure" in stderr
+    assert inventory_project(root) == before
+
+
+def test_ordinary_targeted_update_matches_preview_and_is_true_noop(tmp_path: Path):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    node_modules = root / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "alpha").symlink_to(root / "local_modules/alpha")
+    preview_code, preview_stdout, preview_stderr = invoke(
+        root, ["--json", "update", "alpha", "--dry-run"]
+    )
+    before_entries = inventory_project(root)
+    before_mtimes = tree_mtimes(root)
+
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "alpha", "--yes"]
+    )
+    preview = json.loads(preview_stdout)
+    payload = json.loads(stdout)
+
+    assert preview_code == 0, preview_stderr
+    assert code == 0, stderr
+    assert preview["changes"] == payload["changes"] == []
+    assert preview["metadata"]["generation_id"] == payload["metadata"]["generation_id"]
+    assert payload["metadata"]["no_op"] is True
+    assert payload["actual_changes"] == []
+    assert inventory_project(root) == before_entries
+    assert tree_mtimes(root) == before_mtimes
+
+
+def test_stale_parent_dependency_is_previewed_and_executed_by_same_plan(
+    tmp_path: Path,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    node_modules = root / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "alpha").symlink_to(root / "local_modules/alpha")
+    package_path = root / "package.json"
+    package = json.loads(package_path.read_text())
+    del package["dependencies"]["alpha"]
+    package_path.write_text(json.dumps(package, indent=2) + "\n")
+
+    preview_code, preview_stdout, preview_stderr = invoke(
+        root, ["--json", "update", "alpha", "--dry-run", "--diff"]
+    )
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "alpha", "--skip-install", "--yes"]
+    )
+    preview = json.loads(preview_stdout)
+    payload = json.loads(stdout)
+
+    assert preview_code == 0, preview_stderr
+    assert code == 0, stderr
+    expected_change = {
+        "path": str(package_path),
+        "action": "update",
+        "ownership": "parent_dependency",
+    }
+    assert expected_change in preview["changes"]
+    assert expected_change in payload["changes"]
+    assert expected_change in payload["actual_changes"]
+    assert preview["metadata"]["plan"]["dependency_actions"]
+    assert preview["metadata"]["no_op"] is False
+    assert payload["metadata"]["no_op"] is False
+    assert json.loads(package_path.read_text())["dependencies"]["alpha"] == (
+        "file:./local_modules/alpha"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="mkfifo is a POSIX regression fixture")
+def test_targeted_update_never_snapshots_ignored_feature_build_cache(tmp_path: Path):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    cache = root / "local_modules/alpha/android/build"
+    cache.mkdir(parents=True)
+    fifo = cache / "worker.pipe"
+    os.mkfifo(fifo)
+    source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
+    source.write_text(
+        source.read_text()
+        + "\n// @SupernotePluginExport\n"
+        + "double planned_change(double value) { return value; }\n"
+    )
+
+    code, _, stderr = invoke(
+        root, ["update", "alpha", "--skip-install", "--yes"]
+    )
+
+    assert code == 0, stderr
+    assert fifo.exists()
+
+
+@pytest.mark.parametrize("mutation_target", ["other_feature", "application"])
+def test_update_build_mutation_rolls_back_every_protected_source(
+    tmp_path: Path,
+    monkeypatch,
+    mutation_target: str,
+):
+    root = plugin(tmp_path)
+    for name in ("alpha", "beta"):
+        assert invoke(
+            root,
+            ["add", name, "--starter", "cpp", "--skip-install", "--yes"],
+        )[0] == 0
+    alpha = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
+    alpha.write_text(
+        alpha.read_text()
+        + "\n// @SupernotePluginExport\n"
+        + "double planned_change(double value) { return value; }\n"
+    )
+    beta = root / "local_modules/beta/android/src/main/cpp/feature.cpp"
+    application = main_application(root)
+    set_runtime_wiring(root, enabled=True)
+    target = beta if mutation_target == "other_feature" else application
+    before = source_tree_inventory(root)
+
+    def mutating_build(command, *, cwd, timeout, env):
+        target.write_text(target.read_text() + "// build mutation\n")
+        return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
+
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.run_process", mutating_build
+    )
+
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "update", "alpha", "--skip-install", "--build", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, (stderr, payload)
+    assert payload["rollback"]["status"] == "completed"
+    assert payload["actual_changes"] == []
+    assert payload["error"]["kind"] == "build_failed"
+    assert payload["issues"][0]["code"] == "SNV4_BUILD_MUTATED_SOURCE"
+    assert payload["requested_targets"] == ["alpha"]
+    assert payload["affected_targets"]
+    assert payload["diagnostics"]
+    assert source_tree_inventory(root) == before
+
+
+def test_update_build_failure_preserves_structured_plan_and_diagnostics(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+
+    def failed_build(command, *, cwd, timeout, env):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "src/main/Foo.kt:7:3: error: unresolved reference: Missing\n",
+        )
+
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.run_process", failed_build
+    )
+
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "update", "alpha", "--skip-install", "--build", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["validation"]["build"] == "failed"
+    assert payload["issues"][0]["code"] == "SNV4_BUILD_FAILED"
+    assert payload["requested_targets"] == ["alpha"]
+    assert payload["affected_targets"]
+    assert payload["diagnostics"]
+    assert payload["next_action"]
+
+
+def test_add_build_mutation_restores_unrelated_application_source(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    application = main_application(root)
+    before = source_tree_inventory(root)
+
+    def mutating_build(command, *, cwd, timeout, env):
+        application.write_text(application.read_text() + "// build mutation\n")
+        return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
+
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.run_process", mutating_build
+    )
+
+    code, stdout, stderr = invoke(
+        root,
+        [
+            "--json",
+            "add",
+            "alpha",
+            "--starter",
+            "cpp",
+            "--skip-install",
+            "--build",
+            "--yes",
+        ],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["rollback"]["status"] == "completed"
+    assert payload["actual_changes"] == []
+    assert payload["error"]["kind"] == "build_failed"
+    assert payload["requested_targets"] == ["alpha"]
+    assert payload["diagnostics"]
+    assert source_tree_inventory(root) == before
+
+
+def test_unsupported_platform_symlink_capability_fails_before_transaction(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "links", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/links"
+    _source_symlink_matrix(root, feature)
+    before = inventory_project(root)
+
+    def reject(_roots) -> None:
+        raise SymlinkPreservationError("Windows symlink capability is unavailable")
+
+    monkeypatch.setattr(
+        "supernote_module_generator.feature_cli_operations.validate_source_symlink_support",
+        reject,
+    )
+
+    code, _, stderr = invoke(
+        root,
+        ["update", "links", "--skip-install", "--yes"],
+    )
+
+    assert code == 1
+    assert "Windows symlink capability is unavailable" in stderr
+    assert inventory_project(root) == before
+    assert not (root / ".supernote-module-transaction.json").exists()
+
+
+def test_v4_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
+    tmp_path: Path, make_directory_symlink, stub_ksp_frontend
 ):
     root = plugin(tmp_path)
     configurations = {
@@ -279,18 +654,25 @@ def test_v3_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
         "// @SupernotePluginObject\n"
         "class Stroke {\n"
         "public:\n"
-        "  // @SupernotePluginExport\n"
-        "  double length() const;\n"
-        "};\n",
+            "  // @SupernotePluginExport\n"
+            "  double length() const;\n"
+            "};\n",
+            encoding="utf-8",
+        )
+    cpp_impl = root / "local_modules/typed-cpp/android/src/main/cpp/Types.cpp"
+    cpp_impl.write_text(
+        '#include "Types.hpp"\n'
+        "#include <memory>\n"
+        "// @SupernotePluginExport\n"
+        "Point origin() { return Point{0.0}; }\n"
+        "// @SupernotePluginExport\n"
+        "std::shared_ptr<Stroke> makeStroke() { return std::make_shared<Stroke>(); }\n",
         encoding="utf-8",
     )
-    mixed_cpp = root / "local_modules/typed-mixed/android/src/main/cpp/Types.hpp"
+    mixed_cpp = root / "local_modules/typed-mixed/android/src/main/cpp/Types.cpp"
     mixed_cpp.write_text(
-        "// @SupernotePluginValue\n"
-        "struct NativeSize {\n"
-        "  // @SupernotePluginExport\n"
-        "  double width;\n"
-        "};\n",
+        "// @SupernotePluginExport\n"
+        "double nativeWidth() { return 1.0; }\n",
         encoding="utf-8",
     )
     jvm_source = (
@@ -322,7 +704,7 @@ def test_v3_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
         "data class JvmSize(@field:SupernotePluginExport val height: Double)\n",
         encoding="utf-8",
     )
-    owned_sources = (cpp_source, mixed_cpp, jvm_source, mixed_jvm)
+    owned_sources = (cpp_source, cpp_impl, mixed_cpp, jvm_source, mixed_jvm)
     source_bytes = {path: path.read_bytes() for path in owned_sources}
 
     for name in configurations:
@@ -348,12 +730,11 @@ def test_v3_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
             root, ["remove", name, "--skip-install", "--yes"]
         )
         assert code == 0, stderr
-    assert not (root / "android/.supernote-module/v3-runtime").exists()
+    assert not (root / "android/.supernote-module/v4-runtime").exists()
 
 
-@pytest.mark.parametrize("option", ["--skip-install", "--package-manager=npm"])
-def test_update_rejects_dependency_options_when_refresh_is_not_required(
-    tmp_path: Path, option: str, make_directory_symlink
+def test_update_skip_install_is_idempotent_when_refresh_is_not_required(
+    tmp_path: Path, make_directory_symlink
 ):
     root = plugin(tmp_path)
     assert invoke(
@@ -365,7 +746,29 @@ def test_update_rejects_dependency_options_when_refresh_is_not_required(
     link.parent.mkdir()
     make_directory_symlink(link, feature)
 
-    code, _, stderr = invoke(root, ["update", "current", option, "--yes"])
+    code, _, stderr = invoke(
+        root, ["update", "current", "--skip-install", "--yes"]
+    )
+
+    assert code == 0, stderr
+
+
+def test_update_rejects_package_manager_when_refresh_is_not_required(
+    tmp_path: Path, make_directory_symlink
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "current", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    feature = root / "local_modules/current"
+    link = root / "node_modules/current"
+    link.parent.mkdir()
+    make_directory_symlink(link, feature)
+
+    code, _, stderr = invoke(
+        root, ["update", "current", "--package-manager=npm", "--yes"]
+    )
 
     assert code == 2
     assert "does not affect this update" in stderr
@@ -383,10 +786,13 @@ def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
             root / "android/app/build.gradle",
         )
     }
-    monkeypatch.setattr(
-        "supernote_module_generator.feature_operations.FeatureOperationService.verify_generated_state",
-        lambda self: ["forced structural failure"],
-    )
+    original = GenerationService.execute
+
+    def fail_after_v4_staging(self, plan, transaction, *, commit=True):
+        original(self, plan, transaction, commit=False)
+        raise RuntimeError("forced staged verification failure")
+
+    monkeypatch.setattr(GenerationService, "execute", fail_after_v4_staging)
 
     code, _, stderr = invoke(
         root,
@@ -394,18 +800,777 @@ def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
     )
 
     assert code == 1
-    assert "structural postconditions" in stderr
+    assert "forced staged verification failure" in stderr
     assert not (root / "local_modules/broken").exists()
-    assert not (root / "android/.supernote-module/v3-runtime").exists()
+    assert not (root / "android/.supernote-module/v4-runtime").exists()
     assert not (root / "local_modules").exists()
     assert not (root / "android/.supernote-module").exists()
     for path, content in originals.items():
         assert path.read_bytes() == content
 
 
-def test_add_replaces_stale_v2_generated_runtime_transactionally(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("command", ["add", "update", "remove"])
+@pytest.mark.parametrize(
+    "interrupt_point",
+    [
+        "before_commit_persist",
+        "after_commit_persist",
+        "after_state_removal",
+        "after_journal_unlink",
+        "after_commit_return",
+    ],
+)
+def test_feature_operations_respect_every_durable_commit_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    command: str,
+    interrupt_point: str,
 ):
+    root = plugin(tmp_path)
+    if command in {"update", "remove"}:
+        assert invoke(
+            root, ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"]
+        )[0] == 0
+        if command == "update":
+            source = root / "local_modules/safe/android/src/main/cpp/feature.cpp"
+            source.write_text(source.read_text().replace("greet(", "greetAgain("))
+            arguments = ["--json", "update", "safe", "--skip-install", "--yes"]
+        else:
+            arguments = ["--json", "remove", "safe", "--skip-install", "--yes"]
+    else:
+        arguments = [
+            "--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"
+        ]
+    fired = False
+    original_persist = Transaction._persist
+    original_finish = Transaction.finish_commit
+    original_commit = Transaction.commit
+    original_checkpoint = Transaction.checkpoint
+
+    if interrupt_point in {"before_commit_persist", "after_commit_persist"}:
+        def interrupting_persist(self):
+            nonlocal fired
+            if self.data.get("phase") == "commit" and not fired:
+                fired = True
+                if interrupt_point == "after_commit_persist":
+                    original_persist(self)
+                raise KeyboardInterrupt
+            return original_persist(self)
+
+        monkeypatch.setattr(Transaction, "_persist", interrupting_persist)
+    elif interrupt_point == "after_state_removal":
+        def interrupting_checkpoint(self, name):
+            nonlocal fired
+            original_checkpoint(self, name)
+            if name == "after_abandon_state_removal" and not fired:
+                fired = True
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(Transaction, "checkpoint", interrupting_checkpoint)
+    elif interrupt_point == "after_journal_unlink":
+        def interrupting_finish(self):
+            nonlocal fired
+            if not fired:
+                original_finish(self)
+                fired = True
+                raise KeyboardInterrupt
+            return original_finish(self)
+
+        monkeypatch.setattr(Transaction, "finish_commit", interrupting_finish)
+    else:
+        def interrupting_commit(self):
+            nonlocal fired
+            original_commit(self)
+            if not fired:
+                fired = True
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(Transaction, "commit", interrupting_commit)
+
+    code, stdout, stderr = invoke(root, arguments)
+    payload = json.loads(stdout)
+
+    assert fired is True
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+    if interrupt_point == "before_commit_persist":
+        assert code == 130, stderr
+        assert payload["status"] == "cancelled"
+    else:
+        assert code == 0, stderr
+        assert payload["metadata"]["commit_durable"] is True
+        assert payload["cancellation"]["status"] == "completed"
+        assert payload["module"] is not None
+        assert payload["dependency"] is not None
+        assert payload["validation"] is not None
+        assert payload["metadata"]["generation_id"]
+        assert "built" in payload["metadata"]
+        assert "build_duration_ms" in payload["metadata"]
+        assert payload["next_action"] is not None
+        assert invoke(root, ["--json", "check"])[0] == 0
+
+
+def test_fresh_add_plan_conflict_removes_partial_add_and_preserves_parent_edit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    package_path = root / "package.json"
+    original_execute = GenerationService.execute
+
+    def concurrent_edit(self, plan, transaction, *, commit=True):
+        package = json.loads(package_path.read_text())
+        package["concurrent_user_edit"] = "keep"
+        package_path.write_text(json.dumps(package, indent=2) + "\n")
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_edit)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["metadata"]["conflict_reconciled"] is True
+    package = json.loads(package_path.read_text())
+    assert package["concurrent_user_edit"] == "keep"
+    assert "safe" not in package["dependencies"]
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+    assert invoke(root, ["--json", "doctor"])[0] in {0, 1}
+
+
+@pytest.mark.parametrize("target_kind", ["feature", "application", "plugin"])
+def test_fresh_add_conflict_preserves_every_concurrent_source_edit_exactly(
+    tmp_path: Path,
+    monkeypatch,
+    target_kind: str,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root, ["add", "existing", "--starter", "cpp", "--skip-install", "--yes"]
+    )[0] == 0
+    if target_kind == "feature":
+        target = root / "local_modules/existing/android/src/main/cpp/feature.cpp"
+    elif target_kind == "application":
+        target = main_application(root)
+    else:
+        target = root / "PluginConfig.json"
+    package_path = root / "package.json"
+    original_execute = GenerationService.execute
+    expected = f"preserved concurrent {target_kind}\n".encode("utf-8")
+    expected_mode = 0o600
+    expected_times = (3_000_000_000, 4_000_000_000)
+
+    def concurrent_edit(self, plan, transaction, *, commit=True):
+        target.write_bytes(expected)
+        target.chmod(expected_mode)
+        os.utime(target, ns=expected_times)
+        package = json.loads(package_path.read_text())
+        package["conflict_trigger"] = target_kind
+        package_path.write_text(json.dumps(package, indent=2) + "\n")
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_edit)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    metadata = target.lstat()
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["metadata"]["conflict_reconciled"] is True
+    assert metadata.st_mode & 0o7777 == expected_mode
+    assert metadata.st_atime_ns == expected_times[0]
+    assert metadata.st_mtime_ns == expected_times[1]
+    assert target.read_bytes() == expected
+    package = json.loads(package_path.read_text())
+    assert package["conflict_trigger"] == target_kind
+    assert "safe" not in package["dependencies"]
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+    assert invoke(root, ["--json", "doctor"])[0] in {0, 1}
+
+
+def test_fresh_add_conflict_preserves_metadata_changed_after_adoption_copy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root, ["add", "existing", "--starter", "cpp", "--skip-install", "--yes"]
+    )[0] == 0
+    target = root / "local_modules/existing/android/src/main/cpp/feature.cpp"
+    parent = target.parent
+    original_execute = GenerationService.execute
+    original_copy = transaction_module._copy_verified_entry
+    injected = False
+    expected_file_times = (81_000_000_000, 82_000_000_000)
+    expected_parent_times = (83_000_000_000, 84_000_000_000)
+
+    def concurrent_source_edit(self, plan, transaction, *, commit=True):
+        target.write_text("external source remains\n", encoding="utf-8")
+        return original_execute(self, plan, transaction, commit=commit)
+
+    def racing_copy(source, destination, *, attempts=3):
+        nonlocal injected
+        result = original_copy(source, destination, attempts=attempts)
+        if Path(source) == target and any(
+            "-adopt-" in part for part in Path(destination).parts
+        ):
+            if not injected:
+                injected = True
+                target.chmod(0o600)
+                os.utime(target, ns=expected_file_times)
+                parent.chmod(0o710)
+                os.utime(parent, ns=expected_parent_times)
+        return result
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_source_edit)
+    monkeypatch.setattr(transaction_module, "_copy_verified_entry", racing_copy)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    target_metadata = target.lstat()
+    parent_metadata = parent.lstat()
+
+    assert code == 1, (stderr, payload)
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["metadata"]["conflict_reconciled"] is True
+    assert target_metadata.st_mode & 0o7777 == 0o600
+    assert (target_metadata.st_atime_ns, target_metadata.st_mtime_ns) == expected_file_times
+    assert parent_metadata.st_mode & 0o7777 == 0o710
+    assert (parent_metadata.st_atime_ns, parent_metadata.st_mtime_ns) == expected_parent_times
+    assert target.read_text(encoding="utf-8") == "external source remains\n"
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+@pytest.mark.parametrize("interrupt_point", ["copy", "post_copy_verification"])
+def test_single_snapshot_interrupt_is_never_retried_or_swallowed(
+    tmp_path: Path,
+    monkeypatch,
+    interrupt_point: str,
+):
+    root = plugin(tmp_path)
+    call_count = 0
+    if interrupt_point == "copy":
+        def interrupting_copy(source, destination):
+            nonlocal call_count
+            call_count += 1
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            transaction_module, "copy_entry_no_follow", interrupting_copy
+        )
+    else:
+        original_verified_copy = transaction_module._copy_verified_entry
+
+        def interrupting_verification(source, destination, *, attempts=3):
+            nonlocal call_count
+            original_verified_copy(source, destination, attempts=attempts)
+            call_count += 1
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            transaction_module, "_copy_verified_entry", interrupting_verification
+        )
+
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 130, (stderr, payload)
+    assert call_count == 1
+    assert payload["status"] == "cancelled"
+    assert payload["cancellation"]["requested"] is True
+    assert payload["cancellation"]["status"] == "completed"
+    assert payload["rollback"]["status"] == "completed"
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+@pytest.mark.parametrize(
+    "interrupt_point",
+    [
+        "after_snapshot_adoption_payload_creation",
+        "after_snapshot_adoption_entry_update",
+        "after_snapshot_adoption_state_authority_write",
+        "after_snapshot_adoption_journal_write",
+    ],
+)
+def test_adoption_boundary_interrupt_is_reported_after_exact_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+    interrupt_point: str,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root, ["add", "existing", "--starter", "cpp", "--skip-install", "--yes"]
+    )[0] == 0
+    target = root / "local_modules/existing/android/src/main/cpp/feature.cpp"
+    original_execute = GenerationService.execute
+    original_checkpoint = Transaction.checkpoint
+    expected = b"external interruption state\n"
+    expected_times = (93_000_000_000, 94_000_000_000)
+    fired = False
+
+    def concurrent_edit(self, plan, transaction, *, commit=True):
+        target.write_bytes(expected)
+        target.chmod(0o600)
+        os.utime(target, ns=expected_times)
+        return original_execute(self, plan, transaction, commit=commit)
+
+    def interrupting_checkpoint(self, name):
+        nonlocal fired
+        original_checkpoint(self, name)
+        if name == interrupt_point and not fired:
+            fired = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_edit)
+    monkeypatch.setattr(Transaction, "checkpoint", interrupting_checkpoint)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    metadata = target.lstat()
+
+    assert code == 1, (stderr, payload)
+    assert fired is True
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["cancellation"]["requested"] is True
+    assert payload["cancellation"]["status"] == "completed"
+    assert payload["rollback"]["status"] == "completed"
+    assert metadata.st_mode & 0o7777 == 0o600
+    assert (metadata.st_atime_ns, metadata.st_mtime_ns) == expected_times
+    assert target.read_bytes() == expected
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+@pytest.mark.parametrize(
+    "interrupt_point",
+    [
+        "after_package_baseline_payload_creation",
+        "after_package_baseline_entry_update",
+        "after_package_baseline_state_authority_write",
+        "after_package_baseline_journal_write",
+    ],
+)
+def test_package_reconciliation_interrupt_preserves_json_and_cancellation(
+    tmp_path: Path,
+    monkeypatch,
+    interrupt_point: str,
+):
+    root = plugin(tmp_path)
+    package = root / "package.json"
+    original_execute = GenerationService.execute
+    original_checkpoint = Transaction.checkpoint
+    live = (
+        b'{\n\t"name":"fixture",\n\t"dependencies":'
+        b'{"safe":"file:./local_modules/safe"},\n\t"external":true\n}\n'
+    )
+    expected = (
+        b'{\n\t"name":"fixture",\n\t"dependencies":{},'
+        b'\n\t"external":true\n}\n'
+    )
+    expected_times = (95_000_000_000, 96_000_000_000)
+    fired = False
+
+    def concurrent_package_edit(self, plan, transaction, *, commit=True):
+        package.write_bytes(live)
+        package.chmod(0o600)
+        os.utime(package, ns=expected_times)
+        return original_execute(self, plan, transaction, commit=commit)
+
+    def interrupting_checkpoint(self, name):
+        nonlocal fired
+        original_checkpoint(self, name)
+        if name == interrupt_point and not fired:
+            fired = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_package_edit)
+    monkeypatch.setattr(Transaction, "checkpoint", interrupting_checkpoint)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    metadata = package.lstat()
+
+    assert code == 1, (stderr, payload)
+    assert fired is True
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["cancellation"]["requested"] is True
+    assert payload["cancellation"]["status"] == "completed"
+    assert payload["rollback"]["status"] == "completed"
+    assert metadata.st_mode & 0o7777 == 0o600
+    assert (metadata.st_atime_ns, metadata.st_mtime_ns) == expected_times
+    assert package.read_bytes() == expected
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+def test_fresh_add_conflict_preserves_custom_package_bytes_and_metadata_exactly(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    package_path = root / "package.json"
+    original_execute = GenerationService.execute
+    live = (
+        '{\n\t"name": "fixture",\n\t"dependencies": '
+        '{"keep": "workspace:*", "safe": "file:./local_modules/safe"},\n'
+        '\t"concurrent": [1, 2, 3]\n}\n'
+    ).encode("utf-8")
+    expected = (
+        '{\n\t"name": "fixture",\n\t"dependencies": '
+        '{"keep": "workspace:*"},\n\t"concurrent": [1, 2, 3]\n}\n'
+    ).encode("utf-8")
+    expected_times = (13_000_000_000, 14_000_000_000)
+
+    def concurrent_edit(self, plan, transaction, *, commit=True):
+        package_path.write_bytes(live)
+        package_path.chmod(0o600)
+        os.utime(package_path, ns=expected_times)
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_edit)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    metadata = package_path.lstat()
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert package_path.read_bytes() == expected
+    assert metadata.st_mode & 0o7777 == 0o600
+    assert (metadata.st_atime_ns, metadata.st_mtime_ns) == expected_times
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        b'{"name":"fixture","dependencies":{"keep":"workspace:*"}}\n',
+        b'{"name":"fixture","private":true}\n',
+    ],
+)
+def test_source_only_add_conflict_restores_exact_pre_add_package_bytes(
+    tmp_path: Path,
+    monkeypatch,
+    original: bytes,
+):
+    root = plugin(tmp_path)
+    package_path = root / "package.json"
+    package_path.write_bytes(original)
+    package_path.chmod(0o600)
+    expected_times = (17_000_000_000, 18_000_000_000)
+    os.utime(package_path, ns=expected_times)
+    original_execute = GenerationService.execute
+
+    def concurrent_source_edit(self, plan, transaction, *, commit=True):
+        target = root / "local_modules/beta"
+        staged = stage_feature(
+            FeatureConfig(
+                target,
+                "beta",
+                "4.0.0",
+                "com.example.beta",
+                "Beta",
+                starters=(StarterFamily.NATIVE,),
+            )
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, target)
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_source_edit)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    current = package_path.lstat()
+
+    assert code == 1, (stderr, payload)
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert package_path.read_bytes() == original
+    assert current.st_mode & 0o7777 == 0o600
+    assert (current.st_atime_ns, current.st_mtime_ns) == expected_times
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+
+
+@pytest.mark.parametrize(
+    "ambiguous",
+    [
+        b'{"name":"fixture","dependencies":{"safe":"file:./local_modules/safe"},"dependencies":{}}\n',
+        b'{"name":"fixture","dependencies":{"safe":"file:./local_modules/safe","safe":"other"}}\n',
+        b'{"name":"fixture","dependencies":{"safe":"other","safe":"file:./local_modules/safe"}}\n',
+    ],
+)
+def test_ambiguous_dependency_conflict_retains_recovery_authority(
+    tmp_path: Path,
+    monkeypatch,
+    ambiguous: bytes,
+):
+    root = plugin(tmp_path)
+    package_path = root / "package.json"
+    original_execute = GenerationService.execute
+
+    def ambiguous_edit(self, plan, transaction, *, commit=True):
+        package_path.write_bytes(ambiguous)
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", ambiguous_edit)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 3, stderr
+    assert payload["status"] == "partial"
+    assert package_path.read_bytes() == ambiguous
+    assert (root / ".supernote-module-transaction.json").exists()
+    assert (root / "local_modules/safe").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX entry-kind regression fixture")
+@pytest.mark.parametrize("replacement_kind", ["missing", "symlink", "directory", "fifo"])
+def test_fresh_add_conflict_preserves_non_regular_package_state_without_following(
+    tmp_path: Path,
+    monkeypatch,
+    replacement_kind: str,
+):
+    root = plugin(tmp_path)
+    package_path = root / "package.json"
+    outside = tmp_path / "outside-package.json"
+    outside.write_text('{"sentinel":"unchanged"}\n', encoding="utf-8")
+    original_execute = GenerationService.execute
+
+    def replace_package(self, plan, transaction, *, commit=True):
+        package_path.unlink()
+        if replacement_kind == "symlink":
+            package_path.symlink_to(outside)
+        elif replacement_kind == "directory":
+            package_path.mkdir()
+            (package_path / "sentinel").write_text("directory remains\n")
+        elif replacement_kind == "fifo":
+            os.mkfifo(package_path)
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", replace_package)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, (stderr, payload)
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+    if replacement_kind == "missing":
+        assert entry_kind(package_path) is None
+    elif replacement_kind == "symlink":
+        assert entry_kind(package_path) == "symlink"
+        assert os.readlink(package_path) == str(outside)
+        assert outside.read_text(encoding="utf-8") == '{"sentinel":"unchanged"}\n'
+    elif replacement_kind == "directory":
+        assert entry_kind(package_path) == "directory"
+        assert (package_path / "sentinel").read_text() == "directory remains\n"
+    else:
+        assert entry_kind(package_path) == "other"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="mkfifo is a POSIX regression fixture")
+@pytest.mark.parametrize("scoped", [False, True])
+def test_fresh_add_conflict_does_not_enter_external_feature_build_cache(
+    tmp_path: Path,
+    monkeypatch,
+    scoped: bool,
+):
+    root = plugin(tmp_path)
+    npm_name = "@scope/beta" if scoped else "beta"
+    destination = (
+        root / "local_modules/@scope/beta"
+        if scoped
+        else root / "local_modules/beta"
+    )
+    original_execute = GenerationService.execute
+
+    def concurrent_feature(self, plan, transaction, *, commit=True):
+        staged = stage_feature(
+            FeatureConfig(
+                destination,
+                npm_name,
+                "4.0.0",
+                "com.example.beta",
+                "Beta",
+                starters=(StarterFamily.NATIVE,),
+            )
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, destination)
+        cache = destination / "android/build"
+        cache.mkdir(parents=True)
+        os.mkfifo(cache / "worker.pipe")
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_feature)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert destination.is_dir()
+    assert (destination / "android/build/worker.pipe").exists()
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX link identity test")
+def test_fresh_add_conflict_preserves_new_tree_link_deletion_and_parent_metadata(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    parent = root / "android/app"
+    deleted = root / "PluginConfig.json"
+    created = parent / "concurrent/nested"
+    link = created / "relative-link"
+    package_path = root / "package.json"
+    original_execute = GenerationService.execute
+    parent_times = (15_000_000_000, 16_000_000_000)
+    created_times = (17_000_000_000, 18_000_000_000)
+
+    def concurrent_edit(self, plan, transaction, *, commit=True):
+        deleted.unlink()
+        created.mkdir(parents=True)
+        (created / "value.txt").write_text("external\n", encoding="utf-8")
+        os.symlink("value.txt", link)
+        created.chmod(0o700)
+        os.utime(created, ns=created_times)
+        parent.chmod(0o750)
+        os.utime(parent, ns=parent_times)
+        package = json.loads(package_path.read_text())
+        package["concurrent_tree"] = True
+        package_path.write_text(json.dumps(package, indent=2) + "\n")
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_edit)
+    code, stdout, stderr = invoke(
+        root,
+        ["--json", "add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+    payload = json.loads(stdout)
+    parent_metadata = parent.lstat()
+    created_metadata = created.lstat()
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert not deleted.exists()
+    assert (created / "value.txt").read_text(encoding="utf-8") == "external\n"
+    assert link.is_symlink()
+    assert os.readlink(link) == "value.txt"
+    assert parent_metadata.st_mode & 0o7777 == 0o750
+    assert (parent_metadata.st_atime_ns, parent_metadata.st_mtime_ns) == parent_times
+    assert created_metadata.st_mode & 0o7777 == 0o700
+    assert (created_metadata.st_atime_ns, created_metadata.st_mtime_ns) == created_times
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / ".supernote-module-transaction.json").exists()
+
+
+def test_targeted_dependency_conflict_preserves_concurrent_parent_edit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root, ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"]
+    )[0] == 0
+    package_path = root / "package.json"
+    package = json.loads(package_path.read_text())
+    package["dependencies"].pop("safe")
+    package_path.write_text(json.dumps(package, indent=2) + "\n")
+    original_execute = GenerationService.execute
+
+    def concurrent_edit(self, plan, transaction, *, commit=True):
+        package = json.loads(package_path.read_text())
+        package["concurrent_user_edit"] = "keep"
+        package_path.write_text(json.dumps(package, indent=2) + "\n")
+        return original_execute(self, plan, transaction, commit=commit)
+
+    monkeypatch.setattr(GenerationService, "execute", concurrent_edit)
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "safe", "--skip-install", "--yes"]
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    after = json.loads(package_path.read_text())
+    assert after["concurrent_user_edit"] == "keep"
+    assert "safe" not in after["dependencies"]
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+def test_targeted_noop_rejects_semantic_source_race(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root, ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"]
+    )[0] == 0
+    source = root / "local_modules/safe/android/src/main/cpp/feature.cpp"
+    original_plan = GenerationService.plan
+
+    def racing_plan(self, **kwargs):
+        plan = original_plan(self, **kwargs)
+        source.write_text(source.read_text().replace("greet(", "greetAgain("))
+        return plan
+
+    monkeypatch.setattr(GenerationService, "plan", racing_plan)
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "safe", "--skip-install", "--yes"]
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert "greetAgain(" in source.read_text()
+
+
+def test_add_rejects_stale_v2_generated_runtime_without_mutation(tmp_path: Path):
     root = plugin(tmp_path)
     legacy_runtime = root / "android/.supernote-module/v2-runtime"
     legacy_runtime.mkdir(parents=True)
@@ -426,47 +1591,18 @@ def test_add_replaces_stale_v2_generated_runtime_transactionally(
         "dependencies { implementation project(':user-library') }\n",
         encoding="utf-8",
     )
+    before = inventory_project(root)
 
     code, _, stderr = invoke(
         root, ["add", "typed", "--starter", "cpp", "--skip-install", "--yes"]
     )
 
-    assert code == 0, stderr
-    assert not legacy_runtime.exists()
-    assert "supernote-module-v2" not in settings.read_text()
-    assert "supernote-module-v2" not in app_build.read_text()
-    assert "include ':user-library'" in settings.read_text()
-    assert "project(':user-library')" in app_build.read_text()
-    assert (root / "android/.supernote-module/v3-runtime").is_dir()
-
-    # A later public-operation failure restores the exact old generated state.
-    assert invoke(
-        root, ["remove", "typed", "--skip-install", "--yes"]
-    )[0] == 0
-    legacy_runtime.mkdir(parents=True)
-    proof = legacy_runtime / "generated-proof.txt"
-    proof.write_text("v2 rollback\n", encoding="utf-8")
-    settings.write_text(
-        settings.read_text()
-        + "// supernote-module-v2-runtime\nlegacy settings\n"
-        "// end supernote-module-v2-runtime\n",
-        encoding="utf-8",
-    )
-    before_settings = settings.read_bytes()
-    before_proof = proof.read_bytes()
-    monkeypatch.setattr(
-        "supernote_module_generator.feature_operations.FeatureOperationService.verify_generated_state",
-        lambda self: ["forced structural failure"],
-    )
-
-    code, _, _ = invoke(
-        root, ["add", "broken", "--starter", "cpp", "--skip-install", "--yes"]
-    )
-
     assert code == 1
-    assert settings.read_bytes() == before_settings
-    assert proof.read_bytes() == before_proof
-    assert not (root / "android/.supernote-module/v3-runtime").exists()
+    assert "Unsupported legacy" in stderr
+    assert "does not migrate" in stderr
+    assert inventory_project(root) == before
+    assert legacy_runtime.is_dir()
+    assert not (root / "android/.supernote-module/v4-runtime").exists()
 
 
 @pytest.mark.skipif(
@@ -476,7 +1612,9 @@ def test_add_replaces_stale_v2_generated_runtime_transactionally(
 def test_non_utf8_dependency_failure_is_structured_and_restores_exact_parents(
     tmp_path: Path, monkeypatch
 ):
-    root = plugin(tmp_path, npm_lock=True)
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    root = plugin(plugin_root, npm_lock=True)
     tools = tmp_path / "tools"
     tools.mkdir()
     node = tools / "node"
@@ -528,7 +1666,7 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
         ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
     )[0] == 0
     feature = root / "local_modules/safe"
-    runtime_before = (root / "android/.supernote-module/v3-runtime/feature-registry.json").read_bytes()
+    runtime_before = (root / "android/.supernote-module/v4-runtime/feature-registry.json").read_bytes()
 
     attempts = 0
 
@@ -546,7 +1684,7 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
     assert "forced install failure" in stderr
     assert feature.is_dir()
     assert (
-        root / "android/.supernote-module/v3-runtime/feature-registry.json"
+        root / "android/.supernote-module/v4-runtime/feature-registry.json"
     ).read_bytes() == runtime_before
     assert json.loads((root / "package.json").read_text())["dependencies"]["safe"]
 
@@ -587,7 +1725,7 @@ def test_failed_or_interrupted_dependency_refresh_exactly_restores_main_applicat
     assert code == (130 if interrupted else 1), stderr
     assert application.read_bytes() == before
     expected_marker_count = 0 if command == "add" else 1
-    assert application.read_text().count("supernote-module-v3-package") == (
+    assert application.read_text().count("supernote-module-v4-package") == (
         expected_marker_count * 2
     )
     assert not (root / ".supernote-module-transaction.json").exists()
@@ -618,21 +1756,31 @@ def test_partial_then_startup_recovery_preserves_restored_main_application(
     assert application.read_bytes() == before
 
 
-def test_empty_validation_rejects_leftover_v2_runtime_and_package_wiring(
+def test_empty_validation_rejects_unmanifested_v4_runtime_and_package_wiring(
     tmp_path: Path,
 ):
     root = plugin(tmp_path)
     application = main_application(root)
     set_runtime_wiring(root, enabled=True)
+    before = {
+        path: path.read_bytes()
+        for path in (
+            root / "android/settings.gradle",
+            root / "android/app/build.gradle",
+            application,
+        )
+    }
 
     code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 1
-    assert "V3 runtime blocks; expected 0" in stderr
-    assert application.read_text().count("supernote-module-v3-package") == 2
+    assert "without a schema-4 integrity manifest" in stderr
+    assert "cannot prove ownership" in stderr
+    assert {path: path.read_bytes() for path in before} == before
+    assert application.read_text().count("supernote-module-v4-package") == 2
 
 
-def test_empty_validation_rejects_leftover_package_registration_alone(
+def test_empty_validation_rejects_unmanifested_package_registration_alone(
     tmp_path: Path,
 ):
     root = plugin(tmp_path)
@@ -642,12 +1790,15 @@ def test_empty_validation_rejects_leftover_package_registration_alone(
     set_runtime_wiring(root, enabled=True)
     (root / "android/settings.gradle").write_bytes(settings)
     (root / "android/app/build.gradle").write_bytes(app_build)
+    before = application.read_bytes()
 
     code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 1
-    assert "V3 package blocks; expected 0" in stderr
-    assert application.read_text().count("supernote-module-v3-package") == 2
+    assert "without a schema-4 integrity manifest" in stderr
+    assert "cannot prove ownership" in stderr
+    assert application.read_bytes() == before
+    assert application.read_text().count("supernote-module-v4-package") == 2
 
 
 def test_feature_validation_rejects_missing_main_application_registration(
@@ -671,8 +1822,9 @@ def test_feature_validation_rejects_missing_main_application_registration(
     code, _, stderr = invoke(root, ["validate", "safe"])
 
     assert code == 1
-    assert "V3 package blocks; expected 1" in stderr
-    assert "supernote-module-v3-package" not in application.read_text()
+    assert "SNV4_WIRING_INVALID" in stderr
+    assert "expected 1 start/end pair" in stderr
+    assert "supernote-module-v4-package" not in application.read_text()
 
 
 def test_remove_preserves_build_outputs_unless_cleanup_is_explicit(tmp_path: Path):
@@ -727,7 +1879,86 @@ def test_remove_all_is_explicit_and_removes_every_feature(tmp_path: Path):
     assert "2 features" in stdout
     assert not (root / "local_modules/one").exists()
     assert not (root / "local_modules/two").exists()
-    assert not (root / "android/.supernote-module/v3-runtime").exists()
+    assert not (root / "android/.supernote-module/v4-runtime").exists()
+
+
+def test_remove_json_exposes_the_complete_v4_plan_and_actual_changes(tmp_path: Path):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+
+    code, stdout, stderr = invoke(
+        root, ["--json", "remove", "safe", "--skip-install", "--yes"]
+    )
+    payload = json.loads(stdout)
+
+    assert code == 0, stderr
+    assert payload["requested_targets"] == ["safe"]
+    assert set(payload["affected_targets"]) >= {
+        "safe",
+        "shared runtime",
+        "plugin wiring",
+        "integrity manifest",
+    }
+    assert payload["validation"]["structural"] == "passed"
+    assert payload["metadata"]["generation_id"]
+    changes = {
+        (
+            Path(item["path"]).relative_to(root).as_posix(),
+            item["action"],
+            item["ownership"],
+        )
+        for item in payload["changes"]
+    }
+    assert ("local_modules/safe", "delete", "feature_implementation") in changes
+    assert (
+        "android/.supernote-module/v4-runtime",
+        "delete",
+        "plugin_runtime",
+    ) in changes
+    assert ("package.json", "update", "parent_dependency") in changes
+    assert any(scope == "plugin_wiring" for _path, _action, scope in changes)
+    assert payload["actual_changes"] == payload["changes"]
+    assert not (root / "local_modules/safe").exists()
+    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert invoke(root, ["--json", "check"])[0] == 0
+
+
+def test_remove_plan_conflict_preserves_external_remaining_feature_edit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    for name in ("alpha", "beta"):
+        assert invoke(
+            root,
+            ["add", name, "--starter", "cpp", "--skip-install", "--yes"],
+        )[0] == 0
+    external = root / "local_modules/beta/android/src/main/cpp/feature.cpp"
+    original_plan = GenerationService.plan
+
+    def racing_plan(self, **kwargs):
+        plan = original_plan(self, **kwargs)
+        if kwargs.get("operation") == "remove":
+            external.write_text(
+                external.read_text().replace("greet(", "concurrentEdit(")
+            )
+        return plan
+
+    monkeypatch.setattr(GenerationService, "plan", racing_plan)
+    code, stdout, stderr = invoke(
+        root, ["--json", "remove", "alpha", "--skip-install", "--yes"]
+    )
+    payload = json.loads(stdout)
+
+    assert code == 1, stderr
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert "concurrentEdit(" in external.read_text()
+    assert (root / "local_modules/alpha").is_dir()
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert invoke(root, ["--json", "check"])[0] == 1
 
 
 def test_package_manager_precedence_for_noninteractive_add(tmp_path: Path):
@@ -793,14 +2024,14 @@ def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
         gradle.write_text(
             "@echo off\r\n"
             'if "%1"=="--version" exit /b 0\r\n'
-            'if "%1"==":supernote-v3-runtime:generateSupernoteDebugSemantics" exit /b 0\r\n'
+            'if "%1"==":supernote-v4-runtime:generateSupernoteDebugSemantics" exit /b 0\r\n'
             'if "%1"==":app:assembleDebug" exit /b 0\r\n'
             "exit /b 1\r\n",
             encoding="utf-8",
         )
     else:
         gradle.write_text(
-            '#!/bin/sh\ncase "$1" in\n  --version|:supernote-v3-runtime:generateSupernoteDebugSemantics|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
+            '#!/bin/sh\ncase "$1" in\n  --version|:supernote-v4-runtime:generateSupernoteDebugSemantics|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
             encoding="utf-8",
         )
         gradle.chmod(0o755)
@@ -832,3 +2063,39 @@ def test_add_rejects_local_modules_symlink_that_escapes_plugin_root(
     assert code == 2
     assert "target resolves outside the Supernote plugin" in stderr
     assert not (outside / "escape").exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        "after_planning",
+        "after_staging",
+        "after_first_file_replacement",
+        "after_wiring",
+        "after_dependency_edit",
+    ],
+)
+def test_add_fault_injection_restores_exact_project_inventory(
+    tmp_path: Path,
+    monkeypatch,
+    checkpoint: str,
+):
+    root = plugin(tmp_path)
+    before = inventory_project(root)
+    original = Transaction.checkpoint
+
+    def inject(transaction: Transaction, name: str) -> None:
+        if name == checkpoint:
+            raise RuntimeError(f"injected failure at {name}")
+        original(transaction, name)
+
+    monkeypatch.setattr(Transaction, "checkpoint", inject)
+
+    code, _, stderr = invoke(
+        root,
+        ["add", "faulted", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+
+    assert code == 1
+    assert f"injected failure at {checkpoint}" in stderr
+    assert inventory_project(root) == before

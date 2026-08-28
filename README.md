@@ -60,19 +60,20 @@ supernote-module doctor
 supernote-module remove document --yes
 ```
 
-The generator uses the plugin root's optional `devconfig.json` for plugin
-operations and Doctor. `javaHome` selects the Java used by Gradle and Doctor,
-`androidSdk` sets both Android SDK environment variables and keeps
-`android/local.properties` synchronized, and `adb` is passed to child processes
-as `ADB_BIN`. Missing or `null` values continue to use the environment that
-launched the generator. A malformed file or an unusable Java or Android SDK
-directory produces a warning and falls back to that environment. An unusable
-ADB path also produces a warning but remains available as `ADB_BIN`, matching
-the plugin scripts.
+The generator uses the plugin root's optional `devconfig.json` for plugin operations
+and Doctor. `javaHome` selects Gradle's Java, `androidSdk` sets both SDK variables,
+and `adb` is passed to children as `ADB_BIN`. A missing, `null`, malformed, or unusable
+value warns and preserves the corresponding launch-environment value.
 
-The environment overrides apply only while the command is running and do not
-change the parent shell. Synchronizing `androidSdk` does update
-`android/local.properties` on disk.
+The overrides apply only while the command runs and do not change the parent shell
+or `android/local.properties` on disk. Build and check paths are source-tree read-only.
+
+Doctor reads the literal `compileSdkVersion`, `buildToolsVersion`, and `ndkVersion`;
+it never substitutes another installed NDK. JSON distinguishes `configured`, `found`,
+`selected`, `executable_probed`, `compiler_probed`, `project_built`, and
+`device_tested`. Plain Doctor never infers a build or device test from file detection.
+Use `supernote-module doctor --build` for the read-only Gradle/KSP/Kotlin/CMake/JNI/JSI
+gate; `device_tested` stays false until a separate device canary.
 
 Removal preserves plugin build output by default. To remove the three known
 generated build directories as part of an explicit removal:
@@ -92,23 +93,40 @@ with a Supernote marker.
 
 In C++, markers are exact source comments:
 
+<!-- snv4-release-example: readme-cpp android/src/main/cpp/feature.cpp -->
 ```cpp
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
 // @SupernotePluginExport
-std::int32_t pageCount();
+std::int32_t pageCount() {
+  return 42;
+}
 
 // @SupernotePluginInternal
-void rebuildIndex();
+void rebuildIndex() {}
 
 // @SupernotePluginExport
 // @SupernotePluginAsync
-std::vector<std::byte> loadPage(std::int32_t page);
+std::vector<std::byte> loadPage(std::int32_t page) {
+  (void)page;
+  return {};
+}
 
-void ordinaryHelper(); // ignored
+void ordinaryHelper() {} // ignored
 ```
 
 For Kotlin and Java, use the generated annotations with the same names:
 
+<!-- snv4-release-example: readme-jvm android/src/main/java/com/example/readme_jvm/FeatureApi.kt -->
 ```kotlin
+package com.example.readme_jvm
+
+import supernote.generated.annotations.SupernotePluginAsync
+import supernote.generated.annotations.SupernotePluginExport
+import supernote.generated.annotations.SupernotePluginInternal
+
 @SupernotePluginExport
 fun pageCount(): Int = 42
 
@@ -130,7 +148,15 @@ code do not change the public API on their own.
 publishes members or construction by itself. Every JavaScript-visible function,
 method, field, and constructor requires its own explicit marker:
 
+<!-- snv4-release-example: readme-cpp android/src/main/cpp/FeatureTypes.hpp -->
 ```cpp
+#pragma once
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 // @SupernotePluginValue
 struct Point {
   // @SupernotePluginExport
@@ -143,22 +169,27 @@ struct Point {
 class Stroke {
 public:
   // @SupernoteConstructor
-  explicit Stroke(std::vector<Point> points);
+  explicit Stroke(std::vector<Point> points) : points_(std::move(points)) {}
 
   // @SupernotePluginExport
-  bool intersects(const std::shared_ptr<Stroke> &other) const;
+  bool intersects(const std::shared_ptr<Stroke> &other) const {
+    return other != nullptr;
+  }
 
   // @SupernotePluginExport
-  std::shared_ptr<Stroke> transformed(Point offset) const;
+  std::shared_ptr<Stroke> transformed(Point offset) const {
+    (void)offset;
+    return std::make_shared<Stroke>(*this);
+  }
 
   // @SupernotePluginExport
   std::string label;
 
   void resetInternalCache();  // ignored
-};
 
-// @SupernotePluginExport
-std::shared_ptr<Stroke> loadStroke(std::string path);
+private:
+  std::vector<Point> points_;
+};
 ```
 
 JavaScript receives stable runtime-local identity: if the same live native
@@ -177,7 +208,7 @@ annotation.
 
 ## Supported types and copied values
 
-V3 supports these JavaScript and TypeScript mappings:
+V4 supports these JavaScript and TypeScript mappings:
 
 | Supernote value | JavaScript/TypeScript |
 | --- | --- |
@@ -245,11 +276,28 @@ when the underlying objects are collected.
 
 ## Validation
 
-`supernote-module validate` checks generated structure by default; `--build`
-also invokes the Android build. A successful local build proves generation and
-compilation for that environment, not that a particular Supernote firmware,
-PluginHost, linker namespace, or SELinux policy will load and execute the code.
-Target-device behavior must be validated on the intended device.
+The integrity manifest records the required official-template capability. Compare the
+surrounding plugin's Bash and PowerShell launch scripts without writing anything:
+
+```bash
+supernote-module template status
+```
+
+Preview or explicitly apply the recognized capability update:
+
+```bash
+supernote-module template sync --dry-run
+supernote-module template sync --yes
+```
+
+Sync is transactional and refuses missing files, unsafe entry kinds, or unrecognized
+script content. A synchronized launch still reports runtime success as unverified
+unless it observes a plugin-correlated marker.
+
+`supernote-module validate` checks generated structure by default; `--build` also
+invokes Android. A local build proves generation and compilation for that environment,
+not that a particular Supernote firmware, PluginHost, linker namespace, or SELinux
+policy will execute the code. Validate target-device behavior on the intended device.
 
 PluginHost can load up to 32 native generations for one plugin component in the
 same process. Restart PluginHost before installing another changed native
@@ -263,7 +311,7 @@ installation, and device debugging are covered by the
 
 See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md)
 for development and validation rules and
-[V3 architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/V3-ARCHITECTURE.md)
+[V4 architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/V4-ARCHITECTURE.md)
 for the runtime and type model.
 
 ## License

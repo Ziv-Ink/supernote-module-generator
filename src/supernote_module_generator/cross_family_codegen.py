@@ -1,11 +1,10 @@
-"""Generate copied C++ to JVM internal-route conversions for V3 values."""
+"""Generate copied C++ to JVM internal-route conversions for V4 values."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterable
 
 from .binding_codegen import (
     scan_cpp_class_source_model,
@@ -50,16 +49,16 @@ def _suffix(value: SemanticType) -> str:
 
 
 def _to_name(value: SemanticType) -> str:
-    return f"supernote_v3_cross_to_jvm_{_suffix(value)}"
+    return f"supernote_v4_cross_to_jvm_{_suffix(value)}"
 
 
 def _from_name(value: SemanticType) -> str:
-    return f"supernote_v3_cross_from_jvm_{_suffix(value)}"
+    return f"supernote_v4_cross_from_jvm_{_suffix(value)}"
 
 
 def _route_expression(key: str, adapter: str, descriptor: str, method: str) -> str:
     return (
-        "supernote_v3_jvm_route(feature, "
+        "supernote_v4_jvm_route(feature, "
         + json.dumps(key)
         + ", "
         + json.dumps(adapter)
@@ -422,7 +421,7 @@ class CrossFamilyRenderer:
     def _helper_route(self, method: str, descriptor: str) -> str:
         digest = hashlib.sha256(self.feature_id.encode("utf-8")).hexdigest()[:20]
         return _route_expression(
-            f"jvm-v3-cross-helper:{method}:{descriptor}",
+            f"jvm-v4-cross-helper:{method}:{descriptor}",
             f"supernote.generated.adapters.Identity_{digest}",
             descriptor,
             method,
@@ -486,7 +485,7 @@ class CrossFamilyRenderer:
                 "  }",
                 "  if (name == nullptr) throw std::runtime_error(\"unknown C++ enum value\");",
                 "  const std::string text(name);",
-                f"  auto route = {_route_expression('jvm-v3-cross-enum-from:' + value.type_id, adapter, descriptor, 'fromName')};",
+                f"  auto route = {_route_expression('jvm-v4-cross-enum-from:' + value.type_id, adapter, descriptor, 'fromName')};",
                 "  jvalue arguments[1]{};",
                 "  arguments[0].l = write_byte_array(env, reinterpret_cast<const std::byte *>(text.data()), text.size());",
                 "  auto result = env->CallStaticObjectMethodA(static_cast<jclass>(route->adapter_class.get()), route->method, arguments);",
@@ -518,7 +517,7 @@ class CrossFamilyRenderer:
             cpp_value = next(item for item in self.cpp.values if item.named_type.type_id == value.type_id)
             jvm_value = next(item for item in self.jvm.values if item.named_type.type_id == value.type_id)
             lines.extend([
-                f"  auto route = {_route_expression('jvm-v3-cross-value:' + value.type_id, _adapter_class(jvm_value.constructor.adapter_identity), jvm_value.constructor.adapter_descriptor, 'invoke')};",
+                f"  auto route = {_route_expression('jvm-v4-cross-value:' + value.type_id, _adapter_class(jvm_value.constructor.adapter_identity), jvm_value.constructor.adapter_descriptor, 'invoke')};",
                 f"  jvalue arguments[{max(1, len(jvm_value.constructor_fields) + 1)}]{{}};",
                 "  auto runtime_session = feature->runtime();",
                 "  auto context = runtime_session ? runtime_session->platform_context() : nullptr;",
@@ -605,7 +604,7 @@ class CrossFamilyRenderer:
                     f"(L{jvm_enum.named_type.owner_class.replace('.', '/')};)[B"
                 )
                 lines.extend([
-                    f"  auto route = {_route_expression('jvm-v3-cross-enum-name:' + value.type_id, adapter, enum_descriptor, 'name')};",
+                    f"  auto route = {_route_expression('jvm-v4-cross-enum-name:' + value.type_id, adapter, enum_descriptor, 'name')};",
                     "  jvalue arguments[1]{}; arguments[0].l = value;",
                     "  auto raw = env->CallStaticObjectMethodA(static_cast<jclass>(route->adapter_class.get()), route->method, arguments);",
                     "  require_no_implementation_exception(env);",
@@ -644,7 +643,7 @@ class CrossFamilyRenderer:
                 for index, cpp_field in enumerate(cpp_value.fields):
                     field = jvm_fields[cpp_field.public_name]
                     adapter = _adapter_class(field.accessor_identity)
-                    lines.append(f"  auto field_route_{index} = {_route_expression('jvm-v3-cross-field:' + field.field_id, adapter, field.getter_descriptor, 'get')};")
+                    lines.append(f"  auto field_route_{index} = {_route_expression('jvm-v4-cross-field:' + field.field_id, adapter, field.getter_descriptor, 'get')};")
                     lines.append(f"  jvalue field_arguments_{index}[1]{{}}; field_arguments_{index}[0].l = value;")
                     if self._direct_primitive(field.semantic_type):
                         assert field.semantic_type.scalar is not None

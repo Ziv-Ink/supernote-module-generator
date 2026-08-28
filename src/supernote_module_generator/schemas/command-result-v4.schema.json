@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Ziv-Ink/supernote-module-generator/schemas/command-result-v4.schema.json",
+  "title": "Supernote Module Generator V4 command result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tool_version",
+    "command",
+    "status",
+    "exit_code",
+    "duration_ms",
+    "requested_targets",
+    "affected_targets",
+    "module",
+    "modules",
+    "changes",
+    "actual_changes",
+    "issues",
+    "dependency",
+    "validation",
+    "doctor",
+    "rollback",
+    "warnings",
+    "cancellation",
+    "diagnostics",
+    "next_action",
+    "recovery",
+    "error",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": {"const": "4.0"},
+    "tool_version": {"type": "string", "minLength": 1},
+    "command": {"type": "string", "minLength": 1},
+    "status": {
+      "enum": ["success", "failure", "cancelled", "partial"]
+    },
+    "exit_code": {"type": "integer", "minimum": 0},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "requested_targets": {"$ref": "#/$defs/stringList"},
+    "affected_targets": {"$ref": "#/$defs/stringList"},
+    "module": {
+      "oneOf": [{"$ref": "#/$defs/module"}, {"type": "null"}]
+    },
+    "modules": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/moduleWithValidation"}
+    },
+    "changes": {"$ref": "#/$defs/changes"},
+    "actual_changes": {"$ref": "#/$defs/changes"},
+    "issues": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/issue"}
+    },
+    "dependency": {"type": ["object", "null"]},
+    "validation": {
+      "oneOf": [{"$ref": "#/$defs/validation"}, {"type": "null"}]
+    },
+    "doctor": {
+      "oneOf": [{"$ref": "#/$defs/doctor"}, {"type": "null"}]
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "status", "restored"],
+      "properties": {
+        "attempted": {"type": "boolean"},
+        "status": {"type": "string"},
+        "restored": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "message", "phase", "recovery"],
+        "properties": {
+          "kind": {"type": "string"},
+          "message": {"type": "string"},
+          "phase": {"type": "string"},
+          "recovery": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "cancellation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "status", "reason"],
+      "properties": {
+        "requested": {"type": "boolean"},
+        "status": {"enum": ["not_requested", "completed", "partial"]},
+        "reason": {"type": ["string", "null"]}
+      }
+    },
+    "diagnostics": {"$ref": "#/$defs/stringList"},
+    "next_action": {"type": ["string", "null"]},
+    "recovery": {"type": ["object", "null"]},
+    "error": {
+      "oneOf": [{"$ref": "#/$defs/error"}, {"type": "null"}]
+    },
+    "metadata": {"type": "object"}
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "module": {
+      "type": "object",
+      "required": [
+        "package_name", "javascript_name", "type", "type_label", "path",
+        "implementation_path", "android_namespace", "package_version"
+      ],
+      "properties": {
+        "package_name": {"type": "string"},
+        "javascript_name": {"type": "string"},
+        "type": {"type": "string"},
+        "type_label": {"type": "string"},
+        "path": {"type": "string"},
+        "implementation_path": {"type": "string"},
+        "android_namespace": {"type": "string"},
+        "package_version": {"type": "string"}
+      }
+    },
+    "moduleWithValidation": {
+      "allOf": [
+        {"$ref": "#/$defs/module"},
+        {
+          "type": "object",
+          "required": ["validation"],
+          "properties": {
+            "validation": {
+              "oneOf": [
+                {"$ref": "#/$defs/validation"},
+                {"type": "null"}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "action", "ownership"],
+        "properties": {
+          "path": {"type": "string"},
+          "action": {"enum": ["create", "update", "delete", "preserve"]},
+          "ownership": {"type": "string"}
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "required": ["code", "severity", "scope", "message"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^SNV4_[A-Z0-9_]+$"},
+        "severity": {"enum": ["error", "warning", "info"]},
+        "scope": {"type": "string"},
+        "message": {"type": "string"},
+        "feature_id": {"type": "string"},
+        "path": {"type": "string"},
+        "source_range": {"type": "object"},
+        "expected": {"type": "string"},
+        "actual": {"type": "string"},
+        "suggested_command": {"type": "string"}
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "structural", "integration", "dependency_link", "build", "issues"
+      ],
+      "properties": {
+        "structural": {"type": "string"},
+        "integration": {"type": "string"},
+        "dependency_link": {"type": "string"},
+        "build": {"type": "string"},
+        "issues": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/issue"}
+        }
+      }
+    },
+    "doctor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope", "required_passed", "required_issue_count",
+        "advisory_count", "checks"
+      ],
+      "properties": {
+        "scope": {"type": "string"},
+        "required_passed": {"type": "boolean"},
+        "required_issue_count": {"type": "integer", "minimum": 0},
+        "advisory_count": {"type": "integer", "minimum": 0},
+        "checks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/doctorCheck"}
+        }
+      }
+    },
+    "doctorCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "label", "requirement", "status", "detected_version",
+        "path", "message", "metadata"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1},
+        "requirement": {"enum": ["required", "advisory"]},
+        "status": {"enum": ["passed", "failed", "warning"]},
+        "detected_version": {"type": ["string", "null"]},
+        "path": {"type": ["string", "null"]},
+        "message": {"type": "string"},
+        "metadata": {"$ref": "#/$defs/doctorCapability"}
+      }
+    },
+    "doctorCapability": {
+      "type": "object",
+      "required": [
+        "configured", "found", "selected", "executable_probed",
+        "compiler_probed", "project_built", "device_tested"
+      ],
+      "properties": {
+        "configured": {"type": "boolean"},
+        "found": {"type": "boolean"},
+        "selected": {"type": "boolean"},
+        "executable_probed": {"type": "boolean"},
+        "compiler_probed": {"type": "boolean"},
+        "project_built": {"type": "boolean"},
+        "device_tested": {"type": "boolean"},
+        "command": {
+          "oneOf": [{"$ref": "#/$defs/stringList"}, {"type": "null"}]
+        },
+        "commands": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/stringList"}
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["kind", "phase", "message", "subprocess"],
+      "properties": {
+        "kind": {"type": "string"},
+        "phase": {"type": "string"},
+        "message": {"type": "string"},
+        "subprocess": {"type": ["object", "null"]},
+        "internal": {"type": "object"}
+      }
+    }
+  }
+}

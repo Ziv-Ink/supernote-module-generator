@@ -1,4 +1,4 @@
-"""Source-backed JVM routes for the V3 semantic object model.
+"""Source-backed JVM routes for the V4 semantic object model.
 
 KSP records exact JVM owners and deterministic adapter identities.  This module
 joins those compiler facts back to the backend-neutral semantic API and derives
@@ -378,9 +378,9 @@ def plan_jvm_routes(
                 f"missing JVM function source {binding.source.declaration_id!r}"
             ) from exc
         if source_owner.form.value == "class" and not source.is_static:
-            # Scalar implementation-owner methods remain on the retained V2
-            # service route. Composite owner setup is added with cross-family
-            # copied routes in Phase 7.
+            # Scalar implementation-owner methods remain on the JVM service
+            # route. Composite owner setup is added with cross-family copied
+            # routes.
             continue
         synthetic_owner = JvmNamedTypeRoute(
             "jvm:implementation-owner:" + source_owner.provenance.declaration_id,

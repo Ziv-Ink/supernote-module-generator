@@ -1,0 +1,221 @@
+import React, {useEffect, useState} from 'react';
+import {Text, View} from 'react-native';
+import {
+  PluginCommAPI,
+  PluginDocAPI,
+  PluginManager,
+  PluginNoteAPI,
+} from 'sn-plugin-lib';
+import DeviceProbe, {nativeObjectInfo} from 'device-probe';
+
+const HOST = '__HOST__' as 'note' | 'doc';
+const EXPECTED_PLUGIN_NAME = '__PLUGIN_NAME__';
+const PERMISSION = '__PERMISSION__';
+const PERMISSION_ACTION = '__PERMISSION_ACTION__' as 'deny' | 'allow_once';
+const CHECK_COUNT = 15;
+
+type CheckRecord = {
+  id: string;
+  status: 'pass' | 'fail';
+  actual?: unknown;
+  message?: string;
+};
+
+function emit(prefix: string, payload: object): void {
+  console.log(`${prefix} ${JSON.stringify(payload)}`);
+}
+
+function assertThat(condition: boolean, message: string): void {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function apiResult(value: unknown): {success: boolean; result?: unknown; error?: unknown} {
+  return value as {success: boolean; result?: unknown; error?: unknown};
+}
+
+async function runChecks(): Promise<CheckRecord[]> {
+  const checks: CheckRecord[] = [];
+  const check = async (id: string, operation: () => unknown | Promise<unknown>) => {
+    try {
+      const actual = await operation();
+      checks.push({id, status: 'pass', actual});
+      emit('SNV4_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-pass', id, actual});
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      checks.push({id, status: 'fail', message});
+      emit('SNV4_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-fail', id, message});
+    }
+  };
+
+  await PluginManager.init();
+
+  await check('cpp-scalar', () => {
+    const value = DeviceProbe.addNumbers(19, 23);
+    assertThat(value === 42, `expected 42, got ${value}`);
+    return value;
+  });
+  await check('cpp-string-bool', () => {
+    const echoed = DeviceProbe.nativeEcho('nomad');
+    const inverted = DeviceProbe.invert(false);
+    assertThat(echoed === 'cpp:nomad' && inverted === true, 'C++ string/bool mismatch');
+    return {echoed, inverted};
+  });
+  await check('cpp-async', async () => {
+    const value = await DeviceProbe.nativeAsyncEcho('promise');
+    assertThat(value === 'cpp-async:promise', `unexpected C++ async value ${value}`);
+    return value;
+  });
+  await check('cpp-object', () => {
+    const counter = DeviceProbe.DeviceCounter.create(37);
+    const added = counter.add(5);
+    const value = counter.value();
+    const info = nativeObjectInfo(counter);
+    assertThat(added === 42 && value === 42, 'C++ object state mismatch');
+    assertThat(info?.originFamily === 'cpp' && info.type === 'DeviceCounter', 'C++ object identity mismatch');
+    return {added, value, info};
+  });
+  await check('jvm-string', () => {
+    const value = DeviceProbe.jvmEcho('nomad');
+    assertThat(value === 'jvm:nomad', `unexpected JVM value ${value}`);
+    return value;
+  });
+  await check('android-build-info', () => {
+    const model = DeviceProbe.androidModel();
+    const sdk = DeviceProbe.androidSdk();
+    assertThat(model.length > 0 && sdk === 30, `unexpected Android build info ${model}/${sdk}`);
+    return {model, sdk};
+  });
+  await check('jvm-async', async () => {
+    const value = await DeviceProbe.jvmAsyncEcho('promise');
+    assertThat(value === 'jvm-async:promise', `unexpected JVM async value ${value}`);
+    return value;
+  });
+  await check('mixed-cpp-jvm', () => {
+    const value = DeviceProbe.jvmEcho(DeviceProbe.nativeEcho('mixed'));
+    assertThat(value === 'jvm:cpp:mixed', `unexpected mixed value ${value}`);
+    return value;
+  });
+  await check('plugin-name', async () => {
+    const value = await PluginManager.getPluginName();
+    assertThat(value === EXPECTED_PLUGIN_NAME, `unexpected plugin name ${String(value)}`);
+    return value;
+  });
+  await check('plugin-private-directory', async () => {
+    const value = await PluginManager.getPluginDirPath();
+    assertThat(
+      typeof value === 'string' && value.includes('/files/plugins/'),
+      `unexpected plugin directory ${String(value)}`,
+    );
+    return value;
+  });
+  await check('device-type', async () => {
+    const value = await PluginManager.getDeviceType();
+    assertThat(Number.isInteger(value) && value >= 0, `unexpected device type ${value}`);
+    return value;
+  });
+  await check('current-file', async () => {
+    const response = apiResult(await PluginCommAPI.getCurrentFilePath());
+    assertThat(response.success && typeof response.result === 'string', `current file failed: ${JSON.stringify(response)}`);
+    const expectedSuffix = HOST === 'note' ? '.note' : '.pdf';
+    assertThat(String(response.result).toLowerCase().endsWith(expectedSuffix), `wrong host file ${String(response.result)}`);
+    return response.result;
+  });
+  await check('current-page-handwriting', async () => {
+    const page = apiResult(await PluginCommAPI.getCurrentPageNum());
+    const handwriting = apiResult(await PluginCommAPI.canHandwrite());
+    assertThat(page.success && typeof page.result === 'number', `current page failed: ${JSON.stringify(page)}`);
+    assertThat(handwriting.success && typeof handwriting.result === 'boolean', `canHandwrite failed: ${JSON.stringify(handwriting)}`);
+    return {page: page.result, canHandwrite: handwriting.result};
+  });
+  await check('host-specific-api', async () => {
+    const response = apiResult(
+      HOST === 'note'
+        ? await PluginNoteAPI.saveCurrentNote()
+        : await PluginDocAPI.getCurrentTotalPages(),
+    );
+    assertThat(response.success, `host API failed: ${JSON.stringify(response)}`);
+    if (HOST === 'note') {
+      assertThat(response.result === true, `NOTE save returned ${String(response.result)}`);
+    } else {
+      assertThat(typeof response.result === 'number' && response.result >= 1, `DOC pages returned ${String(response.result)}`);
+    }
+    return response.result;
+  });
+  await check('permission-status-request-result', async () => {
+    const before = await PluginManager.hasPermission(PERMISSION);
+    assertThat(before === 0, `permission was not initially denied: ${before}`);
+    emit('SNV4_PERMISSION_REQUEST', {
+      schema: 1,
+      host: HOST,
+      permission: PERMISSION,
+      action: PERMISSION_ACTION,
+    });
+    const requested = await PluginManager.requestPermission(
+      PERMISSION,
+      `SNV4 ${HOST.toUpperCase()} bounded acceptance`,
+    );
+    const after = await PluginManager.hasPermission(PERMISSION);
+    if (PERMISSION_ACTION === 'deny') {
+      assertThat(requested === 0 && after === 0, `deny result/status mismatch ${requested}/${after}`);
+    } else {
+      assertThat((requested === 1 || requested === 2) && after === 1, `allow result/status mismatch ${requested}/${after}`);
+    }
+    return {before, requested, after, permission: PERMISSION, action: PERMISSION_ACTION};
+  });
+
+  assertThat(checks.length === CHECK_COUNT, `expected ${CHECK_COUNT} checks, got ${checks.length}`);
+  return checks;
+}
+
+function App(): React.JSX.Element {
+  const [summary, setSummary] = useState('running');
+
+  useEffect(() => {
+    let active = true;
+    runChecks().then(
+      checks => {
+        const failed = checks.filter(item => item.status !== 'pass');
+        const result = {
+          schema: 1,
+          suite: 'v4-bounded-note-doc-final',
+          host: HOST,
+          pluginName: EXPECTED_PLUGIN_NAME,
+          status: failed.length === 0 ? 'pass' : 'fail',
+          checks,
+        };
+        emit('SNV4_TEST_RESULT', result);
+        if (active) {
+          setSummary(`${result.status}: ${checks.length - failed.length}/${checks.length}`);
+        }
+      },
+      error => {
+        const message = error instanceof Error ? error.message : String(error);
+        emit('SNV4_TEST_RESULT', {
+          schema: 1,
+          suite: 'v4-bounded-note-doc-final',
+          host: HOST,
+          pluginName: EXPECTED_PLUGIN_NAME,
+          status: 'fail',
+          checks: [],
+          fatal: message,
+        });
+        if (active) {
+          setSummary(`fatal: ${message}`);
+        }
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <View>
+      <Text testID="snv4-bounded-result">{summary}</Text>
+    </View>
+  );
+}
+
+export default App;

@@ -1,4 +1,4 @@
-"""Generate the one plugin-level V3 runtime/build component."""
+"""Generate the one plugin-level V4 runtime/build component."""
 from __future__ import annotations
 
 import json
@@ -15,13 +15,13 @@ from .conversion_codegen import (
 from .cpp_object_runtime_codegen import render_cpp_object_runtime
 from .feature_model import PluginRuntimeRegistry
 from .templates import render
-from .v3_schemas import (
+from .v4_schemas import (
     GENERATED_OWNERSHIP_KIND,
     GENERATED_OWNERSHIP_SCHEMA_VERSION,
 )
 
 
-RUNTIME_RELATIVE_ROOT = Path("android/.supernote-module/v3-runtime")
+RUNTIME_RELATIVE_ROOT = Path("android/.supernote-module/v4-runtime")
 
 
 def generated_runtime_files(registry: PluginRuntimeRegistry) -> dict[str, str]:
@@ -39,10 +39,12 @@ def generated_runtime_files(registry: PluginRuntimeRegistry) -> dict[str, str]:
         feature_rows = "    // No generated features are currently registered."
     component = registry.component_name
     registration_component = f"{component}_registration"
-    source_property = f"supernote.v3.source.{component}.v1"
-    generation_count_property = f"supernote.v3.generations.{component}.v1"
-    load_request_property = f"supernote.v3.load-request.{component}.v1"
-    registrar_property = f"supernote.v3.registrar.{component}.v2"
+    source_property = f"supernote.v4.source.{component}.v1"
+    generation_count_property = f"supernote.v4.generations.{component}.v1"
+    generation_ids_property = f"supernote.v4.generation-ids.{component}.v1"
+    binary_registry_prefix = f"supernote.v4.binary.{component}.v1."
+    load_request_property = f"supernote.v4.load-request.{component}.v1"
+    registrar_property = f"supernote.v4.registrar.{component}.v1"
     jvm_roots = [
         f"local_modules/{entry.feature.npm_name}/{entry.feature.roots.jvm}"
         for entry in registry.features
@@ -117,13 +119,9 @@ foreach(SUPERNOTE_NATIVE_ROOT IN LISTS SUPERNOTE_NATIVE_ROOTS)
       "${{SUPERNOTE_NATIVE_ROOT}}/*.cxx")
   list(APPEND SUPERNOTE_USER_SOURCES ${{SUPERNOTE_FEATURE_SOURCES}})
 endforeach()
-if(NOT DEFINED SUPERNOTE_GENERATED_ROOT)
-  set(SUPERNOTE_GENERATED_ROOT
-      "${{CMAKE_CURRENT_LIST_DIR}}/build/generated/supernote")
-endif()
-file(TO_CMAKE_PATH "${{SUPERNOTE_GENERATED_ROOT}}" SUPERNOTE_GENERATED_ROOT)
+set(SUPERNOTE_GENERATED_ROOT "${{CMAKE_CURRENT_LIST_DIR}}/generated")
 file(GLOB SUPERNOTE_GENERATED_BINDINGS CONFIGURE_DEPENDS
-    "${{SUPERNOTE_GENERATED_ROOT}}/${{SUPERNOTE_VARIANT}}/jni/*.cpp")
+    "${{SUPERNOTE_GENERATED_ROOT}}/jni/*.cpp")
 if(NOT SUPERNOTE_GENERATED_BINDINGS)
   message(FATAL_ERROR "Supernote generated JSI bindings are missing")
 endif()
@@ -160,9 +158,9 @@ set_target_properties(
 # Android linker may interpose a definition from an older plugin DSO and leave
 # a stale function address behind when that DSO is unloaded.
 target_link_options({component} PRIVATE "-Wl,-Bsymbolic-functions")
-if(SUPERNOTE_V3_WEAK_OBJECT_PROBE)
+if(SUPERNOTE_V4_WEAK_OBJECT_PROBE)
   target_compile_definitions(
-      {component} PRIVATE SUPERNOTE_V3_WEAK_OBJECT_PROBE=1)
+      {component} PRIVATE SUPERNOTE_V4_WEAK_OBJECT_PROBE=1)
 endif()
 target_include_directories(
     {component} PRIVATE ${{SUPERNOTE_NATIVE_ROOTS}}
@@ -198,13 +196,13 @@ def supernoteNativeRoots = [
 ]
 def supernoteIsWindows = System.getProperty('os.name').toLowerCase().contains('windows')
 def supernoteWeakObjectProbe = providers
-    .gradleProperty('supernoteV3WeakObjectProbe')
+    .gradleProperty('supernoteV4WeakObjectProbe')
     .map {{ it.toBoolean() }}
     .orElse(false)
     .get()
 def supernoteWindowsBuildRoot = new File(
     System.getProperty('java.io.tmpdir'),
-    'supernote-v3/{component}',
+    'supernote-v4/{component}',
 )
 if (supernoteIsWindows) {{
     layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))
@@ -225,8 +223,7 @@ android {{
             cmake {{
                 arguments(
                     '-DANDROID_STL=c++_shared',
-                    "-DSUPERNOTE_GENERATED_ROOT=${{layout.buildDirectory.dir('generated/supernote').get().asFile.absolutePath}}",
-                    "-DSUPERNOTE_V3_WEAK_OBJECT_PROBE=${{supernoteWeakObjectProbe ? 1 : 0}}",
+                    "-DSUPERNOTE_V4_WEAK_OBJECT_PROBE=${{supernoteWeakObjectProbe ? 1 : 0}}",
                 )
             }}
         }}
@@ -239,7 +236,7 @@ android {{
             buildStagingDirectory(
                 supernoteIsWindows
                     ? new File(supernoteWindowsBuildRoot, 'cxx')
-                    : file("${{rootProject.projectDir}}/.cxx/snv3")
+                    : file("${{rootProject.projectDir}}/.cxx/snv4")
             )
         }}
     }}
@@ -276,8 +273,8 @@ dependencies {{
     implementation('com.facebook.react:react-android')
     implementation('org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1')
     implementation('org.jspecify:jspecify:1.0.0')
-    compileOnly project(':supernote-v3-annotations')
-    ksp project(':supernote-v3-processor')
+    compileOnly project(':supernote-v4-annotations')
+    ksp project(':supernote-v4-processor')
 }}
 
 ksp {{
@@ -289,50 +286,32 @@ kotlin {{
     jvmToolchain(17)
 }}
 
-def supernotePythonOverride = System.getenv('SUPERNOTE_PYTHON')
-def supernotePythonCommand = supernotePythonOverride
-    ? [supernotePythonOverride]
-    : (supernoteIsWindows
-        ? ['py', '-3']
-        : ['python3'])
-def supernoteCommonScript = file('common_codegen.py')
-def supernoteApiOutputs = {json.dumps([
-        output
-        for entry in registry.features
-        for output in (
-            f"${{supernotePluginRoot}}/local_modules/{entry.feature.npm_name}/index.d.ts",
-            f"${{supernotePluginRoot}}/local_modules/{entry.feature.npm_name}/README.md",
-        )
-    ])}.collect {{ file(it.replace('${{supernotePluginRoot}}', supernotePluginRoot.absolutePath)) }}
+def supernoteModuleCommand = System.getenv('SUPERNOTE_MODULE_COMMAND') ?: 'supernote-module'
 
 ['Debug', 'Release'].each {{ buildVariant ->
     def variantName = buildVariant.toLowerCase()
-    def commonTask = tasks.register("generateSupernote${{buildVariant}}Semantics", Exec) {{
+    def stateCheck = tasks.register("checkSupernote${{buildVariant}}State", Exec) {{
+        workingDir supernotePluginRoot
         inputs.file(file('feature-registry.json'))
-        inputs.dir(file('inputs'))
         supernoteNativeRoots.findAll {{ it.isDirectory() }}.each {{ nativeRoot ->
             inputs.dir(nativeRoot)
         }}
         inputs.files(fileTree(layout.buildDirectory.dir(
             "generated/ksp/${{variantName}}/resources"
         )))
-        outputs.dir(layout.buildDirectory.dir("generated/supernote/${{variantName}}"))
-        outputs.files(supernoteApiOutputs)
         commandLine(
-            *supernotePythonCommand,
-            supernoteCommonScript.absolutePath,
-            '--plugin-root',
-            supernotePluginRoot.absolutePath,
-            '--runtime-root',
-            projectDir.absolutePath,
-            '--build-root',
-            layout.buildDirectory.get().asFile.absolutePath,
-            '--variant',
-            variantName,
+            supernoteModuleCommand,
+            '--json',
+            'check',
+            '--build-hook',
+            '--jvm-manifest-root',
+            layout.buildDirectory.dir(
+                "generated/ksp/${{variantName}}/resources/supernote/generated/manifests"
+            ).get().asFile.absolutePath,
         )
     }}
     afterEvaluate {{
-        commonTask.configure {{
+        stateCheck.configure {{
             dependsOn tasks.named("ksp${{buildVariant}}Kotlin")
         }}
     }}
@@ -340,7 +319,7 @@ def supernoteApiOutputs = {json.dumps([
     tasks.matching {{ task ->
         task.name == "externalNativeBuild${{buildVariant}}" ||
             task.name == "configureCMake${{cmakeBuildType}}[arm64-v8a]"
-    }}.configureEach {{ dependsOn commonTask }}
+    }}.configureEach {{ dependsOn stateCheck }}
 }}
 """
     annotations_gradle = """// Generated by supernote_module_generator. Do not edit.
@@ -358,7 +337,7 @@ plugins {
 }
 
 dependencies {
-    implementation project(':supernote-v3-annotations')
+    implementation project(':supernote-v4-annotations')
     implementation 'com.google.devtools.ksp:symbol-processing-api:2.0.21-1.0.28'
 }
 
@@ -420,8 +399,10 @@ std::size_t feature_registry_size() noexcept {{
 #include <mutex>
 #include <string>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace supernote::runtime {
@@ -487,7 +468,7 @@ class BoundedExecutor {
 
 class DeferredDestruction {
  public:
-  DeferredDestruction();
+  explicit DeferredDestruction(std::size_t queue_capacity = 1024);
   ~DeferredDestruction();
   DeferredDestruction(const DeferredDestruction &) = delete;
   DeferredDestruction &operator=(const DeferredDestruction &) = delete;
@@ -503,6 +484,11 @@ class DeferredDestruction {
     }
   }
   std::size_t thread_count() const noexcept;
+  std::size_t queue_depth() const noexcept;
+  std::size_t high_water_mark() const noexcept;
+  std::uint64_t oldest_item_age_ms() const noexcept;
+  std::uint64_t processed_count() const noexcept;
+  std::uint64_t failure_count() const noexcept;
   void drain_and_shutdown() noexcept;
 
  private:
@@ -573,7 +559,7 @@ class RuntimeSession : public std::enable_shared_from_this<RuntimeSession> {
   SessionId id() const noexcept;
   bool active() const noexcept;
   bool schedule(JsTask task) noexcept;
-  void invalidate() noexcept;
+  bool invalidate() noexcept;
   std::shared_ptr<void> plugin_class_loader() const noexcept;
   std::shared_ptr<void> platform_context() const noexcept;
 
@@ -581,6 +567,7 @@ class RuntimeSession : public std::enable_shared_from_this<RuntimeSession> {
   RuntimeSession(SessionId id, JsScheduler scheduler,
                  std::shared_ptr<void> plugin_class_loader,
                  std::shared_ptr<void> platform_context);
+  void cleanup_physical() noexcept;
   void add_feature(const std::shared_ptr<FeatureSession> &feature);
   void remove_feature(SessionId feature_id) noexcept;
 
@@ -592,6 +579,7 @@ class RuntimeSession : public std::enable_shared_from_this<RuntimeSession> {
   mutable std::mutex mutex_;
   std::unordered_map<SessionId, std::shared_ptr<FeatureSession>> features_;
   friend class FeatureSession;
+  friend class ProcessServices;
 };
 
 enum class FeatureState { ACTIVE, CLOSING, INACTIVE };
@@ -791,14 +779,27 @@ class ProcessServices {
                           void *result, std::string error_code,
                           std::string failure) noexcept;
   std::size_t thread_count() const noexcept;
+  bool retire_runtime(std::shared_ptr<RuntimeSession> runtime) noexcept;
+  std::size_t retired_runtime_count() const noexcept;
+  bool restart_required() const noexcept;
   void shutdown() noexcept;
 
  private:
+  bool try_schedule_retired_runtime(SessionId id) noexcept;
+  bool ensure_retirement_retry_worker() noexcept;
+  void retirement_retry_loop() noexcept;
   BoundedExecutor workers_;
   std::shared_ptr<DeferredDestruction> cleanup_;
   std::atomic<void *> java_vm_{nullptr};
   std::mutex jvm_async_mutex_;
   std::unordered_map<SessionId, JvmAsyncCompletion> jvm_async_completions_;
+  mutable std::mutex retired_runtime_mutex_;
+  std::unordered_map<SessionId, std::shared_ptr<RuntimeSession>> retired_runtimes_;
+  std::unordered_set<SessionId> scheduled_retirements_;
+  std::condition_variable retirement_ready_;
+  std::thread retirement_retry_worker_;
+  bool retirement_stopping_ = false;
+  std::atomic<bool> restart_required_{false};
 };
 
 ProcessServices &process_services() noexcept;
@@ -881,6 +882,7 @@ class Result<void> final {
 #include "runtime_services.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
 #include <stdexcept>
 #include <thread>
@@ -1099,15 +1101,30 @@ void BoundedExecutor::shutdown() noexcept {
 }
 
 struct DeferredDestruction::State {
+  struct Item {
+    std::chrono::steady_clock::time_point enqueued;
+    std::function<void()> cleanup;
+  };
+
+  explicit State(std::size_t requested_capacity) : capacity(requested_capacity) {}
   std::mutex mutex;
   std::condition_variable ready;
-  std::deque<std::function<void()>> queue;
+  std::deque<Item> queue;
   std::thread worker;
   std::atomic<std::size_t> live_workers{0};
+  const std::size_t capacity;
+  std::atomic<std::size_t> high_water{0};
+  std::atomic<std::uint64_t> processed{0};
+  std::atomic<std::uint64_t> failures{0};
   bool stopping = false;
 };
 
-DeferredDestruction::DeferredDestruction() : state_(std::make_shared<State>()) {}
+DeferredDestruction::DeferredDestruction(std::size_t queue_capacity)
+    : state_(std::make_shared<State>(queue_capacity)) {
+  if (queue_capacity == 0) {
+    throw std::invalid_argument("deferred destruction capacity must be positive");
+  }
+}
 
 DeferredDestruction::~DeferredDestruction() { drain_and_shutdown(); }
 
@@ -1118,30 +1135,39 @@ bool DeferredDestruction::submit(std::function<void()> cleanup) noexcept {
     {
       std::lock_guard lock(state->mutex);
       if (state->stopping) return false;
+      if (state->queue.size() >= state->capacity) return false;
       if (!state->worker.joinable()) {
         state->worker = std::thread([state] {
           state->live_workers.fetch_add(1, std::memory_order_acq_rel);
           while (true) {
-            std::function<void()> queued_cleanup;
+            State::Item item;
             {
               std::unique_lock worker_lock(state->mutex);
               state->ready.wait(worker_lock, [&] {
                 return state->stopping || !state->queue.empty();
               });
               if (state->queue.empty() && state->stopping) break;
-              queued_cleanup = std::move(state->queue.front());
+              item = std::move(state->queue.front());
               state->queue.pop_front();
             }
             try {
-              queued_cleanup();
+              item.cleanup();
+              state->processed.fetch_add(1, std::memory_order_acq_rel);
             } catch (...) {
+              state->failures.fetch_add(1, std::memory_order_acq_rel);
               // Cleanup never crosses into JSI and never stops the facility.
             }
           }
           state->live_workers.fetch_sub(1, std::memory_order_acq_rel);
         });
       }
-      state->queue.push_back(std::move(cleanup));
+      state->queue.push_back(
+          {std::chrono::steady_clock::now(), std::move(cleanup)});
+      const auto depth = state->queue.size();
+      auto previous = state->high_water.load(std::memory_order_acquire);
+      while (depth > previous &&
+             !state->high_water.compare_exchange_weak(
+                 previous, depth, std::memory_order_acq_rel)) {}
     }
     state->ready.notify_one();
     return true;
@@ -1155,6 +1181,36 @@ std::size_t DeferredDestruction::thread_count() const noexcept {
   return state
       ? state->live_workers.load(std::memory_order_acquire)
       : 0;
+}
+
+std::size_t DeferredDestruction::queue_depth() const noexcept {
+  auto state = state_;
+  if (!state) return 0;
+  std::lock_guard lock(state->mutex);
+  return state->queue.size();
+}
+
+std::size_t DeferredDestruction::high_water_mark() const noexcept {
+  return state_ ? state_->high_water.load(std::memory_order_acquire) : 0;
+}
+
+std::uint64_t DeferredDestruction::oldest_item_age_ms() const noexcept {
+  auto state = state_;
+  if (!state) return 0;
+  std::lock_guard lock(state->mutex);
+  if (state->queue.empty()) return 0;
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - state->queue.front().enqueued)
+          .count());
+}
+
+std::uint64_t DeferredDestruction::processed_count() const noexcept {
+  return state_ ? state_->processed.load(std::memory_order_acquire) : 0;
+}
+
+std::uint64_t DeferredDestruction::failure_count() const noexcept {
+  return state_ ? state_->failures.load(std::memory_order_acquire) : 0;
 }
 
 void DeferredDestruction::drain_and_shutdown() noexcept {
@@ -1180,6 +1236,9 @@ std::shared_ptr<RuntimeSession> RuntimeSession::create(
     JsScheduler scheduler, std::shared_ptr<void> plugin_class_loader,
     std::shared_ptr<void> platform_context) {
   if (!scheduler) throw std::invalid_argument("JS scheduler is required");
+  // Construct bounded process-lifetime infrastructure before user work can
+  // inject allocation failures into invalidation.
+  (void)process_services();
   return std::shared_ptr<RuntimeSession>(new RuntimeSession(
       allocate_session_id(), std::move(scheduler),
       std::move(plugin_class_loader), std::move(platform_context)));
@@ -1219,7 +1278,8 @@ bool RuntimeSession::schedule(JsTask task) noexcept {
 void RuntimeSession::add_feature(
     const std::shared_ptr<FeatureSession> &feature) {
   std::lock_guard lock(mutex_);
-  if (!active()) throw std::runtime_error("runtime session is inactive");
+  if (!active()) throw std::runtime_error(
+      "SNV4_SESSION_INVALIDATED: runtime session is inactive");
   features_[feature->id()] = feature;
 }
 
@@ -1228,8 +1288,16 @@ void RuntimeSession::remove_feature(SessionId feature_id) noexcept {
   features_.erase(feature_id);
 }
 
-void RuntimeSession::invalidate() noexcept {
-  if (!active_.exchange(false, std::memory_order_acq_rel)) return;
+bool RuntimeSession::invalidate() noexcept {
+  active_.store(false, std::memory_order_release);
+  try {
+    return process_services().retire_runtime(shared_from_this());
+  } catch (...) {
+    return false;
+  }
+}
+
+void RuntimeSession::cleanup_physical() noexcept {
   {
     std::lock_guard lock(mutex_);
     plugin_class_loader_.reset();
@@ -1590,17 +1658,161 @@ void ProcessServices::complete_jvm_async(
   }
 }
 
+bool ProcessServices::retire_runtime(
+    std::shared_ptr<RuntimeSession> runtime) noexcept {
+  if (!runtime) return true;
+  try {
+    constexpr std::size_t kRetiredRuntimeLimit = 32;
+    const auto id = runtime->id();
+    {
+      std::lock_guard lock(retired_runtime_mutex_);
+      if (retired_runtimes_.find(id) == retired_runtimes_.end()) {
+        if (retired_runtimes_.size() >= kRetiredRuntimeLimit) {
+          restart_required_.store(true, std::memory_order_release);
+          return false;
+        }
+        retired_runtimes_.emplace(id, std::move(runtime));
+      }
+    }
+    if (!try_schedule_retired_runtime(id) &&
+        !ensure_retirement_retry_worker()) {
+      return false;
+    }
+    return true;
+  } catch (...) {
+    restart_required_.store(true, std::memory_order_release);
+    return false;
+  }
+}
+
+bool ProcessServices::try_schedule_retired_runtime(SessionId id) noexcept {
+  try {
+    {
+      std::lock_guard lock(retired_runtime_mutex_);
+      if (retired_runtimes_.find(id) == retired_runtimes_.end() ||
+          scheduled_retirements_.find(id) != scheduled_retirements_.end()) {
+        return true;
+      }
+      scheduled_retirements_.insert(id);
+    }
+    const auto accepted = cleanup_ && cleanup_->submit([this, id] {
+      std::shared_ptr<RuntimeSession> retired;
+      {
+        std::lock_guard lock(retired_runtime_mutex_);
+        scheduled_retirements_.erase(id);
+        auto found = retired_runtimes_.find(id);
+        if (found == retired_runtimes_.end()) return;
+        retired = std::move(found->second);
+        retired_runtimes_.erase(found);
+      }
+      retired->cleanup_physical();
+      retirement_ready_.notify_all();
+    });
+    if (accepted) return true;
+    {
+      std::lock_guard lock(retired_runtime_mutex_);
+      scheduled_retirements_.erase(id);
+    }
+    return false;
+  } catch (...) {
+    std::lock_guard lock(retired_runtime_mutex_);
+    scheduled_retirements_.erase(id);
+    return false;
+  }
+}
+
+bool ProcessServices::ensure_retirement_retry_worker() noexcept {
+  try {
+    {
+      std::lock_guard lock(retired_runtime_mutex_);
+      if (retirement_stopping_) {
+        restart_required_.store(true, std::memory_order_release);
+        return false;
+      }
+      if (!retirement_retry_worker_.joinable()) {
+        retirement_retry_worker_ =
+            std::thread([this] { retirement_retry_loop(); });
+      }
+    }
+    retirement_ready_.notify_one();
+    return true;
+  } catch (...) {
+    restart_required_.store(true, std::memory_order_release);
+    return false;
+  }
+}
+
+void ProcessServices::retirement_retry_loop() noexcept {
+  while (true) {
+    SessionId candidate = 0;
+    {
+      std::unique_lock lock(retired_runtime_mutex_);
+      retirement_ready_.wait(lock, [&] {
+        if (retirement_stopping_) return true;
+        for (const auto &[id, runtime] : retired_runtimes_) {
+          (void)runtime;
+          if (scheduled_retirements_.find(id) == scheduled_retirements_.end()) {
+            return true;
+          }
+        }
+        return false;
+      });
+      if (retirement_stopping_) return;
+      for (const auto &[id, runtime] : retired_runtimes_) {
+        (void)runtime;
+        if (scheduled_retirements_.find(id) == scheduled_retirements_.end()) {
+          candidate = id;
+          break;
+        }
+      }
+    }
+    if (candidate != 0 && try_schedule_retired_runtime(candidate)) continue;
+    std::unique_lock lock(retired_runtime_mutex_);
+    retirement_ready_.wait_for(
+        lock, std::chrono::milliseconds(10),
+        [&] { return retirement_stopping_; });
+    if (retirement_stopping_) return;
+  }
+}
+
+std::size_t ProcessServices::retired_runtime_count() const noexcept {
+  std::lock_guard lock(retired_runtime_mutex_);
+  return retired_runtimes_.size();
+}
+
+bool ProcessServices::restart_required() const noexcept {
+  return restart_required_.load(std::memory_order_acquire);
+}
+
 std::size_t ProcessServices::thread_count() const noexcept {
-  return workers_.thread_count() + cleanup_->thread_count();
+  std::lock_guard lock(retired_runtime_mutex_);
+  return workers_.thread_count() + cleanup_->thread_count() +
+      (retirement_retry_worker_.joinable() ? 1 : 0);
 }
 
 void ProcessServices::shutdown() noexcept {
+  {
+    std::lock_guard lock(retired_runtime_mutex_);
+    retirement_stopping_ = true;
+  }
+  retirement_ready_.notify_all();
+  if (retirement_retry_worker_.joinable()) retirement_retry_worker_.join();
   workers_.shutdown();
   {
     std::lock_guard lock(jvm_async_mutex_);
     jvm_async_completions_.clear();
   }
   cleanup_->drain_and_shutdown();
+  std::unordered_map<SessionId, std::shared_ptr<RuntimeSession>> retired;
+  {
+    std::lock_guard lock(retired_runtime_mutex_);
+    retired.swap(retired_runtimes_);
+    scheduled_retirements_.clear();
+  }
+  for (auto &[id, runtime] : retired) {
+    (void)id;
+    runtime->cleanup_physical();
+  }
   java_vm_.store(nullptr, std::memory_order_release);
 }
 
@@ -1621,7 +1833,7 @@ ProcessServices &process_services() noexcept {
 typedef jboolean (*SupernoteRuntimeRegistrar)(JNIEnv *, jobject, jstring);
 
 JNIEXPORT jboolean JNICALL
-Java_supernote_generated_runtime_SupernoteV3NativeRegistrationBridge_nativeRegister(
+Java_supernote_generated_runtime_SupernoteV4NativeRegistrationBridge_nativeRegister(
     JNIEnv *env,
     jobject bridge,
     jlong registrar_address,
@@ -1637,7 +1849,7 @@ Java_supernote_generated_runtime_SupernoteV3NativeRegistrationBridge_nativeRegis
   if (dladdr((void *)registrar, &registrar_info) == 0 ||
       registrar_info.dli_fbase == NULL) {
     __android_log_print(
-        ANDROID_LOG_ERROR, "SupernoteV3Registration",
+        ANDROID_LOG_ERROR, "SupernoteV4Registration",
         "published runtime registrar is no longer mapped");
     return JNI_FALSE;
   }
@@ -1645,7 +1857,7 @@ Java_supernote_generated_runtime_SupernoteV3NativeRegistrationBridge_nativeRegis
       registrar(env, class_loader, generation_identity);
   if (registered != JNI_TRUE) {
     __android_log_print(
-        ANDROID_LOG_ERROR, "SupernoteV3Registration",
+        ANDROID_LOG_ERROR, "SupernoteV4Registration",
         "current runtime registrar rejected the plugin ClassLoader");
   }
   return registered;
@@ -1683,7 +1895,7 @@ extern "C" __attribute__((visibility("hidden"))) jboolean
 
 namespace {{
 
-constexpr char kLogTag[] = "SupernoteV3Runtime";
+constexpr char kLogTag[] = "SupernoteV4Runtime";
 constexpr char kLoadRequestProperty[] = {json.dumps(load_request_property)};
 constexpr char kRegistrarProperty[] = {json.dumps(registrar_property)};
 std::string g_generation_identity;
@@ -1692,10 +1904,10 @@ std::unordered_map<std::uint64_t,
                    std::shared_ptr<supernote::runtime::RuntimeSession>>
     g_sessions;
 
-#if defined(SUPERNOTE_V3_WEAK_OBJECT_PROBE)
-constexpr char kWeakProbeGlobal[] = "__supernoteV3Phase0WeakObjectProbe";
+#if defined(SUPERNOTE_V4_WEAK_OBJECT_PROBE)
+constexpr char kWeakProbeGlobal[] = "__supernoteV4Phase0WeakObjectProbe";
 constexpr char kWeakProbeTargetGlobal[] =
-    "__supernoteV3Phase0WeakObjectProbeTarget";
+    "__supernoteV4Phase0WeakObjectProbeTarget";
 
 class WeakObjectProbeHost final : public facebook::jsi::HostObject {{
  public:
@@ -1912,7 +2124,7 @@ std::shared_ptr<void> global_ref(JNIEnv *env, jobject value) {{
 }}  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_supernote_generated_runtime_SupernoteV3Module_nativeInstall(
+Java_supernote_generated_runtime_SupernoteV4Module_nativeInstall(
     JNIEnv *env, jobject module, jlong runtime_pointer, jobject class_loader,
     jobject platform_context, jobject call_invoker_holder) {{
   if (env == nullptr || module == nullptr || class_loader == nullptr ||
@@ -1964,7 +2176,7 @@ Java_supernote_generated_runtime_SupernoteV3Module_nativeInstall(
     auto *runtime = reinterpret_cast<facebook::jsi::Runtime *>(
         static_cast<std::uintptr_t>(runtime_pointer));
     supernote::generated::install_plugin_bindings(*runtime, session);
-#if defined(SUPERNOTE_V3_WEAK_OBJECT_PROBE)
+#if defined(SUPERNOTE_V4_WEAK_OBJECT_PROBE)
     install_weak_object_probe(*runtime);
 #endif
     const auto session_id = session->id();
@@ -1989,28 +2201,35 @@ Java_supernote_generated_runtime_SupernoteV3Module_nativeInstall(
 }}
 
 extern "C" JNIEXPORT void JNICALL
-Java_supernote_generated_runtime_SupernoteV3Module_nativeInvalidate(
+Java_supernote_generated_runtime_SupernoteV4Module_nativeInvalidate(
     JNIEnv *, jobject, jlong session_id) {{
   std::shared_ptr<supernote::runtime::RuntimeSession> session;
-  bool last_session = false;
   {{
     std::lock_guard lock(g_mutex);
     auto found = g_sessions.find(static_cast<std::uint64_t>(session_id));
     if (found == g_sessions.end()) return;
-    session = std::move(found->second);
-    g_sessions.erase(found);
-    last_session = g_sessions.empty();
+    session = found->second;
   }}
   __android_log_print(
       ANDROID_LOG_INFO, kLogTag, "invalidating runtime session %llu",
       static_cast<unsigned long long>(session_id));
-  session->invalidate();
-  if (last_session) {{
-    supernote::runtime::process_services().shutdown();
+  const bool retained = session->invalidate();
+  if (retained) {{
+    std::lock_guard lock(g_mutex);
+    auto found = g_sessions.find(static_cast<std::uint64_t>(session_id));
+    if (found != g_sessions.end() && found->second == session) {{
+      g_sessions.erase(found);
+    }}
+  }} else {{
     __android_log_print(
-        ANDROID_LOG_INFO, kLogTag,
-        "stopped process services for runtime generation");
+        ANDROID_LOG_ERROR, kLogTag,
+        "SNV4_RESTART_REQUIRED: runtime retirement could not be guaranteed "
+        "(retained=%zu limit=32); restart PluginHost",
+        supernote::runtime::process_services().retired_runtime_count());
   }}
+  __android_log_print(
+      ANDROID_LOG_INFO, kLogTag,
+      "logical invalidation completed; physical cleanup remains process-owned");
 }}
 
 extern "C" __attribute__((visibility("hidden"))) jboolean
@@ -2039,7 +2258,7 @@ extern "C" __attribute__((visibility("hidden"))) jboolean
             loader_class, "loadClass",
             "(Ljava/lang/String;)Ljava/lang/Class;");
   auto module_name = env->NewStringUTF(
-      "supernote.generated.runtime.SupernoteV3Module");
+      "supernote.generated.runtime.SupernoteV4Module");
   auto module_class = load_class == nullptr || module_name == nullptr
       ? nullptr
       : env->CallObjectMethod(class_loader, load_class, module_name);
@@ -2055,11 +2274,11 @@ extern "C" __attribute__((visibility("hidden"))) jboolean
             "Lcom/facebook/react/turbomodule/core/interfaces/"
             "CallInvokerHolder;)J"),
         reinterpret_cast<void *>(
-            &Java_supernote_generated_runtime_SupernoteV3Module_nativeInstall)}},
+            &Java_supernote_generated_runtime_SupernoteV4Module_nativeInstall)}},
       {{const_cast<char *>("nativeInvalidate"),
         const_cast<char *>("(J)V"),
         reinterpret_cast<void *>(
-            &Java_supernote_generated_runtime_SupernoteV3Module_nativeInvalidate)}},
+            &Java_supernote_generated_runtime_SupernoteV4Module_nativeInvalidate)}},
   }};
   if (env->RegisterNatives(
           static_cast<jclass>(module_class), methods,
@@ -2093,29 +2312,6 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         "generated_files": [
             "CMakeLists.txt",
             "build.gradle",
-            "common_codegen.py",
-            "common_support/__init__.py",
-            "common_support/binding_codegen.py",
-            "common_support/cpp_projection.py",
-            "common_support/cpp_routes.py",
-            "common_support/cpp_object_binding_codegen.py",
-            "common_support/cross_family_codegen.py",
-            "common_support/conversion.py",
-            "common_support/jvm_manifest.py",
-            "common_support/jvm_codegen.py",
-            "common_support/jvm_object_binding_codegen.py",
-            "common_support/jvm_object_runtime_codegen.py",
-            "common_support/jvm_projection.py",
-            "common_support/jvm_routes.py",
-            "common_support/internal_codegen.py",
-            "common_support/lowering.py",
-            "common_support/reachability.py",
-            "common_support/readme_codegen.py",
-            "common_support/semantic.py",
-            "common_support/semantic_types.py",
-            "common_support/v3_schemas.py",
-            "common_support/source_models.py",
-            "common_support/typescript_codegen.py",
             "consumer-rules.pro",
             "annotations/build.gradle",
             "annotations/src/main/java/supernote/generated/annotations/SupernotePluginAsync.java",
@@ -2126,7 +2322,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             "annotations/src/main/java/supernote/generated/annotations/SupernotePluginValue.java",
             "feature-registry.json",
             "ownership.json",
-            "src/main/java/supernote/generated/runtime/SupernoteV3Module.kt",
+            "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt",
             "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt",
             "src/main/java/supernote/generated/runtime/SupernoteConversionBudget.kt",
             "src/feature_registry.cpp",
@@ -2139,64 +2335,40 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             "src/runtime_bootstrap.cpp",
             "src/runtime_registration_bridge.c",
             "processor/build.gradle",
-            "processor/src/main/kotlin/supernote/generated/processor/SupernoteV3Processor.kt",
+            "processor/src/main/kotlin/supernote/generated/processor/SupernoteV4Processor.kt",
             "processor/src/main/resources/META-INF/services/com.google.devtools.ksp.processing.SymbolProcessorProvider",
         ],
     }
     generated = {
         "CMakeLists.txt": cmake,
         "build.gradle": gradle,
-        "common_codegen.py": render(
-            "v2.common_codegen.py.tmpl",
-            {"GENERATOR_VERSION": registry.generator_version},
-        ),
-        "common_support/__init__.py": "",
-        "common_support/binding_codegen.py": _support_source("binding_codegen.py"),
-        "common_support/cpp_projection.py": _support_source("cpp_projection.py"),
-        "common_support/cpp_routes.py": _support_source("cpp_routes.py"),
-        "common_support/cpp_object_binding_codegen.py": _support_source("cpp_object_binding_codegen.py"),
-        "common_support/cross_family_codegen.py": _support_source("cross_family_codegen.py"),
-        "common_support/conversion.py": _support_source("conversion.py"),
-        "common_support/jvm_manifest.py": _support_source("jvm_manifest.py"),
-        "common_support/jvm_codegen.py": _support_source("jvm_codegen.py"),
-        "common_support/jvm_object_binding_codegen.py": _support_source("jvm_object_binding_codegen.py"),
-        "common_support/jvm_object_runtime_codegen.py": _support_source("jvm_object_runtime_codegen.py"),
-        "common_support/jvm_projection.py": _support_source("jvm_projection.py"),
-        "common_support/jvm_routes.py": _support_source("jvm_routes.py"),
-        "common_support/internal_codegen.py": _support_source("internal_codegen.py"),
-        "common_support/lowering.py": _support_source("lowering.py"),
-        "common_support/reachability.py": _support_source("reachability.py"),
-        "common_support/readme_codegen.py": _support_source("readme_codegen.py"),
-        "common_support/semantic.py": _support_source("semantic.py"),
-        "common_support/semantic_types.py": _support_source("semantic_types.py"),
-        "common_support/v3_schemas.py": _support_source("v3_schemas.py"),
-        "common_support/source_models.py": _support_source("source_models.py"),
-        "common_support/typescript_codegen.py": _support_source("typescript_codegen.py"),
         "consumer-rules.pro": consumer_keep_rules,
         "annotations/build.gradle": annotations_gradle,
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginAsync.java": render("v2.SupernotePluginAsync.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernoteConstructor.java": render("v2.SupernoteConstructor.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java": render("v2.SupernotePluginExport.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginInternal.java": render("v2.SupernotePluginInternal.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginObject.java": render("v3.SupernotePluginObject.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginValue.java": render("v3.SupernotePluginValue.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginAsync.java": render("v4.SupernotePluginAsync.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernoteConstructor.java": render("v4.SupernoteConstructor.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java": render("v4.SupernotePluginExport.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginInternal.java": render("v4.SupernotePluginInternal.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginObject.java": render("v4.SupernotePluginObject.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginValue.java": render("v4.SupernotePluginValue.java.tmpl", {}),
         "feature-registry.json": (
             json.dumps(registry.manifest(), indent=2, sort_keys=True) + "\n"
         ),
         "ownership.json": json.dumps(ownership, indent=2, sort_keys=True) + "\n",
-        "src/main/java/supernote/generated/runtime/SupernoteV3Module.kt": render(
-            "v2.SupernoteV2Module.kt.tmpl",
+        "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt": render(
+            "v4.SupernoteV4Module.kt.tmpl",
             {
                 "NATIVE_LIBRARY_NAME": component,
                 "NATIVE_REGISTRATION_LIBRARY_NAME": registration_component,
                 "NATIVE_SOURCE_PROPERTY": source_property,
                 "NATIVE_GENERATION_COUNT_PROPERTY": generation_count_property,
+                "NATIVE_GENERATION_IDS_PROPERTY": generation_ids_property,
+                "NATIVE_BINARY_REGISTRY_PREFIX": binary_registry_prefix,
                 "NATIVE_LOAD_REQUEST_PROPERTY": load_request_property,
                 "NATIVE_REGISTRAR_PROPERTY": registrar_property,
             },
         ),
         "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt": render(
-            "v2.SupernoteCoroutineBridge.kt.tmpl", {}
+            "v4.SupernoteCoroutineBridge.kt.tmpl", {}
         ),
         "src/main/java/supernote/generated/runtime/SupernoteConversionBudget.kt": render_jvm_conversion_kernel(),
         "src/feature_registry.cpp": registry_source,
@@ -2209,12 +2381,12 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         "src/runtime_bootstrap.cpp": bootstrap,
         "src/runtime_registration_bridge.c": registration_bridge,
         "processor/build.gradle": processor_gradle,
-        "processor/src/main/kotlin/supernote/generated/processor/SupernoteV3Processor.kt": render(
-            "v2.SupernoteV2Processor.kt.tmpl",
+        "processor/src/main/kotlin/supernote/generated/processor/SupernoteV4Processor.kt": render(
+            "v4.SupernoteV4Processor.kt.tmpl",
             {"GENERATOR_VERSION": registry.generator_version},
         ),
         "processor/src/main/resources/META-INF/services/com.google.devtools.ksp.processing.SymbolProcessorProvider": render(
-            "v2.processor.provider.tmpl", {}
+            "v4.processor.provider.tmpl", {}
         ),
     }
     for entry in registry.features:
@@ -2231,10 +2403,6 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         json.dumps(ownership, indent=2, sort_keys=True) + "\n"
     )
     return generated
-
-
-def _support_source(name: str) -> str:
-    return (Path(__file__).resolve().parent / name).read_text(encoding="utf-8")
 
 
 def stage_plugin_runtime(plugin_root: Path, registry: PluginRuntimeRegistry) -> Path:

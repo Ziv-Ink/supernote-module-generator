@@ -1,8 +1,11 @@
+import os
 from pathlib import Path
+import shutil
 
 import pytest
 
-from supernote_module_generator.errors import ConfigurationError
+from supernote_module_generator.errors import ConfigurationError, FilesystemError
+from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.plugin_build_integration import (
     set_runtime_wiring,
     verify_runtime_wiring,
@@ -29,14 +32,14 @@ def test_wires_one_plugin_runtime_project_idempotently(tmp_path: Path, kotlin: b
 
     set_runtime_wiring(tmp_path, enabled=False)
     verify_runtime_wiring(tmp_path, enabled=False)
-    assert "supernote-v3-runtime" not in settings.read_text()
-    assert "supernote-v3-runtime" not in app.read_text()
+    assert "supernote-v4-runtime" not in settings.read_text()
+    assert "supernote-v4-runtime" not in app.read_text()
 
 
 def test_duplicate_runtime_blocks_are_rejected(tmp_path: Path):
     android = tmp_path / "android"
     (android / "app").mkdir(parents=True)
-    block = "// supernote-module-v3-runtime\nx\n// end supernote-module-v3-runtime\n"
+    block = "// supernote-module-v4-runtime\nx\n// end supernote-module-v4-runtime\n"
     (android / "settings.gradle").write_text(block + block)
     (android / "app/build.gradle").write_text("plugins {}\n")
     with pytest.raises(ConfigurationError, match="duplicate"):
@@ -70,15 +73,15 @@ def test_registers_generated_react_package_idempotently(
     first = source.read_text()
     set_runtime_wiring(tmp_path, enabled=True)
     assert source.read_text() == first
-    assert first.count("SupernoteV3Package") == 1
+    assert first.count("SupernoteV4Package") == 1
     verify_runtime_wiring(tmp_path, enabled=True)
 
     set_runtime_wiring(tmp_path, enabled=False)
-    assert "SupernoteV3Package" not in source.read_text()
+    assert "SupernoteV4Package" not in source.read_text()
     verify_runtime_wiring(tmp_path, enabled=False)
 
 
-def test_complete_stale_v2_wiring_is_removed_without_touching_user_source(
+def test_complete_stale_v2_wiring_is_rejected_without_touching_user_source(
     tmp_path: Path,
 ):
     android = tmp_path / "android"
@@ -107,15 +110,19 @@ def test_complete_stale_v2_wiring_is_removed_without_touching_user_source(
         "    }\n"
     )
 
-    set_runtime_wiring(tmp_path, enabled=True)
+    before = {
+        path: path.read_bytes()
+        for path in (
+            android / "settings.gradle",
+            android / "app/build.gradle",
+            application,
+        )
+    }
 
-    assert "supernote-module-v2" not in (android / "settings.gradle").read_text()
-    assert "include ':user-library'" in (android / "settings.gradle").read_text()
-    assert "supernote-module-v2" not in (android / "app/build.gradle").read_text()
-    assert "project(':user-library')" in (android / "app/build.gradle").read_text()
-    assert "SupernoteV2Package" not in application.read_text()
-    assert "add(UserPackage())" in application.read_text()
-    verify_runtime_wiring(tmp_path, enabled=True)
+    with pytest.raises(ConfigurationError, match="unsupported legacy runtime wiring"):
+        set_runtime_wiring(tmp_path, enabled=True)
+
+    assert {path: path.read_bytes() for path in before} == before
 
 
 def test_malformed_stale_v2_wiring_is_rejected_without_mutation(tmp_path: Path):
@@ -126,7 +133,92 @@ def test_malformed_stale_v2_wiring_is_rejected_without_mutation(tmp_path: Path):
     (android / "app/build.gradle").write_text("plugins {}\n")
     before = settings.read_bytes()
 
-    with pytest.raises(ConfigurationError, match="malformed"):
+    with pytest.raises(ConfigurationError, match="unsupported legacy runtime wiring"):
         set_runtime_wiring(tmp_path, enabled=True)
 
     assert settings.read_bytes() == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink identity fixture")
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        "settings_final",
+        "settings_ancestor",
+        "app_final",
+        "app_ancestor",
+        "application_final",
+        "application_ancestor",
+    ),
+)
+def test_generation_plan_never_follows_unsafe_wiring_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+):
+    root = tmp_path / "plugin"
+    android = root / "android"
+    (android / "app").mkdir(parents=True)
+    (android / "settings.gradle").write_text("include ':app'\n")
+    (android / "app/build.gradle").write_text("plugins {}\n")
+    (root / "package.json").write_text('{"name":"fixture","dependencies":{}}\n')
+    application = android / "app/src/main/java/com/example/MainApplication.kt"
+    application.parent.mkdir(parents=True)
+    application.write_text(
+        "fun packages() = PackageList(this).packages.apply {\n}\n"
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("outside bytes\n")
+
+    if unsafe_path == "settings_final":
+        target = android / "settings.gradle"
+        target.unlink()
+        target.symlink_to(sentinel)
+    elif unsafe_path == "settings_ancestor":
+        external_android = outside / "android"
+        (external_android / "app").mkdir(parents=True)
+        (external_android / "settings.gradle").write_text("include ':app'\n")
+        (external_android / "app/build.gradle").write_text("plugins {}\n")
+        shutil.rmtree(android)
+        android.symlink_to(external_android, target_is_directory=True)
+    elif unsafe_path == "app_final":
+        target = android / "app/build.gradle"
+        target.unlink()
+        target.symlink_to(sentinel)
+    elif unsafe_path == "app_ancestor":
+        external_app = outside / "app"
+        external_app.mkdir()
+        (external_app / "build.gradle").write_text("plugins {}\n")
+        shutil.rmtree(android / "app")
+        (android / "app").symlink_to(external_app, target_is_directory=True)
+    elif unsafe_path == "application_final":
+        application.unlink()
+        application.symlink_to(sentinel)
+    else:
+        java = android / "app/src/main/java"
+        external_java = outside / "java"
+        external_application = external_java / "com/example/MainApplication.kt"
+        external_application.parent.mkdir(parents=True)
+        external_application.write_text(
+            "fun packages() = PackageList(this).packages.apply {\n}\n"
+        )
+        shutil.rmtree(java)
+        java.symlink_to(external_java, target_is_directory=True)
+    sentinel_bytes = sentinel.read_bytes()
+    sentinel_metadata = sentinel.lstat()
+
+    with pytest.raises((ConfigurationError, FilesystemError)):
+        GenerationService(root).plan(
+            operation="bootstrap",
+            requested_targets=(),
+            allow_unmanifested_bootstrap=True,
+        )
+
+    after = sentinel.lstat()
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+        sentinel_metadata.st_mode,
+        sentinel_metadata.st_atime_ns,
+        sentinel_metadata.st_mtime_ns,
+    )

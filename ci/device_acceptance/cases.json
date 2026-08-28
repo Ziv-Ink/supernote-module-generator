@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "suite": "v4-bounded-note-doc-final",
+  "pinned_file_reader_revision": "9f626ed39be82b43ff74eb735d10b7de61f51508",
+  "pinned_sn_plugin_lib": "0.1.63",
+  "hosts": {
+    "note": {
+      "permission": "plugin.permission.FILE:WRITE",
+      "permission_action": "deny",
+      "host_api": "PluginNoteAPI.saveCurrentNote"
+    },
+    "doc": {
+      "permission": "plugin.permission.FILE:READ",
+      "permission_action": "allow_once",
+      "host_api": "PluginDocAPI.getCurrentTotalPages"
+    }
+  },
+  "checks": [
+    {"id": "cpp-scalar", "surface": "generated-cpp-jsi"},
+    {"id": "cpp-string-bool", "surface": "generated-cpp-jsi"},
+    {"id": "cpp-async", "surface": "generated-cpp-jsi"},
+    {"id": "cpp-object", "surface": "generated-cpp-jsi"},
+    {"id": "jvm-string", "surface": "generated-kotlin-jni-jsi"},
+    {"id": "android-build-info", "surface": "safe-android-api"},
+    {"id": "jvm-async", "surface": "generated-kotlin-jni-jsi"},
+    {"id": "mixed-cpp-jvm", "surface": "generated-cross-family-js"},
+    {"id": "plugin-name", "surface": "PluginManager.getPluginName"},
+    {"id": "plugin-private-directory", "surface": "PluginManager.getPluginDirPath"},
+    {"id": "device-type", "surface": "PluginManager.getDeviceType"},
+    {"id": "current-file", "surface": "PluginCommAPI.getCurrentFilePath"},
+    {"id": "current-page-handwriting", "surface": "PluginCommAPI.getCurrentPageNum+canHandwrite"},
+    {"id": "host-specific-api", "surface": "PluginNoteAPI-or-PluginDocAPI"},
+    {"id": "permission-status-request-result", "surface": "PluginManager-permission-flow"}
+  ],
+  "references": [
+    "https://docs.supernote.com/en/api-reference/supernote-plugin/plugin-manager/index",
+    "https://docs.supernote.com/en/api-reference/supernote-plugin/plugin-comm-api/index",
+    "https://docs.supernote.com/en/api-reference/supernote-plugin/plugin-note-api/index",
+    "https://docs.supernote.com/en/api-reference/supernote-plugin/plugin-doc-api/index",
+    "https://docs.supernote.com/en/plugin-base/permission.md"
+  ]
+}

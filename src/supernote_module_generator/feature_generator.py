@@ -1,4 +1,4 @@
-"""Transactional scaffolding for one language-neutral V3 logical feature."""
+"""Transactional scaffolding for one language-neutral V4 logical feature."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +10,8 @@ import tempfile
 import uuid
 
 from . import __version__
+from .filesystem import copy_tree_contents_no_follow, entry_kind
+from .feature_identity import FeatureIdentity
 from .feature_model import FeatureManifest, StarterFamily
 from .readme_codegen import render_feature_readme
 from .semantic import SemanticApi
@@ -33,6 +35,11 @@ class FeatureConfig:
     starters: tuple[StarterFamily, ...] = (StarterFamily.NATIVE,)
 
     def __post_init__(self) -> None:
+        FeatureIdentity.create(
+            npm_name=self.npm_name,
+            android_namespace=self.android_namespace,
+            package_version=self.package_version,
+        )
         if not self.starters:
             raise ValueError("at least one starter family is required")
         if len(set(self.starters)) != len(self.starters):
@@ -46,9 +53,11 @@ def stage_feature(
 ) -> Path:
     destination = config.output.resolve()
     parent = destination.parent
-    staging_parent = parent if parent.exists() else parent.parent
-    if not staging_parent.exists():
-        raise ValueError(f"output parent does not exist: {staging_parent}")
+    staging_parent = parent
+    while not staging_parent.exists() and staging_parent != staging_parent.parent:
+        staging_parent = staging_parent.parent
+    if not staging_parent.is_dir():
+        raise ValueError(f"output parent does not exist: {parent}")
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=staging_parent)
     )
@@ -59,7 +68,7 @@ def stage_feature(
             StarterFamily.NATIVE in config.starters
             and (
                 preserve_sources_from is None
-                or (preserve_sources_from / native_starter).is_file()
+                or entry_kind(preserve_sources_from / native_starter) == "file"
             )
         ):
             relative = native_starter
@@ -81,7 +90,7 @@ def stage_feature(
             StarterFamily.JVM in config.starters
             and (
                 preserve_sources_from is None
-                or (preserve_sources_from / jvm_starter).is_file()
+                or entry_kind(preserve_sources_from / jvm_starter) == "file"
             )
         ):
             relative = jvm_starter
@@ -120,7 +129,7 @@ def stage_feature(
             "package.json",
             json.dumps(package, indent=2, ensure_ascii=False) + "\n",
         )
-        global_name = "__supernoteV3"
+        global_name = "__supernoteV4"
         _write(
             temporary,
             "index.js",
@@ -135,7 +144,7 @@ def stage_feature(
             "const ERROR_CONSTRUCTOR_PROPERTY = '__supernoteErrorConstructor';\n"
             "const CPP_OBJECT_INFO_PROPERTY = '__supernoteCppObjectInfo';\n"
             "const JVM_OBJECT_INFO_PROPERTY = '__supernoteJvmObjectInfo';\n"
-            f"const INSTALL_ERROR = {_javascript_string(config.public_name + ' is not installed in the Supernote V3 runtime')};\n\n"
+            f"const INSTALL_ERROR = {_javascript_string(config.public_name + ' is not installed in the Supernote V4 runtime')};\n\n"
             "const VALIDATION_REASONS = new Set([\n"
             "  'ARITY_MISMATCH',\n"
             "  'TYPE_MISMATCH',\n"
@@ -170,12 +179,18 @@ def stage_feature(
             "}\n\n"
             "export function nativeObjectInfo(value) {\n"
             "  const current = currentFeature();\n"
-            "  if (current.status !== 'available') return undefined;\n"
+            "  if (current.status !== 'available') {\n"
+            "    return undefined;\n"
+            "  }\n"
             "  for (const property of [CPP_OBJECT_INFO_PROPERTY, JVM_OBJECT_INFO_PROPERTY]) {\n"
             "    const inspect = current.value[property];\n"
-            "    if (typeof inspect !== 'function') continue;\n"
+            "    if (typeof inspect !== 'function') {\n"
+            "      continue;\n"
+            "    }\n"
             "    const info = inspect(value);\n"
-            "    if (info !== undefined) return info;\n"
+            "    if (info !== undefined) {\n"
+            "      return info;\n"
+            "    }\n"
             "  }\n"
             "  return undefined;\n"
             "}\n\n"
@@ -346,11 +361,4 @@ def _write(root: Path, relative: str, content: str) -> None:
 
 
 def _copy_user_tree(source: Path, target: Path) -> None:
-    if not source.is_dir():
-        return
-    for item in sorted(source.rglob("*")):
-        if not item.is_file():
-            continue
-        destination = target / item.relative_to(source)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item, destination)
+    copy_tree_contents_no_follow(source, target)

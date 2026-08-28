@@ -1,4 +1,4 @@
-"""Project authoritative KSP/JVM source facts into common V3 semantics."""
+"""Project authoritative KSP/JVM source facts into common V4 semantics."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -158,7 +158,7 @@ def canonical_jvm_type(
         raise _error(
             source,
             f"unsupported marked {language.value} type {spelling!r}; "
-            f"use one canonical V3 type ({accepted})",
+            f"use one canonical V4 type ({accepted})",
         )
     if semantic is SemanticType.VOID and not result:
         raise _error(source, "void/Unit is valid only as a marked result")

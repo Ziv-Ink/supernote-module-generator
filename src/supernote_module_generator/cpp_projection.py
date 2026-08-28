@@ -263,7 +263,7 @@ def canonical_cpp_type(
         raise _error(
             source,
             f"unsupported marked C++ type {spelling!r}; use a canonical "
-            f"owned V3 type ({accepted})",
+            f"owned V4 type ({accepted})",
         )
     raise AssertionError("unreachable")
 
@@ -290,7 +290,7 @@ def project_cpp_function(
     if source.provenance.language == "c" or source.provenance.path.endswith(".c"):
         raise _error(
             source,
-            "direct marked C bindings are unsupported in initial V3; place the "
+            "direct marked C bindings are unsupported in initial V4; place the "
             "marker on a canonical C++ boundary that calls ordinary C23 code",
         )
     if source.provenance.language != "cpp":
@@ -449,7 +449,7 @@ def _select_js_constructor(
             raise _error(
                 constructor,
                 "SupernoteConstructor must select an eligible public, "
-                "non-deleted constructor using canonical V3 value types",
+                "non-deleted constructor using canonical V4 value types",
             )
     if not eligible:
         raise _error(

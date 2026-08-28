@@ -44,7 +44,7 @@ path.
   users must rebuild after changing exports.
 - Successful Remove deletes both ownership classes because the product action
   is removal of the complete local package.
-- Metadata/ownership changes require migration tests and release notes.
+- Metadata/ownership changes require unsupported-legacy rejection tests and release notes.
 - Tests must inject failures around staging, activation, dependency work,
   verification, commit, and startup recovery; prose specifications are not a
   substitute for these tests.

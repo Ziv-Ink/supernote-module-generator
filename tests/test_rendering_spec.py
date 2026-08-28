@@ -6,10 +6,13 @@ import time
 import pytest
 
 from supernote_module_generator.models import (
+    Change,
     CommandResult,
     DoctorCheckResult,
     DoctorResult,
     ErrorInfo,
+    RollbackResult,
+    ValidationResult,
     WarningInfo,
 )
 from supernote_module_generator.rendering import (
@@ -160,6 +163,81 @@ def test_internal_error_wording_and_traceback_are_debug_only():
     assert "Traceback text" not in ordinary_err.getvalue()
     assert "Transaction: abc123" in debug_err.getvalue()
     assert "Traceback text" in debug_err.getvalue()
+
+
+def test_json_contract_reports_cancellation_and_true_actual_changes():
+    cancelled = CommandResult(
+        "update",
+        status="cancelled",
+        exit_code=130,
+        changes=[
+            Change("generated.txt", "updated", "generated"),
+            Change("user.cpp", "preserved", "user"),
+        ],
+        metadata={"cancellation_message": "Operation cancelled."},
+    ).to_dict()
+
+    assert cancelled["cancellation"] == {
+        "requested": True,
+        "status": "completed",
+        "reason": "Operation cancelled.",
+    }
+    assert cancelled["changes"] == [
+        {"path": "generated.txt", "action": "update", "ownership": "generated"},
+        {"path": "user.cpp", "action": "preserve", "ownership": "user"},
+    ]
+    assert cancelled["actual_changes"] == []
+
+
+def test_json_contract_reports_partial_cancellation_independent_of_status():
+    partial = CommandResult(
+        "update",
+        status="partial",
+        exit_code=3,
+        rollback=RollbackResult(True, "partial", ["generated.txt"]),
+        changes=[Change("residue.txt", "update", "rollback_residue")],
+        error=ErrorInfo(
+            "cancellation_rollback_partial",
+            "rollback",
+            "Exact rollback could not be verified.",
+        ),
+        metadata={
+            "cancellation_requested": True,
+            "cancellation_message": "Operation cancelled.",
+        },
+    ).to_dict()
+
+    assert partial["cancellation"] == {
+        "requested": True,
+        "status": "partial",
+        "reason": "Operation cancelled.",
+    }
+    assert partial["actual_changes"] == [
+        {"path": "residue.txt", "action": "update", "ownership": "rollback_residue"}
+    ]
+
+
+def test_json_contract_normalizes_legacy_issues_to_stable_v4_fields():
+    payload = CommandResult(
+        "validate",
+        status="failure",
+        exit_code=1,
+        validation=ValidationResult(
+            structural="failed",
+            issues=[{"kind": "parent_dependency", "message": "link is stale"}],
+        ),
+    ).to_dict()
+
+    assert payload["issues"] == [
+        {
+            "kind": "parent_dependency",
+            "message": "link is stale",
+            "code": "SNV4_PARENT_DEPENDENCY",
+            "severity": "error",
+            "scope": "plugin",
+        }
+    ]
+    assert payload["issues"] == payload["validation"]["issues"]
 
 
 def test_animated_progress_clears_the_active_line_when_work_raises():

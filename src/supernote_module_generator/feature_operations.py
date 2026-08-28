@@ -1,16 +1,15 @@
-"""Atomic V3 logical-feature and shared-runtime mutations."""
+"""Atomic V4 logical-feature and shared-runtime mutations."""
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-import shutil
-import uuid
 from dataclasses import dataclass
 
 from . import __version__, binding_codegen
 from .errors import ConfigurationError, GeneratorError
 from .feature_generator import FeatureConfig, stage_feature
+from .feature_identity import FeatureIdentity
+from .filesystem import contained_entry_kind_no_follow, lexists
 from .feature_model import (
     FEATURE_MANIFEST_KIND,
     FeatureModelError,
@@ -18,7 +17,6 @@ from .feature_model import (
     FeatureRegistryEntry,
     ImplementationRoots,
     PluginRuntimeRegistry,
-    StarterFamily,
 )
 from .plugin_runtime_codegen import (
     RUNTIME_RELATIVE_ROOT,
@@ -26,8 +24,10 @@ from .plugin_runtime_codegen import (
     stage_plugin_runtime,
 )
 from .plugin_build_integration import set_runtime_wiring, verify_runtime_wiring
+from .plugin_build_integration import integration_mutation_files
 from .semantic import SemanticApi
 from .models import ModuleInfo
+from .transaction import Transaction
 
 
 class FeatureOperationError(ConfigurationError):
@@ -42,13 +42,10 @@ class FeatureMetadataError(GeneratorError):
 
 
 class FeatureSourceError(GeneratorError):
-    """A marked user declaration cannot be represented by V3 bindings."""
+    """A marked user declaration cannot be represented by V4 bindings."""
 
     kind = "invalid_source"
     phase = "preflight"
-
-
-LEGACY_RUNTIME_RELATIVE_ROOT = Path("android/.supernote-module/v2-runtime")
 
 
 @dataclass(frozen=True)
@@ -57,6 +54,15 @@ class FeatureRecord:
     manifest: FeatureManifest
     package_version: str
     description: str
+
+    @property
+    def identity(self) -> FeatureIdentity:
+        return FeatureIdentity.create(
+            npm_name=self.manifest.npm_name,
+            android_namespace=self.manifest.android_namespace,
+            package_version=self.package_version,
+            feature_id=self.manifest.feature_id,
+        )
 
     def info(self) -> ModuleInfo:
         return ModuleInfo(
@@ -78,187 +84,69 @@ class FeatureOperationService:
         self.root = plugin_root.resolve()
         self.features_root = self.root / "local_modules"
 
-    def add(self, config: FeatureConfig) -> Path:
+    def add(
+        self,
+        config: FeatureConfig,
+        *,
+        transaction: Transaction | None = None,
+    ) -> Path:
         had_features = bool(self.feature_paths())
+        runtime_root = self.root / RUNTIME_RELATIVE_ROOT
+        if (
+            not had_features
+            and contained_entry_kind_no_follow(self.root, runtime_root) is not None
+        ):
+            raise FeatureOperationError(
+                "shared V4 runtime exists without feature or integrity-manifest "
+                f"ownership authority: {runtime_root}"
+            )
         verify_runtime_wiring(
             self.root,
             enabled=had_features,
             allow_missing_package=True,
-            allow_legacy_v2=True,
         )
         destination = config.output.resolve()
-        if destination.exists():
+        if lexists(config.output) or destination.exists():
             raise FeatureOperationError(f"feature already exists: {config.npm_name}")
-        staged_feature = stage_feature(config)
-        staged_runtime = None
-        feature_backup = None
-        runtime_backup = None
-        feature_activated = False
-        runtime_activated = False
-        integration_mutated = False
-        legacy_runtime_backup = None
-        legacy_runtime_deactivated = False
+        journal, owns_journal = self._journal(
+            transaction, "add", (config.npm_name,)
+        )
         try:
+            staged_feature = stage_feature(config)
+            journal.track_created(staged_feature)
             future = self._entries(extra=(staged_feature,), excluding=())
+            journal.track_created_directory(
+                (self.root / RUNTIME_RELATIVE_ROOT).parent
+            )
             staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
-            feature_backup = self._activate(staged_feature, destination)
-            feature_activated = True
-            runtime_backup = self._activate(
-                staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
-            )
-            runtime_activated = True
-            legacy_runtime_backup = self._deactivate(
-                self.root / LEGACY_RUNTIME_RELATIVE_ROOT
-            )
-            legacy_runtime_deactivated = True
+            journal.track_created(staged_runtime)
+            journal.checkpoint("after_staging")
+            journal.activate(staged_feature, destination)
+            journal.checkpoint("after_first_file_replacement")
+            journal.activate(staged_runtime, runtime_root)
             set_runtime_wiring(self.root, enabled=True)
-            integration_mutated = True
+            journal.mark_write()
+            journal.checkpoint("after_wiring")
             verify_runtime_wiring(self.root, enabled=True)
-            self._finalize(feature_backup)
-            self._finalize(runtime_backup)
-            self._finalize(legacy_runtime_backup)
+            if owns_journal:
+                journal.commit()
             return destination
         except BaseException:
-            if feature_activated:
-                self._restore(destination, feature_backup)
-            if runtime_activated:
-                self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
-            if integration_mutated:
-                set_runtime_wiring(self.root, enabled=had_features)
-            if legacy_runtime_deactivated:
-                self._restore(
-                    self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
-                    legacy_runtime_backup,
-                )
-            shutil.rmtree(staged_feature, ignore_errors=True)
-            if staged_runtime is not None:
-                shutil.rmtree(staged_runtime, ignore_errors=True)
+            if owns_journal:
+                journal.rollback()
             raise
 
-    def update(self, npm_name: str) -> Path:
-        had_features = bool(self.feature_paths())
-        verify_runtime_wiring(
-            self.root,
-            enabled=had_features,
-            allow_missing_package=True,
-            allow_legacy_v2=True,
-        )
-        current = self.find(npm_name)
-        metadata = read_feature_manifest(current)
-        raw = json.loads((current / ".supernote-module.json").read_text())
-        starters = _starter_families(metadata.starter_files)
-        config = FeatureConfig(
-            output=current,
-            npm_name=metadata.npm_name,
-            package_version=str(raw["package_version"]),
-            android_namespace=metadata.android_namespace,
-            public_name=metadata.public_name,
-            description=str(raw.get("description", "")),
-            starters=starters or (StarterFamily.NATIVE,),
-        )
-        staged_feature = stage_feature(config, preserve_sources_from=current)
-        staged_runtime = None
-        feature_backup = None
-        runtime_backup = None
-        feature_activated = False
-        runtime_activated = False
-        integration_mutated = False
-        legacy_runtime_backup = None
-        legacy_runtime_deactivated = False
-        try:
-            future = self._entries(extra=(staged_feature,), excluding=(current,))
-            staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
-            feature_backup = self._activate(staged_feature, current)
-            feature_activated = True
-            runtime_backup = self._activate(
-                staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
-            )
-            runtime_activated = True
-            legacy_runtime_backup = self._deactivate(
-                self.root / LEGACY_RUNTIME_RELATIVE_ROOT
-            )
-            legacy_runtime_deactivated = True
-            set_runtime_wiring(self.root, enabled=True)
-            integration_mutated = True
-            verify_runtime_wiring(self.root, enabled=True)
-            self._finalize(feature_backup)
-            self._finalize(runtime_backup)
-            self._finalize(legacy_runtime_backup)
-            return current
-        except BaseException:
-            if feature_activated:
-                self._restore(current, feature_backup)
-            if runtime_activated:
-                self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
-            if integration_mutated:
-                set_runtime_wiring(self.root, enabled=had_features)
-            if legacy_runtime_deactivated:
-                self._restore(
-                    self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
-                    legacy_runtime_backup,
-                )
-            shutil.rmtree(staged_feature, ignore_errors=True)
-            if staged_runtime is not None:
-                shutil.rmtree(staged_runtime, ignore_errors=True)
-            raise
-
-    def remove(self, npm_name: str) -> None:
-        had_features = bool(self.feature_paths())
-        verify_runtime_wiring(
-            self.root,
-            enabled=had_features,
-            allow_missing_package=True,
-            allow_legacy_v2=True,
-        )
-        current = self.find(npm_name)
-        staged_runtime = None
-        runtime_backup = None
-        runtime_activated = False
-        integration_mutated = False
-        legacy_runtime_backup = None
-        legacy_runtime_deactivated = False
-        feature_backup = current.parent / f".{current.name}.removed-{uuid.uuid4().hex}"
-        try:
-            future = self._entries(extra=(), excluding=(current,))
-            if future:
-                staged_runtime = stage_plugin_runtime(
-                    self.root, self._registry(future)
-                )
-            os.replace(current, feature_backup)
-            if staged_runtime is not None:
-                runtime_backup = self._activate(
-                    staged_runtime, self.root / RUNTIME_RELATIVE_ROOT
-                )
-            else:
-                runtime_backup = self._deactivate(
-                    self.root / RUNTIME_RELATIVE_ROOT
-                )
-            runtime_activated = True
-            legacy_runtime_backup = self._deactivate(
-                self.root / LEGACY_RUNTIME_RELATIVE_ROOT
-            )
-            legacy_runtime_deactivated = True
-            set_runtime_wiring(self.root, enabled=bool(future))
-            integration_mutated = True
-            verify_runtime_wiring(self.root, enabled=bool(future))
-            shutil.rmtree(feature_backup)
-            self._finalize(runtime_backup)
-            self._finalize(legacy_runtime_backup)
-        except BaseException:
-            if feature_backup.exists() and not current.exists():
-                os.replace(feature_backup, current)
-            if runtime_activated:
-                self._restore(self.root / RUNTIME_RELATIVE_ROOT, runtime_backup)
-            if integration_mutated:
-                set_runtime_wiring(self.root, enabled=had_features)
-            if legacy_runtime_deactivated:
-                self._restore(
-                    self.root / LEGACY_RUNTIME_RELATIVE_ROOT,
-                    legacy_runtime_backup,
-                )
-            if staged_runtime is not None:
-                shutil.rmtree(staged_runtime, ignore_errors=True)
-            raise
+    def _journal(
+        self,
+        transaction: Transaction | None,
+        command: str,
+        modules: tuple[str, ...],
+    ) -> tuple[Transaction, bool]:
+        if transaction is not None:
+            return transaction, False
+        journal = Transaction(self.root, command, modules)
+        journal.snapshot(integration_mutation_files(self.root))
+        return journal, True
 
     def find(self, npm_name: str) -> Path:
         for path in self.feature_paths():
@@ -272,15 +160,46 @@ class FeatureOperationService:
         if not self.features_root.is_dir():
             return []
         self._reject_escaping_feature_links()
-        result = []
-        for metadata in sorted(self.features_root.rglob(".supernote-module.json")):
-            relative = metadata.relative_to(self.features_root)
-            if any(part.startswith(".") for part in relative.parts[:-1]):
-                continue
+        result: list[Path] = []
+        for metadata in self._canonical_metadata_candidates():
             self._reject_escaping_managed_path(metadata)
-            read_feature_manifest(metadata.parent)
+            record = read_feature_record(metadata.parent)
+            record.identity.validate_directory(self.root, metadata.parent)
             result.append(metadata.parent)
         return result
+
+    def _canonical_metadata_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        try:
+            children = sorted(self.features_root.iterdir())
+        except OSError as exc:
+            raise FeatureMetadataError(
+                f"managed feature directory could not be read:\n\n"
+                f"{self.features_root}: {exc}"
+            ) from exc
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            if child.name.startswith("@"):
+                if not child.is_dir():
+                    continue
+                try:
+                    packages = sorted(child.iterdir())
+                except OSError as exc:
+                    raise FeatureMetadataError(
+                        f"managed feature scope could not be read:\n\n{child}: {exc}"
+                    ) from exc
+                for package in packages:
+                    if package.name.startswith("."):
+                        continue
+                    metadata = package / ".supernote-module.json"
+                    if metadata.is_file():
+                        candidates.append(metadata)
+                continue
+            metadata = child / ".supernote-module.json"
+            if metadata.is_file():
+                candidates.append(metadata)
+        return candidates
 
     def _reject_escaping_feature_links(self) -> None:
         """Reject managed package-root links without policing user source links."""
@@ -353,13 +272,10 @@ class FeatureOperationService:
             verify_runtime_wiring(self.root, enabled=bool(records))
         except Exception as exc:
             issues.append(str(exc))
-        legacy_runtime = self.root / LEGACY_RUNTIME_RELATIVE_ROOT
-        if legacy_runtime.exists():
-            issues.append(f"stale generated V2 runtime exists: {legacy_runtime}")
         runtime = self.root / RUNTIME_RELATIVE_ROOT
         if not records:
             if runtime.exists():
-                issues.append("shared V3 runtime exists without any features")
+                issues.append("shared V4 runtime exists without any features")
             return issues
         try:
             expected = generated_runtime_files(self.expected_registry())
@@ -423,47 +339,6 @@ class FeatureOperationService:
             features=entries,
         )
 
-    @staticmethod
-    def _activate(staged: Path, destination: Path) -> Path | None:
-        backup = None
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            backup = destination.parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
-            os.replace(destination, backup)
-        try:
-            os.replace(staged, destination)
-            return backup
-        except Exception:
-            if backup is not None and backup.exists():
-                os.replace(backup, destination)
-            raise
-
-    @staticmethod
-    def _restore(destination: Path, backup: Path | None) -> None:
-        if backup is None:
-            shutil.rmtree(destination, ignore_errors=True)
-            return
-        if destination.exists():
-            shutil.rmtree(destination)
-        if backup.exists():
-            os.replace(backup, destination)
-
-    @staticmethod
-    def _deactivate(destination: Path) -> Path | None:
-        if not destination.exists():
-            return None
-        backup = destination.parent / (
-            f".{destination.name}.backup-{uuid.uuid4().hex}"
-        )
-        os.replace(destination, backup)
-        return backup
-
-    @staticmethod
-    def _finalize(backup: Path | None) -> None:
-        if backup is not None:
-            shutil.rmtree(backup, ignore_errors=True)
-
-
 def read_feature_manifest(path: Path) -> FeatureManifest:
     metadata = path / ".supernote-module.json"
     raw = _read_feature_metadata(metadata)
@@ -505,15 +380,17 @@ def read_feature_record(path: Path) -> FeatureRecord:
         description = raw.get("description", "")
         if not isinstance(description, str):
             raise TypeError("description must be a string")
-        return FeatureRecord(
-            path.resolve(),
+        record = FeatureRecord(
+            path.absolute(),
             read_feature_manifest(path),
             package_version,
             description,
         )
+        record.identity
+        return record
     except FeatureMetadataError:
         raise
-    except (KeyError, TypeError, ValueError) as exc:
+    except (ConfigurationError, KeyError, TypeError, ValueError) as exc:
         raise _invalid_feature_metadata(metadata, str(exc)) from exc
 
 
@@ -565,12 +442,3 @@ def _array_string(value: list[object], index: int) -> str:
     if not isinstance(item, str):
         raise TypeError(f"starter_files[{index}] must be a string")
     return item
-
-
-def _starter_families(files: tuple[str, ...]) -> tuple[StarterFamily, ...]:
-    values = []
-    if any(path.startswith("android/src/main/cpp/") for path in files):
-        values.append(StarterFamily.NATIVE)
-    if any(path.startswith("android/src/main/java/") for path in files):
-        values.append(StarterFamily.JVM)
-    return tuple(values)

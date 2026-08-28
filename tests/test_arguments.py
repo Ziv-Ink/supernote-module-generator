@@ -39,6 +39,40 @@ def test_duplicate_starter_values_are_rejected():
         parse_arguments(["add", "local-math", "--starter", "cpp", "--starter", "cpp"])
 
 
+def test_repeated_identical_single_value_option_is_idempotent():
+    parsed = parse_arguments(
+        ["update", "local-math", "--package-manager=npm", "--package-manager", "npm"]
+    )
+
+    assert parsed.value("package_manager") == "npm"
+
+
+def test_conflicting_single_value_option_is_rejected():
+    with pytest.raises(ConfigurationError, match="conflicting values"):
+        parse_arguments(
+            ["update", "local-math", "--package-manager=npm", "--package-manager=yarn"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["add", "local-math", "--description"], "--description requires a value"),
+        (["add", "local-math", "--starter=rust"], 'invalid starter family "rust"'),
+        (
+            ["update", "local-math", "--package-manager=pnpm"],
+            'invalid package manager "pnpm"',
+        ),
+        (["help", "unknown"], 'unknown command "unknown"'),
+        (["check", "local-math"], "check does not accept a module name"),
+        (["repair", "local-math"], "repair does not accept a module name"),
+    ],
+)
+def test_parser_phase_policy_errors_remain_exact(arguments: list[str], message: str):
+    with pytest.raises(ConfigurationError, match=message):
+        parse_arguments(arguments)
+
+
 @pytest.mark.parametrize("legacy", ["native", "jni", "jsi"])
 def test_v1_type_option_is_rejected(legacy: str):
     with pytest.raises(ConfigurationError, match='unknown option "--type"'):
@@ -115,6 +149,17 @@ def test_output_modes_are_mutually_exclusive():
         parse_arguments(["doctor", "--quiet", "--json"])
 
 
+@pytest.mark.parametrize("option", ["--yes", "-y", "--dry-run"])
+def test_template_status_rejects_mutation_options(option: str):
+    with pytest.raises(ConfigurationError, match="template status does not accept"):
+        parse_arguments(["template", "status", option])
+
+
+def test_template_sync_modes_are_mutually_exclusive():
+    with pytest.raises(ConfigurationError, match="--dry-run and --yes"):
+        parse_arguments(["template", "sync", "--dry-run", "--yes"])
+
+
 def test_plain_and_no_color_are_valid_json_noops():
     parsed = parse_arguments(["doctor", "--json", "--plain", "--no-color"])
     assert parsed.output_mode == "json"
@@ -184,6 +229,16 @@ def test_help_matches_update_remove_and_doctor_behavior():
     assert "Java 17 through 23" in doctor
     assert "Java 17 is" in doctor and "recommended" in doctor
     assert "NDK Clang with C23/C++23" in doctor
+    assert "--build" in doctor
+    assert "project-built" in doctor
+
+
+def test_doctor_accepts_explicit_full_build_probe():
+    parsed = parse_arguments(["doctor", "--build", "--json"])
+
+    assert parsed.command == "doctor"
+    assert parsed.has("build")
+    assert parsed.output_mode == "json"
 
 
 def test_version_is_exact_and_works_outside_plugin(tmp_path: Path):

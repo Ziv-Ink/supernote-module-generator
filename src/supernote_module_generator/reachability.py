@@ -1,16 +1,15 @@
-"""Compute the JavaScript-public V3 type graph from common semantics."""
+"""Compute the JavaScript-public V4 type graph from common semantics."""
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, Tuple
+from typing import Deque, Dict, Tuple
 
 from .semantic import (
     MemberScope,
     SemanticApi,
     SemanticBinding,
     SemanticDeclaration,
-    SemanticEnumDeclaration,
     SemanticModelError,
     SemanticObjectDeclaration,
     SemanticValueDeclaration,

@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import IO, Callable, Iterator, Optional
+from typing import IO, Iterator, Optional
 
 from .models import CommandResult, ErrorInfo, WarningInfo
 from .terminal_text import AsciiTextStream
@@ -213,6 +213,11 @@ class Renderer:
                         f"{self.symbols['warning']} {check.label}: {check.message}",
                         file=self.stderr,
                     )
+        if (
+            self.mode != "quiet"
+            and isinstance(result.metadata.get("plan"), dict)
+        ):
+            self._render_generation_plan(result)
         line = self._success_line(result)
         if self.mode == "quiet":
             print(line, file=self.stdout)
@@ -229,6 +234,37 @@ class Renderer:
         if next_action:
             print(f"  Next: {next_action}", file=self.stdout)
 
+    def _render_generation_plan(self, result: CommandResult) -> None:
+        requested = result.metadata.get("requested_targets", [])
+        affected = result.metadata.get("affected_targets", [])
+        requested_set = set(requested) if isinstance(requested, list) else set()
+        also = [item for item in affected if item not in requested_set]
+        print("Requested:", file=self.stdout)
+        if requested:
+            for item in requested:
+                print(f"  {item}", file=self.stdout)
+        else:
+            print("  (project state check)", file=self.stdout)
+        print("\nAlso affected:", file=self.stdout)
+        if also:
+            for item in also:
+                print(f"  {item}", file=self.stdout)
+        else:
+            print("  (none)", file=self.stdout)
+        print("\nChanges:", file=self.stdout)
+        if result.changes:
+            for change in result.changes:
+                print(f"  {change.action:<6} {change.path}", file=self.stdout)
+        else:
+            print("  (none)", file=self.stdout)
+        diff = result.metadata.get("diff")
+        if isinstance(diff, str) and diff:
+            print("\nDiff:", file=self.stdout)
+            self.stdout.write(diff)
+            if not diff.endswith("\n"):
+                print(file=self.stdout)
+        print(file=self.stdout)
+
     def _render_failure(self, result: CommandResult) -> None:
         error = result.error
         if error is None:
@@ -237,7 +273,7 @@ class Renderer:
                 file=self.stderr,
             )
             return
-        if result.exit_code == 2:
+        if error.kind == "usage" and error.phase == "parse":
             print(f"error: {error.message}", file=self.stderr)
             recovery_text = result.metadata.get("recovery_text")
             if recovery_text:
@@ -253,8 +289,9 @@ class Renderer:
                 ),
                 file=self.stderr,
             )
-            if result.metadata.get("next_action"):
-                print(f"\n  Next: {result.metadata['next_action']}", file=self.stderr)
+            next_action = result.next_action or result.metadata.get("next_action")
+            if next_action:
+                print(f"\n  Next: {next_action}", file=self.stderr)
             return
         if result.command == "validate" and result.validation is not None:
             self._render_validation_failure(result, error)
@@ -287,11 +324,18 @@ class Renderer:
                 )
         rollback = result.rollback.status.replace("_", " ").title()
         print(f"\n  Rollback: {rollback}", file=self.stderr)
-        if result.recovery is not None:
+        if result.next_action:
+            print(f"  Next:     {result.next_action}", file=self.stderr)
+        elif result.recovery is not None:
             command = " ".join(result.recovery.command)
             print(f"  Next:     {command}", file=self.stderr)
         elif result.metadata.get("next_action"):
-            print(f"  Next:     {result.metadata['next_action']}", file=self.stderr)
+            print(
+                f"  Next:     {result.metadata['next_action']}",
+                file=self.stderr,
+            )
+        for path in result.diagnostics:
+            print(f"  Diagnostics: {path}", file=self.stderr)
         self._render_debug(error)
 
     def _render_validation_failure(
@@ -299,6 +343,11 @@ class Renderer:
         result: CommandResult,
         error: ErrorInfo,
     ) -> None:
+        if result.validation is not None and any(
+            "code" in issue for issue in result.validation.issues
+        ):
+            self._render_v4_validation_failure(result, error)
+            return
         if result.modules:
             noun = (
                 "features"
@@ -388,6 +437,40 @@ class Renderer:
             print(f"\n  Next:     {result.metadata['next_action']}", file=self.stderr)
         self._render_debug(error)
 
+    def _render_v4_validation_failure(
+        self,
+        result: CommandResult,
+        error: ErrorInfo,
+    ) -> None:
+        assert result.validation is not None
+        print(
+            self.style(
+                "error",
+                f"{self.symbols['failure']} Authoritative validation failed",
+            ),
+            file=self.stderr,
+        )
+        for issue in result.validation.issues:
+            code = str(issue.get("code", "SNV4_VALIDATION_FAILED"))
+            scope = str(issue.get("scope", "plugin"))
+            feature = issue.get("feature_id")
+            location = f" ({feature})" if feature else ""
+            print(
+                f"\n  [{scope}] {code}{location}: {issue.get('message', error.message)}",
+                file=self.stderr,
+            )
+            if issue.get("path"):
+                print(f"    Path: {issue['path']}", file=self.stderr)
+        if error.subprocess is not None:
+            for line in error.subprocess.relevant_lines[:8]:
+                print(f"\n    {line}", file=self.stderr)
+        next_action = result.next_action or result.metadata.get("next_action")
+        if next_action:
+            print(f"\n  Next:     {next_action}", file=self.stderr)
+        for path in result.diagnostics:
+            print(f"  Diagnostics: {path}", file=self.stderr)
+        self._render_debug(error)
+
     def _render_debug(self, error: object) -> None:
         if not self.debug or not isinstance(error, ErrorInfo) or error.internal is None:
             return
@@ -417,8 +500,13 @@ class Renderer:
         )
         groups = (
             (
+                "Doctor",
+                ("doctor_probe_execution",),
+                "Required Doctor probes",
+            ),
+            (
                 "Project",
-                ("project",),
+                ("project", "doctor_source_integrity"),
                 "Plugin root and package metadata",
             ),
             (
@@ -428,13 +516,22 @@ class Renderer:
             ),
             (
                 "Android",
-                ("java", "android_sdk", "gradle_wrapper"),
-                "Java, Android SDK, Gradle wrapper",
+                (
+                    "java",
+                    "gradle_jvm",
+                    "android_sdk",
+                    "android_platform",
+                    "android_build_tools",
+                    "adb",
+                    "gradle_wrapper",
+                    "android_project_build",
+                ),
+                "Selected Java, Android SDK tools, ADB, and Gradle wrapper",
             ),
             (
                 "Native",
-                ("cmake", "android_ndk"),
-                "CMake and Android NDK",
+                ("cmake", "android_ndk_installed", "android_ndk"),
+                "CMake and the project-selected Android NDK",
             ),
             (
                 "JSI runtime",

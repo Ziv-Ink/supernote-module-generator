@@ -118,6 +118,92 @@ def test_overlapping_cli_command_fails_cleanly_before_mutation(tmp_path: Path):
     assert not list(root.glob(".supernote-module-transaction-*"))
 
 
+def test_busy_json_preserves_semantic_error_kind_and_phase(tmp_path: Path):
+    root = plugin(tmp_path)
+
+    with plugin_operation_lock(root):
+        code, stdout, stderr = invoke(root, ["--json", "validate", "--all"])
+
+    payload = json.loads(stdout)
+    assert code == 2
+    assert stderr == ""
+    assert payload["error"]["kind"] == "plugin_busy"
+    assert payload["error"]["phase"] == "preflight"
+    assert payload["exit_code"] == 2
+    assert payload["next_action"] == (
+        "Correct the reported problem and rerun Validate."
+    )
+
+
+def test_matching_parent_build_hook_reuses_read_only_check_without_lock_race(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["--json", "add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    manifest = json.loads((root / ".supernote-module/manifest.json").read_text())
+    monkeypatch.setenv(
+        "SUPERNOTE_MODULE_PARENT_GENERATION_ID", manifest["generation_id"]
+    )
+
+    with plugin_operation_lock(root):
+        code, stdout, stderr = invoke(
+            root, ["--json", "check", "--build-hook"]
+        )
+
+    payload = json.loads(stdout)
+    assert code == 0
+    assert stderr == ""
+    assert payload["status"] == "success"
+    assert payload["validation"]["structural"] == "passed"
+
+
+def test_parent_build_hook_bypass_rejects_wrong_generation_and_active_journal(
+    tmp_path: Path, monkeypatch
+):
+    root = plugin(tmp_path)
+    assert invoke(
+        root,
+        ["--json", "add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
+    )[0] == 0
+    manifest = json.loads((root / ".supernote-module/manifest.json").read_text())
+
+    monkeypatch.setenv("SUPERNOTE_MODULE_PARENT_GENERATION_ID", "wrong-generation")
+    with plugin_operation_lock(root):
+        wrong_code, wrong_stdout, _ = invoke(
+            root, ["--json", "check", "--build-hook"]
+        )
+    assert wrong_code == 2
+    assert json.loads(wrong_stdout)["error"]["kind"] == "plugin_busy"
+
+    monkeypatch.setenv(
+        "SUPERNOTE_MODULE_PARENT_GENERATION_ID", manifest["generation_id"]
+    )
+    transaction = Transaction(root, "update", ("alpha",))
+    try:
+        with plugin_operation_lock(root):
+            journal_code, journal_stdout, _ = invoke(
+                root, ["--json", "check", "--build-hook"]
+            )
+        assert journal_code == 2
+        assert json.loads(journal_stdout)["error"]["kind"] == "plugin_busy"
+
+        monkeypatch.setenv(
+            "SUPERNOTE_MODULE_PARENT_TRANSACTION_ID", transaction.identifier
+        )
+        with plugin_operation_lock(root):
+            matched_code, matched_stdout, matched_stderr = invoke(
+                root, ["--json", "check", "--build-hook"]
+            )
+        assert matched_code == 0
+        assert matched_stderr == ""
+        assert json.loads(matched_stdout)["status"] == "success"
+    finally:
+        assert transaction.rollback().status == "completed"
+
+
 def test_two_overlapping_add_commands_have_one_clean_winner(
     tmp_path: Path, monkeypatch
 ):

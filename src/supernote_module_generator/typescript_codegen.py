@@ -34,7 +34,7 @@ def render_typescript(feature_name: str, api: SemanticApi) -> str:
     ]
 
     # Retain the old class records while their Phase 4 replacement tests are
-    # still useful. V3 declarations never depend on this compatibility path.
+    # still useful. V4 declarations never depend on this compatibility path.
     legacy_interfaces = []
     legacy_properties = []
     for item in api.classes:
@@ -58,7 +58,6 @@ def render_typescript(feature_name: str, api: SemanticApi) -> str:
         legacy_properties.append(f"  {item.name}: {item.name}Factory;")
 
     root_properties = list(legacy_properties)
-    by_id = {item.type_id: item for item in public.declarations}
     for item in sorted(public.declarations, key=lambda value: (value.name, value.type_id)):
         members = []
         if isinstance(item, SemanticObjectDeclaration):
@@ -95,6 +94,7 @@ def render_typescript(feature_name: str, api: SemanticApi) -> str:
         "  | 'IMPLEMENTATION_ERROR'\n"
         "  | 'INTERNAL';\n\n"
         "export class SupernoteError extends Error {\n"
+        "  constructor(code: SupernoteErrorCode, message: string);\n"
         "  readonly code: SupernoteErrorCode;\n"
         "}\n\n"
         "export type SupernoteValidationReason =\n"

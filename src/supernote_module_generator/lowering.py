@@ -139,7 +139,7 @@ class LoweringPlan:
                 for item in semantic_types
             ):
                 raise LoweringError(
-                    "recursive V3 routes require the shared binding conversion plan"
+                    "recursive V4 routes require the shared binding conversion plan"
                 )
         else:
             try:

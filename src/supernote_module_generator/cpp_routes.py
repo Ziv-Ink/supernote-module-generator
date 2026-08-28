@@ -1,4 +1,4 @@
-"""Source-backed C++ routes for the V3 semantic object model.
+"""Source-backed C++ routes for the V4 semantic object model.
 
 The semantic API deliberately forgets source-language ownership spellings.  This
 module joins those public semantics back to the exact declarations found by the

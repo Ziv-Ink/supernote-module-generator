@@ -5,11 +5,82 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 import sys
 
 if __package__:
+    from .cpp_class_syntax import (
+        CppClassSyntaxError,
+        class_definition_extent as _decide_class_definition_extent,
+    )
+    from .cpp_declarations import (
+        ClassStackKind,
+        CppDeclarationError,
+        MarkerStack as _MarkerStack,
+        class_stack_route as _declaration_class_stack_route,
+        first_unconsumed_marker as _declaration_first_unconsumed_marker,
+        intent_from_stack as _declaration_intent_from_stack,
+        member_marker_bindings as _declaration_member_marker_bindings,
+        marker_entries as _declaration_marker_entries,
+        marker_stacks as _marker_stacks,
+        namespace_at as _namespace_at,
+        unmarked_class_owner_offsets as _declaration_owner_offsets,
+        validate_marker_stack_location as _declaration_validate_marker_location,
+    )
+    from .cpp_function_syntax import (
+        CppFunctionSyntaxError,
+        function_declaration_boundary as _decide_function_declaration_boundary,
+        function_head as _decide_function_head,
+        function_parameters as _decide_function_parameters,
+        function_tail_start as _decide_function_tail_start,
+        validate_function_body_opening as _validate_function_body_opening,
+    )
+    from .cpp_global_functions import (
+        global_function_shape as _decide_global_function_shape,
+    )
+    from .cpp_lexer import _LexedSource, _LineComment, _Token, _lex_source
+    from .cpp_source_routing import (
+        CPP_HEADER_SUFFIXES,
+        CPP_IMPLEMENTATION_SUFFIXES as CPP_SUFFIXES,
+        first_owned_jni_bootstrap as _first_owned_jni_bootstrap,
+        forbidden_marker_message as _forbidden_marker_message,
+        source_route as _cpp_source_route,
+    )
+    from .jsi_binding_decisions import (
+        JsiBindingDecisionError,
+        JsiBindingMode,
+        JsiRegistrationKind,
+        async_helpers_required as _jsi_async_helpers_required,
+        binding_mode as _jsi_binding_mode,
+        registration_kind as _jsi_registration_kind,
+    )
+    from .cpp_members import (
+        member_declarations as _member_declarations,
+        parameter_groups as _parameter_groups,
+    )
+    from .cpp_member_semantics import (
+        CppMemberDecisionError,
+        constructor_suffix as _decide_constructor_suffix,
+        parse_member_qualifiers as _decide_member_qualifiers,
+    )
+    from .cpp_member_shapes import (
+        CppCallableHead,
+        CppCallableKind,
+        CppConstructorRoute,
+        CppMemberShapeError,
+        CppStoredMemberKind,
+        callable_head as _decide_callable_head,
+        constructor_route as _decide_constructor_route,
+        field_shape as _decide_field_shape,
+        method_shape as _decide_method_shape,
+        stored_member_kind as _decide_stored_member_kind,
+    )
+    from .cpp_type_syntax import (
+        CppTypeSyntaxError,
+        parameter_list_syntax as _decide_parameter_list_syntax,
+    )
     from .cpp_object_binding_codegen import render_cpp_object_bindings
     from .cpp_routes import CppRouteError, plan_cpp_routes
     from .cpp_projection import (
@@ -33,12 +104,86 @@ if __package__:
         CppMethodSource,
         CppParameterSource,
         DeclarationTarget,
-        MarkerOccurrence,
         SourceIntent,
         SourceModelError,
         SupernoteMarker,
     )
 else:
+    from supernote_codegen.cpp_class_syntax import (  # type: ignore[no-redef]
+        CppClassSyntaxError,
+        class_definition_extent as _decide_class_definition_extent,
+    )
+    from supernote_codegen.cpp_declarations import (  # type: ignore[no-redef]
+        ClassStackKind,
+        CppDeclarationError,
+        MarkerStack as _MarkerStack,
+        class_stack_route as _declaration_class_stack_route,
+        first_unconsumed_marker as _declaration_first_unconsumed_marker,
+        intent_from_stack as _declaration_intent_from_stack,
+        member_marker_bindings as _declaration_member_marker_bindings,
+        marker_entries as _declaration_marker_entries,
+        marker_stacks as _marker_stacks,
+        namespace_at as _namespace_at,
+        unmarked_class_owner_offsets as _declaration_owner_offsets,
+        validate_marker_stack_location as _declaration_validate_marker_location,
+    )
+    from supernote_codegen.cpp_function_syntax import (  # type: ignore[no-redef]
+        CppFunctionSyntaxError,
+        function_declaration_boundary as _decide_function_declaration_boundary,
+        function_head as _decide_function_head,
+        function_parameters as _decide_function_parameters,
+        function_tail_start as _decide_function_tail_start,
+        validate_function_body_opening as _validate_function_body_opening,
+    )
+    from supernote_codegen.cpp_global_functions import (  # type: ignore[no-redef]
+        global_function_shape as _decide_global_function_shape,
+    )
+    from supernote_codegen.cpp_lexer import (  # type: ignore[no-redef]
+        _LexedSource,
+        _LineComment,
+        _Token,
+        _lex_source,
+    )
+    from supernote_codegen.cpp_source_routing import (  # type: ignore[no-redef]
+        CPP_HEADER_SUFFIXES,
+        CPP_IMPLEMENTATION_SUFFIXES as CPP_SUFFIXES,
+        first_owned_jni_bootstrap as _first_owned_jni_bootstrap,
+        forbidden_marker_message as _forbidden_marker_message,
+        source_route as _cpp_source_route,
+    )
+    from supernote_codegen.jsi_binding_decisions import (  # type: ignore[no-redef]
+        JsiBindingDecisionError,
+        JsiBindingMode,
+        JsiRegistrationKind,
+        async_helpers_required as _jsi_async_helpers_required,
+        binding_mode as _jsi_binding_mode,
+        registration_kind as _jsi_registration_kind,
+    )
+    from supernote_codegen.cpp_members import (  # type: ignore[no-redef]
+        member_declarations as _member_declarations,
+        parameter_groups as _parameter_groups,
+    )
+    from supernote_codegen.cpp_member_semantics import (  # type: ignore[no-redef]
+        CppMemberDecisionError,
+        constructor_suffix as _decide_constructor_suffix,
+        parse_member_qualifiers as _decide_member_qualifiers,
+    )
+    from supernote_codegen.cpp_member_shapes import (  # type: ignore[no-redef]
+        CppCallableHead,
+        CppCallableKind,
+        CppConstructorRoute,
+        CppMemberShapeError,
+        CppStoredMemberKind,
+        callable_head as _decide_callable_head,
+        constructor_route as _decide_constructor_route,
+        field_shape as _decide_field_shape,
+        method_shape as _decide_method_shape,
+        stored_member_kind as _decide_stored_member_kind,
+    )
+    from supernote_codegen.cpp_type_syntax import (  # type: ignore[no-redef]
+        CppTypeSyntaxError,
+        parameter_list_syntax as _decide_parameter_list_syntax,
+    )
     from supernote_codegen.cpp_object_binding_codegen import (  # type: ignore[no-redef]
         render_cpp_object_bindings,
     )
@@ -67,35 +212,45 @@ else:
         CppMethodSource,
         CppParameterSource,
         DeclarationTarget,
-        MarkerOccurrence,
         SourceIntent,
         SourceModelError,
         SupernoteMarker,
     )
 
 
-SOURCE_MARKERS = {
-    marker.value: marker
-    for marker in SupernoteMarker
-}
-SOURCE_MARKER = re.compile(r"@(?P<name>Supernote[A-Za-z][A-Za-z0-9_]*)")
+def _iter_source_tree_no_follow(root: Path):
+    """Yield source entries without entering directory symlinks."""
+
+    if root.is_symlink():
+        return
+    pending = [root]
+    entries = []
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as stream:
+                children = sorted(stream, key=lambda child: child.name, reverse=True)
+        except OSError as exc:
+            raise CodegenError(
+                f"could not inspect C/C++ source directory {directory}: {exc}"
+            ) from exc
+        for child in children:
+            path = Path(child.path)
+            entries.append(path)
+            try:
+                if child.is_dir(follow_symlinks=False):
+                    pending.append(path)
+            except OSError as exc:
+                raise CodegenError(
+                    f"could not inspect C/C++ source entry {path}: {exc}"
+                ) from exc
+    yield from sorted(entries)
+
+
 OBJECT_ANNOTATION = re.compile(
     r"@SupernoteExportObject"
     r"(?:\(\s*name\s*=\s*\"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\"\s*\))?"
 )
-CPP_SUFFIXES = {".cc", ".cpp", ".cxx"}
-CPP_HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
-FORBIDDEN_TAG_SUFFIXES = {
-    ".c",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".hxx",
-    ".inl",
-    ".inc",
-    ".ipp",
-    ".tpp",
-}
 KOTLIN_KEYWORDS = {
     "_", "actual", "abstract", "annotation", "as", "break", "by", "catch",
     "class", "companion", "const", "constructor", "continue", "crossinline",
@@ -358,265 +513,16 @@ class ScannedBindings:
     objects: tuple[ObjectExport, ...]
 
 
+@dataclass(frozen=True)
+class _CppClassParseContext:
+    namespace: tuple[str, ...]
+    intent: SourceIntent
+    following: tuple[_Token, ...]
+    diagnostic_line: int
+
+
 def _error(path: Path, line: int, message: str) -> CodegenError:
     return CodegenError(f"{path}:{line}: {message}")
-
-
-@dataclass(frozen=True)
-class _Token:
-    value: str
-    start: int
-    end: int
-    line: int
-    kind: str
-    conditional_depth: int
-    brace_depth: int
-
-
-@dataclass(frozen=True)
-class _LineComment:
-    text: str
-    start: int
-    end: int
-    line: int
-    line_only: bool
-    conditional_depth: int
-    brace_depth: int
-
-
-@dataclass(frozen=True)
-class _Directive:
-    start: int
-    end: int
-    line: int
-    name: str
-
-
-@dataclass(frozen=True)
-class _LexedSource:
-    tokens: tuple[_Token, ...]
-    comments: tuple[_LineComment, ...]
-    directives: tuple[_Directive, ...]
-
-
-def _consume_newlines(
-    text: str,
-    start: int,
-    end: int,
-    line: int,
-    line_start: int,
-) -> tuple[int, int]:
-    for index in range(start, end):
-        if text[index] == "\n":
-            line += 1
-            line_start = index + 1
-    return line, line_start
-
-
-def _raw_string_end(text: str, start: int) -> int | None:
-    prefixes = ("u8R\"", "uR\"", "UR\"", "LR\"", "R\"")
-    prefix = next(
-        (candidate for candidate in prefixes if text.startswith(candidate, start)),
-        None,
-    )
-    if prefix is None:
-        return None
-    delimiter_start = start + len(prefix)
-    opening = text.find("(", delimiter_start, delimiter_start + 17)
-    if opening < 0:
-        return None
-    delimiter = text[delimiter_start:opening]
-    if any(char.isspace() or char in {"\\", "(", ")"} for char in delimiter):
-        return None
-    terminator = ")" + delimiter + '"'
-    closing = text.find(terminator, opening + 1)
-    return len(text) if closing < 0 else closing + len(terminator)
-
-
-def _lex_source(text: str) -> _LexedSource:
-    """Lex just enough C/C++ to locate real line comments and declarations."""
-    tokens: list[_Token] = []
-    comments: list[_LineComment] = []
-    directives: list[_Directive] = []
-    index = 0
-    line = 1
-    line_start = 0
-    conditional_depth = 0
-    brace_depth = 0
-    size = len(text)
-
-    while index < size:
-        char = text[index]
-        next_char = text[index + 1] if index + 1 < size else ""
-
-        if char == "\n":
-            line += 1
-            line_start = index + 1
-            index += 1
-            continue
-        if char.isspace():
-            index += 1
-            continue
-
-        if char == "#" and not text[line_start:index].strip():
-            start = index
-            directive_line = line
-            end = index
-            while end < size:
-                newline = text.find("\n", end)
-                if newline < 0:
-                    end = size
-                    break
-                slash_count = 0
-                probe = newline - 1
-                while probe >= start and text[probe] == "\\":
-                    slash_count += 1
-                    probe -= 1
-                end = newline + 1
-                if slash_count % 2 == 0:
-                    break
-            first_line_end = text.find("\n", start, end)
-            if first_line_end < 0:
-                first_line_end = end
-            match = re.match(
-                r"#[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-                text[start:first_line_end],
-            )
-            name = match.group("name") if match else ""
-            directives.append(_Directive(start, end, directive_line, name))
-            if name in {"if", "ifdef", "ifndef"}:
-                conditional_depth += 1
-            elif name == "endif":
-                conditional_depth = max(0, conditional_depth - 1)
-            line, line_start = _consume_newlines(
-                text, start, end, line, line_start
-            )
-            index = end
-            continue
-
-        if char == "/" and next_char == "/":
-            end = text.find("\n", index + 2)
-            if end < 0:
-                end = size
-            comments.append(
-                _LineComment(
-                    text=text[index + 2:end],
-                    start=index,
-                    end=end,
-                    line=line,
-                    line_only=not text[line_start:index].strip(),
-                    conditional_depth=conditional_depth,
-                    brace_depth=brace_depth,
-                )
-            )
-            index = end
-            continue
-
-        if char == "/" and next_char == "*":
-            end_marker = text.find("*/", index + 2)
-            end = size if end_marker < 0 else end_marker + 2
-            line, line_start = _consume_newlines(
-                text, index, end, line, line_start
-            )
-            index = end
-            continue
-
-        raw_end = _raw_string_end(text, index)
-        if raw_end is not None:
-            tokens.append(
-                _Token(
-                    "<string>",
-                    index,
-                    raw_end,
-                    line,
-                    "string",
-                    conditional_depth,
-                    brace_depth,
-                )
-            )
-            line, line_start = _consume_newlines(
-                text, index, raw_end, line, line_start
-            )
-            index = raw_end
-            continue
-
-        if char in {'"', "'"}:
-            start = index
-            quote = char
-            index += 1
-            while index < size:
-                if text[index] == "\\":
-                    index = min(size, index + 2)
-                    continue
-                if text[index] == quote:
-                    index += 1
-                    break
-                if text[index] == "\n":
-                    line += 1
-                    line_start = index + 1
-                index += 1
-            tokens.append(
-                _Token(
-                    "<string>",
-                    start,
-                    index,
-                    line,
-                    "string",
-                    conditional_depth,
-                    brace_depth,
-                )
-            )
-            continue
-
-        if char.isalpha() or char == "_":
-            start = index
-            index += 1
-            while index < size and (
-                text[index].isalnum() or text[index] == "_"
-            ):
-                index += 1
-            tokens.append(
-                _Token(
-                    text[start:index],
-                    start,
-                    index,
-                    line,
-                    "identifier",
-                    conditional_depth,
-                    brace_depth,
-                )
-            )
-            continue
-
-        multi = next(
-            (
-                candidate
-                for candidate in ("...", "::", "[[", "]]", "->")
-                if text.startswith(candidate, index)
-            ),
-            None,
-        )
-        value = multi or char
-        end = index + len(value)
-        tokens.append(
-            _Token(
-                value,
-                index,
-                end,
-                line,
-                "punctuation",
-                conditional_depth,
-                brace_depth,
-            )
-        )
-        if conditional_depth == 0:
-            if value == "{":
-                brace_depth += 1
-            elif value == "}":
-                brace_depth = max(0, brace_depth - 1)
-        index = end
-
-    return _LexedSource(tuple(tokens), tuple(comments), tuple(directives))
 
 
 def _normalize_backend(backend: object) -> str:
@@ -664,34 +570,6 @@ def _source_error(
         f"{source}:{line}: module {module_name!r}, export {export!r}: {message}"
     )
 
-
-def _source_marker(
-    comment: _LineComment,
-) -> tuple[bool, SupernoteMarker | None]:
-    value = comment.text.strip()
-    if re.match(r"@SupernoteExportObject(?:\b|\()", value):
-        return False, None
-    match = SOURCE_MARKER.fullmatch(value)
-    if match:
-        marker = SOURCE_MARKERS.get(match.group("name"))
-        return True, marker
-    return bool(re.match(r"@Supernote(?:[A-Za-z0-9_]|\()", value)), None
-
-
-@dataclass(frozen=True)
-class _MarkerStack:
-    comments: tuple[_LineComment, ...]
-    markers: tuple[SupernoteMarker, ...]
-
-    @property
-    def first(self) -> _LineComment:
-        return self.comments[0]
-
-    @property
-    def last(self) -> _LineComment:
-        return self.comments[-1]
-
-
 def _object_marker_name(comment: _LineComment) -> tuple[bool, str | None]:
     value = comment.text.strip()
     match = OBJECT_ANNOTATION.fullmatch(value)
@@ -702,136 +580,6 @@ def _object_marker_name(comment: _LineComment) -> tuple[bool, str | None]:
 
 def _tokens_text(tokens: list[_Token]) -> str:
     return " ".join(token.value for token in tokens)
-
-
-_CPP_TYPE_TOKENS = {
-    ("void",): "void",
-    ("bool",): "bool",
-    ("int32_t",): "int32_t",
-    ("int64_t",): "int64_t",
-    ("float",): "float",
-    ("double",): "double",
-    ("std", "::", "int32_t"): "std::int32_t",
-    ("std", "::", "int64_t"): "std::int64_t",
-    ("std", "::", "string"): "std::string",
-    (
-        "std",
-        "::",
-        "vector",
-        "<",
-        "std",
-        "::",
-        "byte",
-        ">",
-    ): "std::vector<std::byte>",
-}
-
-
-def _type_prefix(tokens: list[_Token]) -> tuple[str | None, int]:
-    values = tuple(token.value for token in tokens)
-    for pattern, spelling in sorted(
-        _CPP_TYPE_TOKENS.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if values[: len(pattern)] == pattern:
-            return spelling, len(pattern)
-    return None, 0
-
-
-def _parse_parameter(
-    tokens: list[_Token],
-    *,
-    argument_index: int,
-    module_root: Path,
-    path: Path,
-    marker_line: int,
-    module_name: str,
-    export_name: str,
-) -> Parameter:
-    line = tokens[0].line if tokens else marker_line
-    expected = (
-        f"argument {argument_index} must use one named canonical V3 value "
-        "type, for example 'std::int32_t value'"
-    )
-    if not tokens:
-        raise _source_error(
-            module_root,
-            path,
-            line,
-            module_name,
-            export_name,
-            f"unsupported parameter; {expected}",
-        )
-    values = [token.value for token in tokens]
-    forbidden = {
-        "*": "raw pointers",
-        "=": "default arguments",
-        "...": "variadic arguments",
-        "[": "array parameters",
-        "[[": "attributes",
-        "(": "function or grouped parameter types",
-    }
-    for value, description in forbidden.items():
-        if value in values:
-            token = tokens[values.index(value)]
-            raise _source_error(
-                module_root,
-                path,
-                token.line,
-                module_name,
-                export_name,
-                f"unsupported parameter {_tokens_text(tokens)!r}: "
-                f"{description} are not supported; {expected}",
-            )
-
-    name = tokens[-1].value if tokens[-1].kind == "identifier" else None
-    type_tokens = tokens[:-1]
-    cpp_type = _cpp_type_spelling(type_tokens) if name is not None else None
-    if cpp_type is None or name is None:
-        raise _source_error(
-            module_root,
-            path,
-            line,
-            module_name,
-            export_name,
-            f"unsupported parameter {_tokens_text(tokens)!r}; {expected}",
-        )
-    if name in CPP23_KEYWORDS:
-        raise _source_error(
-            module_root,
-            path,
-            tokens[-1].line,
-            module_name,
-            export_name,
-            f"argument {argument_index} name {name!r} is a C++23 keyword; "
-            "rename the C++ parameter",
-        )
-    return Parameter(cpp_type, name)
-
-
-def _cpp_type_spelling(tokens: list[_Token]) -> str | None:
-    if not tokens:
-        return None
-    allowed_punctuation = {"::", "<", ">", "&"}
-    if any(
-        token.kind != "identifier" and token.value not in allowed_punctuation
-        for token in tokens
-    ):
-        return None
-    if sum(token.value == "<" for token in tokens) != sum(
-        token.value == ">" for token in tokens
-    ):
-        return None
-    if any(
-        token.value == "&" and index != len(tokens) - 1
-        for index, token in enumerate(tokens)
-    ):
-        return None
-    value = " ".join(token.value for token in tokens)
-    value = re.sub(r"\s*::\s*", "::", value)
-    value = re.sub(r"\s*<\s*", "<", value)
-    value = re.sub(r"\s*>\s*", ">", value)
-    value = re.sub(r"\s*&\s*", "&", value)
-    return value
 
 
 def _parse_function_source(
@@ -847,315 +595,114 @@ def _parse_function_source(
     marker = stack.first
     marker_export = "<pending>"
     namespace, namespace_depth = _namespace_at(lexed, marker.start)
-    for comment in stack.comments:
-        if not comment.line_only:
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                marker_export,
-                "a Supernote marker must be a // comment on its own line",
-            )
-        if comment.conditional_depth:
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                marker_export,
-                "Supernote markers are not allowed inside a preprocessor "
-                "conditional (#if, #ifdef, or #ifndef block)",
-            )
-        if comment.brace_depth != namespace_depth:
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                marker_export,
-                "a free-function marker must be at namespace scope, not inside "
-                "a class or function",
-            )
-
-    occurrences = tuple(
-        MarkerOccurrence(item, comment.line)
-        for item, comment in zip(stack.markers, stack.comments)
-    )
-    try:
-        intent = SourceIntent(DeclarationTarget.FUNCTION, occurrences)
-    except SourceModelError as exc:
-        diagnostic = stack.last
-        if len(stack.markers) != len(set(stack.markers)):
-            seen: set[SupernoteMarker] = set()
-            for item, comment in zip(stack.markers, stack.comments):
-                if item in seen:
-                    diagnostic = comment
-                    break
-                seen.add(item)
-        elif SupernoteMarker.ASYNC in stack.markers:
-            diagnostic = stack.comments[stack.markers.index(SupernoteMarker.ASYNC)]
-        elif SupernoteMarker.CONSTRUCTOR in stack.markers:
-            diagnostic = stack.comments[
-                stack.markers.index(SupernoteMarker.CONSTRUCTOR)
-            ]
-        raise _source_error(
-            module_root,
-            path,
-            diagnostic.line,
-            module_name,
-            marker_export,
-            str(exc),
-        ) from exc
-
-    active_tokens = [
-        token for token in lexed.tokens if token.conditional_depth == 0
-    ]
-    preceding = [token for token in active_tokens if token.end <= marker.start]
-    prefix: list[_Token] = []
-    for token in reversed(preceding):
-        if token.value in {";", "{", "}"}:
-            break
-        prefix.append(token)
-    prefix.reverse()
-    if prefix:
-        raise _source_error(
-            module_root,
-            path,
-            prefix[0].line,
-            module_name,
-            marker_export,
-            "unsupported declaration prefix before the marker "
-            f"{_tokens_text(prefix)!r}; place the Supernote marker stack "
-            "immediately before an unmodified function return type and remove "
-            "static, template, extern \"C\", attributes, or macros",
-        )
-
-    following = [token for token in active_tokens if token.start >= stack.last.end]
-    if not following or (
-        next_marker_start is not None
-        and following[0].start >= next_marker_start
-    ):
-        raise _source_error(
-            module_root,
-            path,
-            marker.line,
-            module_name,
-            marker_export,
-            "the Supernote marker stack must be followed by a supported "
-            "top-level function definition; expected "
-            "'std::int32_t name(std::int32_t value) {'",
-        )
-    first = following[0]
-    intervening_directive = next(
-        (
-            directive
-            for directive in lexed.directives
-            if stack.last.end <= directive.start < first.start
+    _validate_marker_stack_location(
+        module_root,
+        path,
+        module_name,
+        stack,
+        brace_depth=namespace_depth,
+        description="free-function",
+        export_name=marker_export,
+        brace_message=(
+            "a free-function marker must be at namespace scope, not inside "
+            "a class or function"
         ),
-        None,
     )
-    if intervening_directive is not None:
-        raise _source_error(
-            module_root,
-            path,
-            intervening_directive.line,
-            module_name,
-            marker_export,
-            "a preprocessor directive cannot occur between a Supernote marker "
-            "stack and its function definition",
-        )
-    between = text[stack.last.end:first.start]
-    if between.strip():
-        raise _source_error(
-            module_root,
-            path,
-            marker.line,
-            module_name,
-            marker_export,
-            "only whitespace may appear between the final Supernote marker "
-            "and the function return type",
-        )
-
-    cursor = 0
-    first_value = following[cursor].value
-    if first_value in FORBIDDEN_DECLARATION_PREFIXES or first_value == "[[":
-        raise _source_error(
-            module_root,
-            path,
-            following[cursor].line,
-            module_name,
-            marker_export,
-            "not a supported top-level function definition: declaration "
-            f"modifier {first_value!r} is forbidden; routable functions must "
-            "have ordinary external C++ linkage with no modifiers",
-        )
-
-    opening_signature = next(
-        (index for index, token in enumerate(following) if token.value == "("),
-        None,
+    intent = _intent_from_stack(
+        module_root,
+        path,
+        module_name,
+        stack,
+        DeclarationTarget.FUNCTION,
+        marker_export,
     )
-    if opening_signature is None or opening_signature < 2:
-        return_type = None
-        consumed = 0
-    else:
-        consumed = opening_signature - 1
-        return_type = _cpp_type_spelling(following[:consumed])
-    return_tokens = following[:consumed]
-    if any(token.value == "*" for token in return_tokens):
-        raise _source_error(
-            module_root, path, following[0].line, module_name,
-            marker_export,
-            "raw pointers are not supported as marked C++ results; "
-            "return one canonical owned V3 type",
-        )
-    if any(token.value in {"&", "&&"} for token in return_tokens):
-        raise _source_error(
-            module_root, path, following[0].line, module_name,
-            marker_export,
-            "references are not supported as marked C++ results; return "
-            "one canonical owned V3 type",
-        )
-    if return_type is None:
-        description = (
-            "unsupported declaration prefix or macro"
-            if following[cursor].kind == "identifier"
-            else "unsupported return declaration"
-        )
-        raise _source_error(
-            module_root,
-            path,
-            following[cursor].line,
-            module_name,
-            marker_export,
-            "not a supported top-level function definition: "
-            f"{description} {first_value!r}; expected one canonical V3 return "
-            "type followed by a function name",
-        )
-    cursor = consumed
 
-    if cursor >= len(following) or following[cursor].kind != "identifier":
-        line = following[min(cursor, len(following) - 1)].line
-        raise _source_error(
-            module_root,
-            path,
-            line,
-            module_name,
-            marker_export,
-            "not a supported top-level function definition: expected a C++ "
-            "function name after the return type",
-        )
-    function_token = following[cursor]
-    cpp_name = function_token.value
-    js_name = cpp_name
-    if cpp_name in CPP23_KEYWORDS:
-        raise _source_error(
-            module_root,
-            path,
-            following[cursor].line,
-            module_name,
-            js_name,
-            f"C++ function name {cpp_name!r} is a C++23 keyword; rename the "
-            "C++ function",
-        )
-    cursor += 1
-    if cursor >= len(following) or following[cursor].value != "(":
-        line = following[min(cursor, len(following) - 1)].line
-        raise _source_error(
-            module_root,
-            path,
-            line,
-            module_name,
-            js_name,
-            "not a supported top-level function definition: unsupported "
-            "modifier, attribute, or macro between the function name and '('",
-        )
-    cursor += 1
-
-    groups: list[list[_Token]] = []
-    group_start = cursor
-    nesting = 0
-    close_index: int | None = None
-    while cursor < len(following):
-        value = following[cursor].value
-        if value == "(":
-            nesting += 1
-        elif value == ")":
-            if nesting == 0:
-                groups.append(following[group_start:cursor])
-                close_index = cursor
-                break
-            nesting -= 1
-        elif value == "," and nesting == 0:
-            groups.append(following[group_start:cursor])
-            group_start = cursor + 1
-        elif value in {"{", ";"} and nesting == 0:
-            break
-        cursor += 1
-    if close_index is None:
-        raise _source_error(
-            module_root,
-            path,
-            marker.line,
-            module_name,
-            js_name,
-            "not a supported top-level function definition: missing ')' in "
-            "the tagged signature",
-        )
-    if len(groups) == 1 and not groups[0]:
-        groups = []
-
-    parameters: list[Parameter] = []
-    names: set[str] = set()
-    for argument_index, group in enumerate(groups, start=1):
-        parameter = _parse_parameter(
-            group,
-            argument_index=argument_index,
-            module_root=module_root,
-            path=path,
+    try:
+        boundary = _decide_function_declaration_boundary(
+            text,
+            lexed.tokens,
+            lexed.directives,
+            marker_start=marker.start,
             marker_line=marker.line,
-            module_name=module_name,
+            marker_end=stack.last.end,
+            next_marker_start=next_marker_start,
+            pending_export=marker_export,
+        )
+    except CppFunctionSyntaxError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            exc.export_name,
+            exc.message,
+        ) from exc
+    following = list(boundary.following)
+
+    try:
+        function_head = _decide_function_head(
+            following,
+            pending_export=marker_export,
+            forbidden_prefixes=FORBIDDEN_DECLARATION_PREFIXES,
+            keywords=CPP23_KEYWORDS,
+        )
+    except CppFunctionSyntaxError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            exc.export_name,
+            exc.message,
+        ) from exc
+    return_type = function_head.return_type_spelling
+    cpp_name = function_head.cpp_name
+    js_name = cpp_name
+    try:
+        function_parameters = _decide_function_parameters(
+            following,
+            opening_index=function_head.parameter_opening_index,
+            marker_line=marker.line,
             export_name=js_name,
         )
-        if parameter.name in names:
-            line = group[-1].line if group else marker.line
-            raise _source_error(
-                module_root,
-                path,
-                line,
-                module_name,
-                js_name,
-                f"duplicate parameter name {parameter.name!r} at argument "
-                f"{argument_index}; give every argument a unique name",
-            )
-        names.add(parameter.name)
-        parameters.append(parameter)
-
-    cursor = close_index + 1
-    is_noexcept = False
-    if cursor < len(following) and following[cursor].value == "noexcept":
-        is_noexcept = True
-        cursor += 1
-        if cursor < len(following) and following[cursor].value == "(":
-            raise _source_error(
-                module_root,
-                path,
-                following[cursor].line,
-                module_name,
-                js_name,
-                "only bare 'noexcept' is supported; remove the noexcept "
-                "expression",
-            )
-    if cursor >= len(following):
+    except CppFunctionSyntaxError as exc:
         raise _source_error(
             module_root,
             path,
-            marker.line,
+            exc.line,
             module_name,
-            js_name,
-            "tagged declaration has no function body; add '{ ... }'",
+            exc.export_name,
+            exc.message,
+        ) from exc
+    groups = [list(group) for group in function_parameters.groups]
+    close_index = function_parameters.closing_index
+
+    parameters = _parse_parameters(
+        groups,
+        module_root=module_root,
+        path=path,
+        marker_line=marker.line,
+        module_name=module_name,
+        export_name=js_name,
+    )
+
+    try:
+        function_tail = _decide_function_tail_start(
+            following,
+            close_index=close_index,
+            marker_line=marker.line,
+            export_name=js_name,
         )
-    opening = following[cursor]
+    except CppFunctionSyntaxError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            exc.export_name,
+            exc.message,
+        ) from exc
+    opening = following[function_tail.body_opening_index]
     directive = next(
         (
             item
@@ -1174,27 +721,17 @@ def _parse_function_source(
             "preprocessor directives are not supported inside a marked "
             "signature",
         )
-    if opening.value == ";":
+    try:
+        _validate_function_body_opening(opening, export_name=js_name)
+    except CppFunctionSyntaxError as exc:
         raise _source_error(
             module_root,
             path,
-            opening.line,
+            exc.line,
             module_name,
-            js_name,
-            "tagged declarations are not exported; provide the complete "
-            "function definition with a '{ ... }' body",
-        )
-    if opening.value != "{":
-        raise _source_error(
-            module_root,
-            path,
-            opening.line,
-            module_name,
-            js_name,
-            "unsupported tokens after the parameter list; only bare noexcept "
-            "followed by the function body is allowed (no attributes, macros, "
-            "qualifiers, or trailing return types)",
-        )
+            exc.export_name,
+            exc.message,
+        ) from exc
 
     relative = str(path.relative_to(module_root))
     signature = ",".join(parameter.cpp_type for parameter in parameters)
@@ -1212,36 +749,10 @@ def _parse_function_source(
             for parameter in parameters
         ),
         intent=intent,
-        noexcept=is_noexcept,
-        definition_offset=function_token.start,
+        noexcept=function_tail.noexcept,
+        definition_offset=function_head.definition_offset,
         namespace=namespace,
     )
-
-
-def _parameter_groups(
-    tokens: list[_Token],
-    opening: int,
-) -> tuple[list[list[_Token]], int]:
-    groups: list[list[_Token]] = []
-    group_start = opening + 1
-    depth = 0
-    cursor = opening + 1
-    while cursor < len(tokens):
-        value = tokens[cursor].value
-        if value == "(":
-            depth += 1
-        elif value == ")":
-            if depth == 0:
-                groups.append(tokens[group_start:cursor])
-                if len(groups) == 1 and not groups[0]:
-                    groups = []
-                return groups, cursor
-            depth -= 1
-        elif value == "," and depth == 0:
-            groups.append(tokens[group_start:cursor])
-            group_start = cursor + 1
-        cursor += 1
-    raise ValueError("missing closing parenthesis")
 
 
 def _parse_parameters(
@@ -1253,93 +764,22 @@ def _parse_parameters(
     module_name: str,
     export_name: str,
 ) -> tuple[Parameter, ...]:
-    parameters: list[Parameter] = []
-    names: set[str] = set()
-    for argument_index, group in enumerate(groups, start=1):
-        parameter = _parse_parameter(
-            group,
-            argument_index=argument_index,
-            module_root=module_root,
-            path=path,
+    try:
+        parameters = _decide_parameter_list_syntax(
+            groups,
             marker_line=marker_line,
-            module_name=module_name,
-            export_name=export_name,
+            keywords=CPP23_KEYWORDS,
         )
-        if parameter.name in names:
-            raise _source_error(
-                module_root,
-                path,
-                group[-1].line if group else marker_line,
-                module_name,
-                export_name,
-                f"duplicate parameter name {parameter.name!r} at argument "
-                f"{argument_index}; give every argument a unique name",
-            )
-        names.add(parameter.name)
-        parameters.append(parameter)
-    return tuple(parameters)
-
-
-def _member_declarations(
-    body: list[_Token],
-    *,
-    default_access: str,
-) -> list[tuple[str, list[_Token]]]:
-    """Return class-scope declarations without inspecting nested bodies."""
-    declarations: list[tuple[str, list[_Token]]] = []
-    access = default_access
-    cursor = 0
-    while cursor < len(body):
-        if (
-            cursor + 1 < len(body)
-            and body[cursor].value in {"public", "private", "protected"}
-            and body[cursor + 1].value == ":"
-        ):
-            access = body[cursor].value
-            cursor += 2
-            continue
-        start = cursor
-        paren_depth = 0
-        bracket_depth = 0
-        while cursor < len(body):
-            value = body[cursor].value
-            if value == "(":
-                paren_depth += 1
-                cursor += 1
-            elif value == ")":
-                paren_depth = max(0, paren_depth - 1)
-                cursor += 1
-            elif value in {"[", "[["}:
-                bracket_depth += 1
-                cursor += 1
-            elif value in {"]", "]]"}:
-                bracket_depth = max(0, bracket_depth - 1)
-                cursor += 1
-            elif value == ";" and paren_depth == 0 and bracket_depth == 0:
-                declarations.append((access, body[start:cursor]))
-                cursor += 1
-                break
-            elif value == "{" and paren_depth == 0 and bracket_depth == 0:
-                signature = body[start:cursor]
-                depth = 1
-                cursor += 1
-                while cursor < len(body) and depth:
-                    if body[cursor].value == "{":
-                        depth += 1
-                    elif body[cursor].value == "}":
-                        depth -= 1
-                    cursor += 1
-                if any(token.value == "(" for token in signature):
-                    declarations.append((access, signature))
-                if cursor < len(body) and body[cursor].value == ";":
-                    cursor += 1
-                break
-            else:
-                cursor += 1
-        else:
-            if body[start:]:
-                declarations.append((access, body[start:]))
-    return declarations
+    except CppTypeSyntaxError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            export_name,
+            exc.message,
+        ) from exc
+    return tuple(Parameter(item.cpp_type, item.name) for item in parameters)
 
 
 def _parse_member_qualifiers(
@@ -1352,420 +792,21 @@ def _parse_member_qualifiers(
     allow_const: bool,
     allow_default: bool,
 ) -> tuple[bool, bool]:
-    is_const = False
-    is_noexcept = False
-    cursor = 0
-    while cursor < len(tokens):
-        value = tokens[cursor].value
-        if value == "const" and allow_const and not is_const:
-            is_const = True
-            cursor += 1
-            continue
-        if value == "noexcept" and not is_noexcept:
-            is_noexcept = True
-            cursor += 1
-            if cursor < len(tokens) and tokens[cursor].value == "(":
-                raise _source_error(
-                    module_root, path, tokens[cursor].line, module_name,
-                    export_name,
-                    "only bare 'noexcept' is supported on exported objects",
-                )
-            continue
-        if (
-            allow_default
-            and cursor + 1 == len(tokens) - 1
-            and value == "="
-            and tokens[cursor + 1].value == "default"
-        ):
-            cursor += 2
-            continue
+    try:
+        return _decide_member_qualifiers(
+            tokens,
+            allow_const=allow_const,
+            allow_default=allow_default,
+        )
+    except CppMemberDecisionError as exc:
         raise _source_error(
             module_root,
             path,
-            tokens[cursor].line,
+            exc.line,
             module_name,
             export_name,
-            f"unsupported trailing object member token {value!r}; only "
-            "const and bare noexcept are supported",
-        )
-    return is_const, is_noexcept
-
-
-def _is_copy_or_move_constructor(
-    groups: list[list[_Token]],
-    cpp_name: str,
-) -> bool:
-    if len(groups) != 1:
-        return False
-    values = [token.value for token in groups[0]]
-    if values and groups[0][-1].kind == "identifier":
-        values = values[:-1]
-    return values in (
-        [cpp_name, "&"],
-        ["const", cpp_name, "&"],
-        [cpp_name, "&", "&"],
-    )
-
-
-def _parse_object_members(
-    *,
-    module_root: Path,
-    path: Path,
-    marker_line: int,
-    module_name: str,
-    cpp_name: str,
-    js_name: str,
-    kind: str,
-    body: list[_Token],
-) -> tuple[ObjectConstructor, tuple[ObjectMethod, ...]]:
-    constructors: list[ObjectConstructor] = []
-    methods: list[ObjectMethod] = []
-    method_names: dict[str, int] = {}
-    declarations = _member_declarations(
-        body,
-        default_access="private" if kind == "class" else "public",
-    )
-    for access, declaration in declarations:
-        if not declaration or access != "public":
-            continue
-        values = [token.value for token in declaration]
-        if values[0] in {"class", "struct", "template"}:
-            raise _source_error(
-                module_root, path, declaration[0].line, module_name, js_name,
-                "nested classes and templates are not supported in an "
-                "exported object's public API",
-            )
-        if "(" not in values:
-            continue
-        opening = values.index("(")
-        if "=" in values[:opening]:
-            continue
-        if opening + 1 < len(values) and values[opening + 1] == "*":
-            continue
-        if (
-            "*" in values[:opening]
-            and declaration[opening - 1].kind != "identifier"
-        ):
-            continue
-        if "operator" in values:
-            raise _source_error(
-                module_root, path, declaration[values.index("operator")].line,
-                module_name, js_name,
-                "operators are not supported in an exported object's public API",
-            )
-        if "static" in values[:opening]:
-            raise _source_error(
-                module_root, path, declaration[values.index("static")].line,
-                module_name, js_name,
-                "static methods are not supported in an exported object's public API",
-            )
-        if "virtual" in values[:opening]:
-            raise _source_error(
-                module_root, path, declaration[values.index("virtual")].line,
-                module_name, js_name,
-                "virtual methods are not supported in an exported object's public API",
-            )
-        try:
-            groups, closing = _parameter_groups(declaration, opening)
-        except ValueError:
-            raise _source_error(
-                module_root, path, declaration[opening].line, module_name,
-                js_name, "missing ')' in exported object member declaration",
-            ) from None
-        suffix = declaration[closing + 1:]
-        prefix = declaration[:opening]
-        if prefix[:2] == [declaration[0], declaration[1]] and values[:2] == ["~", cpp_name]:
-            continue
-        constructor_prefix = values[:opening]
-        if constructor_prefix in ([cpp_name], ["explicit", cpp_name]):
-            if _is_copy_or_move_constructor(groups, cpp_name):
-                continue
-            parameters = _parse_parameters(
-                groups,
-                module_root=module_root,
-                path=path,
-                marker_line=marker_line,
-                module_name=module_name,
-                export_name=f"{js_name}.create",
-            )
-            _parse_member_qualifiers(
-                suffix,
-                module_root=module_root,
-                path=path,
-                module_name=module_name,
-                export_name=f"{js_name}.create",
-                allow_const=False,
-                allow_default=True,
-            )
-            constructors.append(ObjectConstructor(parameters))
-            continue
-        return_type: str | None = None
-        name_index = 0
-        if values[0] in {"bool", "double", "void"}:
-            return_type = values[0]
-            name_index = 1
-        elif values[:3] == ["std", "::", "string"]:
-            return_type = "std::string"
-            name_index = 3
-        if (
-            return_type is None
-            or name_index >= opening
-            or declaration[name_index].kind != "identifier"
-            or name_index + 1 != opening
-        ):
-            raise _source_error(
-                module_root,
-                path,
-                declaration[0].line,
-                module_name,
-                js_name,
-                f"unsupported public method declaration "
-                f"{_tokens_text(declaration)!r}; methods must use bool, "
-                "double, std::string, or void types",
-            )
-        method_name = declaration[name_index].value
-        if method_name in CPP23_KEYWORDS:
-            raise _source_error(
-                module_root, path, declaration[name_index].line, module_name,
-                js_name, f"method name {method_name!r} is a C++23 keyword",
-            )
-        if method_name in method_names:
-            raise _source_error(
-                module_root, path, declaration[name_index].line, module_name,
-                js_name, f"overloaded or duplicate method {method_name!r}; "
-                f"first declared at line {method_names[method_name]}. "
-                "Object method overloads are not supported",
-            )
-        parameters = _parse_parameters(
-            groups,
-            module_root=module_root,
-            path=path,
-            marker_line=marker_line,
-            module_name=module_name,
-            export_name=f"{js_name}.{method_name}",
-        )
-        is_const, is_noexcept = _parse_member_qualifiers(
-            suffix,
-            module_root=module_root,
-            path=path,
-            module_name=module_name,
-            export_name=f"{js_name}.{method_name}",
-            allow_const=True,
-            allow_default=False,
-        )
-        method_names[method_name] = declaration[name_index].line
-        methods.append(
-            ObjectMethod(
-                line=declaration[name_index].line,
-                cpp_name=method_name,
-                js_name=method_name,
-                return_type=return_type,
-                parameters=parameters,
-                const=is_const,
-                noexcept=is_noexcept,
-            )
-        )
-    if not constructors:
-        raise _source_error(
-            module_root, path, marker_line, module_name, js_name,
-            "exported object must declare exactly one public callable constructor",
-        )
-    if len(constructors) > 1:
-        raise _source_error(
-            module_root, path, marker_line, module_name, js_name,
-            "exported object has overloaded public constructors; exactly one "
-            "callable constructor is supported",
-        )
-    return constructors[0], tuple(methods)
-
-
-def _parse_object_export(
-    *,
-    module_root: Path,
-    source_root: Path,
-    path: Path,
-    text: str,
-    lexed: _LexedSource,
-    marker: _LineComment,
-    renamed: str | None,
-    module_name: str,
-) -> ObjectExport:
-    marker_name = renamed or "<pending>"
-    if not marker.line_only:
-        raise _source_error(
-            module_root, path, marker.line, module_name, marker_name,
-            "the object export marker must be a // comment on its own line",
-        )
-    if marker.conditional_depth:
-        raise _source_error(
-            module_root, path, marker.line, module_name, marker_name,
-            "object export markers are not allowed inside preprocessor conditionals",
-        )
-    if marker.brace_depth:
-        raise _source_error(
-            module_root, path, marker.line, module_name, marker_name,
-            "exported objects must be top-level class or struct definitions; "
-            "nested exported classes are not supported",
-        )
-    active_tokens = [
-        token for token in lexed.tokens if token.conditional_depth == 0
-    ]
-    preceding = [token for token in active_tokens if token.end <= marker.start]
-    prefix: list[_Token] = []
-    for token in reversed(preceding):
-        if token.value in {";", "{", "}"}:
-            break
-        prefix.append(token)
-    prefix.reverse()
-    if prefix:
-        raise _source_error(
-            module_root, path, prefix[0].line, module_name, marker_name,
-            "unsupported declaration prefix before the object marker "
-            f"{_tokens_text(prefix)!r}; templates and declaration modifiers "
-            "are not supported",
-        )
-    following = [
-        token for token in active_tokens if token.start >= marker.end
-    ]
-    if not following:
-        raise _source_error(
-            module_root, path, marker.line, module_name, marker_name,
-            "object export tag must be followed by a class or struct definition",
-        )
-    first = following[0]
-    if text[marker.end:first.start].strip():
-        raise _source_error(
-            module_root, path, marker.line, module_name, marker_name,
-            "only whitespace may appear between the object marker and class or struct",
-        )
-    directive = next(
-        (item for item in lexed.directives if marker.end <= item.start < first.start),
-        None,
-    )
-    if directive is not None:
-        raise _source_error(
-            module_root, path, directive.line, module_name, marker_name,
-            "a preprocessor directive cannot occur between an object marker "
-            "and its class or struct definition",
-        )
-    if first.value not in {"class", "struct"}:
-        raise _source_error(
-            module_root, path, first.line, module_name, marker_name,
-            "object export tag must be followed by a class or struct definition",
-        )
-    if len(following) < 3 or following[1].kind != "identifier":
-        raise _source_error(
-            module_root, path, first.line, module_name, marker_name,
-            "exported class or struct must have an ordinary identifier name",
-        )
-    cpp_name = following[1].value
-    js_name = renamed or cpp_name
-    opening = next(
-        (index for index in range(2, len(following)) if following[index].value in {"{", ";"}),
-        None,
-    )
-    if opening is None or following[opening].value != "{":
-        raise _source_error(
-            module_root, path, first.line, module_name, js_name,
-            "export tag requires a complete class or struct definition, not a declaration",
-        )
-    prefix = following[2:opening]
-    if any(token.value == ":" for token in prefix):
-        raise _source_error(
-            module_root, path, prefix[0].line, module_name, js_name,
-            "inheritance is not supported for exported objects",
-        )
-    if prefix:
-        raise _source_error(
-            module_root, path, prefix[0].line, module_name, js_name,
-            f"unsupported tokens before exported object body {_tokens_text(prefix)!r}",
-        )
-    depth = 1
-    closing: int | None = None
-    cursor = opening + 1
-    while cursor < len(following):
-        if following[cursor].value == "{":
-            depth += 1
-        elif following[cursor].value == "}":
-            depth -= 1
-            if depth == 0:
-                closing = cursor
-                break
-        cursor += 1
-    if closing is None:
-        raise _source_error(
-            module_root, path, first.line, module_name, js_name,
-            "exported object definition is missing its closing '}'",
-        )
-    if closing + 1 >= len(following) or following[closing + 1].value != ";":
-        raise _source_error(
-            module_root, path, following[closing].line, module_name, js_name,
-            "exported object definition must end with '};'",
-        )
-    constructor, methods = _parse_object_members(
-        module_root=module_root,
-        path=path,
-        marker_line=marker.line,
-        module_name=module_name,
-        cpp_name=cpp_name,
-        js_name=js_name,
-        kind=first.value,
-        body=following[opening + 1:closing],
-    )
-    return ObjectExport(
-        source=str(path.relative_to(module_root)),
-        include=path.relative_to(source_root).as_posix(),
-        line=marker.line,
-        cpp_name=cpp_name,
-        js_name=js_name,
-        constructor=constructor,
-        methods=methods,
-    )
-
-
-def _matching_parenthesis(tokens: list[_Token], opening: int) -> int | None:
-    depth = 0
-    for index in range(opening, len(tokens)):
-        if tokens[index].value == "(":
-            depth += 1
-        elif tokens[index].value == ")":
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
-
-
-def _global_function_terminator(
-    tokens: list[_Token],
-    name_index: int,
-) -> int | None:
-    if (
-        name_index + 1 >= len(tokens)
-        or tokens[name_index + 1].value != "("
-    ):
-        return None
-    closing = _matching_parenthesis(tokens, name_index + 1)
-    if closing is None:
-        return None
-    cursor = closing + 1
-    if cursor < len(tokens) and tokens[cursor].value == "noexcept":
-        cursor += 1
-        if cursor < len(tokens) and tokens[cursor].value == "(":
-            noexcept_close = _matching_parenthesis(tokens, cursor)
-            if noexcept_close is None:
-                return None
-            cursor = noexcept_close + 1
-    if cursor < len(tokens) and tokens[cursor].value == "->":
-        cursor += 1
-        while cursor < len(tokens) and tokens[cursor].value not in {"{", ";"}:
-            cursor += 1
-    if (
-        cursor < len(tokens)
-        and tokens[cursor].brace_depth == 0
-        and tokens[cursor].value in {"{", ";"}
-    ):
-        return cursor
-    return None
+            exc.message,
+        ) from exc
 
 
 def _reject_untagged_global_functions(
@@ -1787,37 +828,27 @@ def _reject_untagged_global_functions(
         ]
         for index, token in enumerate(tokens):
             routed = routable_by_name.get(token.value)
-            if routed is None or token.brace_depth != 0:
+            if routed is None:
+                continue
+            _, namespace_depth = _namespace_at(lexed, token.start)
+            if token.brace_depth != namespace_depth:
                 continue
             if (source, token.start) in tagged_locations:
                 continue
-            terminator = _global_function_terminator(tokens, index)
-            if terminator is None:
-                continue
-
-            prefix: list[_Token] = []
-            for previous in reversed(tokens[:index]):
-                if previous.value in {";", "{", "}"}:
-                    break
-                prefix.append(previous)
-            prefix.reverse()
-            if not prefix or any(item.value == "=" for item in prefix):
-                continue
-            if prefix[-1].value in {".", "->", "::", "(", "[", ","}:
-                continue
-
-            kind = (
-                "definition"
-                if tokens[terminator].value == "{"
-                else "declaration"
+            shape = _decide_global_function_shape(
+                tokens,
+                name_index=index,
+                namespace_depth=namespace_depth,
             )
+            if shape is None:
+                continue
             raise _source_error(
                 module_root,
                 path,
                 token.line,
                 module_name,
                 routed.cpp_name,
-                f"untagged global {kind} for routable C++ name "
+                f"untagged global {shape.kind} for routable C++ name "
                 f"{token.value!r} conflicts with the tagged definition at "
                 f"{routed.provenance.path}:{routed.provenance.line}; overloads "
                 "and duplicate "
@@ -1832,56 +863,17 @@ def _marker_entries(
     lexed: _LexedSource,
     module_name: str,
 ) -> list[tuple[_LineComment, SupernoteMarker]]:
-    entries: list[tuple[_LineComment, SupernoteMarker]] = []
-    for comment in lexed.comments:
-        is_candidate, marker = _source_marker(comment)
-        if not is_candidate:
-            continue
-        if marker is None:
-            value = comment.text.strip()
-            match = SOURCE_MARKER.fullmatch(value)
-            if match and match.group("name") not in SOURCE_MARKERS:
-                message = (
-                    f"unknown Supernote marker {match.group('name')!r}; supported "
-                    "markers are SupernotePluginObject, SupernotePluginValue, "
-                    "SupernotePluginExport, SupernotePluginInternal, "
-                    "SupernotePluginAsync, and SupernoteConstructor"
-                )
-            else:
-                message = (
-                    "malformed Supernote marker; initial V3 markers take no "
-                    "arguments and must be written exactly, for example "
-                    "// @SupernotePluginExport"
-                )
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                None,
-                message,
-            )
-        entries.append((comment, marker))
-    return entries
-
-
-def _marker_stacks(
-    text: str,
-    entries: list[tuple[_LineComment, SupernoteMarker]],
-) -> list[_MarkerStack]:
-    stacks: list[_MarkerStack] = []
-    comments: list[_LineComment] = []
-    markers: list[SupernoteMarker] = []
-    for comment, marker in entries:
-        if comments and text[comments[-1].end:comment.start].strip():
-            stacks.append(_MarkerStack(tuple(comments), tuple(markers)))
-            comments = []
-            markers = []
-        comments.append(comment)
-        markers.append(marker)
-    if comments:
-        stacks.append(_MarkerStack(tuple(comments), tuple(markers)))
-    return stacks
+    try:
+        return _declaration_marker_entries(lexed)
+    except CppDeclarationError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            exc.export_name,
+            exc.message,
+        ) from exc
 
 
 def _intent_from_stack(
@@ -1892,37 +884,18 @@ def _intent_from_stack(
     target: DeclarationTarget,
     export_name: str | None,
 ) -> SourceIntent:
-    occurrences = tuple(
-        MarkerOccurrence(marker, comment.line)
-        for marker, comment in zip(stack.markers, stack.comments)
-    )
     try:
-        return SourceIntent(target, occurrences)
-    except SourceModelError as exc:
-        diagnostic = stack.last
-        if len(stack.markers) != len(set(stack.markers)):
-            seen: set[SupernoteMarker] = set()
-            for marker, comment in zip(stack.markers, stack.comments):
-                if marker in seen:
-                    diagnostic = comment
-                    break
-                seen.add(marker)
-        elif SupernoteMarker.ASYNC in stack.markers:
-            diagnostic = stack.comments[
-                stack.markers.index(SupernoteMarker.ASYNC)
-            ]
-        elif SupernoteMarker.CONSTRUCTOR in stack.markers:
-            diagnostic = stack.comments[
-                stack.markers.index(SupernoteMarker.CONSTRUCTOR)
-            ]
+        return _declaration_intent_from_stack(stack, target, export_name)
+    except CppDeclarationError as exc:
+        cause = exc.__cause__ if exc.__cause__ is not None else exc
         raise _source_error(
             module_root,
             path,
-            diagnostic.line,
+            exc.line,
             module_name,
-            export_name,
-            str(exc),
-        ) from exc
+            exc.export_name,
+            exc.message,
+        ) from cause
 
 
 def _validate_marker_stack_location(
@@ -1933,74 +906,46 @@ def _validate_marker_stack_location(
     *,
     brace_depth: int,
     description: str,
+    export_name: str | None = None,
+    brace_message: str | None = None,
 ) -> None:
-    for comment in stack.comments:
-        if not comment.line_only:
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                None,
-                "a Supernote marker must be a // comment on its own line",
-            )
-        if comment.conditional_depth:
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                None,
-                "Supernote markers are not allowed inside a preprocessor "
-                "conditional (#if, #ifdef, or #ifndef block)",
-            )
-        if comment.brace_depth != brace_depth:
-            raise _source_error(
-                module_root,
-                path,
-                comment.line,
-                module_name,
-                None,
-                f"a {description} marker must be at brace depth {brace_depth}",
-            )
-
-
-def _namespace_at(lexed: _LexedSource, offset: int) -> tuple[tuple[str, ...], int]:
-    tokens = [item for item in lexed.tokens if item.conditional_depth == 0]
-    ranges: list[tuple[int, int, tuple[str, ...]]] = []
-    for index, token in enumerate(tokens):
-        if token.value != "namespace" or token.start >= offset:
-            continue
-        cursor = index + 1
-        names: list[str] = []
-        expect_name = True
-        while cursor < len(tokens) and tokens[cursor].value != "{":
-            current = tokens[cursor]
-            if expect_name and current.kind == "identifier":
-                names.append(current.value)
-                expect_name = False
-            elif not expect_name and current.value == "::":
-                expect_name = True
-            else:
-                names = []
-                break
-            cursor += 1
-        if cursor >= len(tokens) or tokens[cursor].value != "{" or not names or expect_name:
-            continue
-        opening = tokens[cursor]
-        closing = next(
-            (
-                item
-                for item in tokens[cursor + 1:]
-                if item.value == "}" and item.brace_depth == opening.brace_depth + 1
-            ),
-            None,
+    try:
+        _declaration_validate_marker_location(
+            stack,
+            brace_depth=brace_depth,
+            description=description,
+            export_name=export_name,
+            brace_message=brace_message,
         )
-        if closing is not None and opening.end <= offset < closing.start:
-            ranges.append((opening.start, closing.start, tuple(names)))
-    ranges.sort(key=lambda item: item[0])
-    namespace = tuple(name for _, _, names in ranges for name in names)
-    return namespace, len(ranges)
+    except CppDeclarationError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            exc.export_name,
+            exc.message,
+        ) from exc
+
+
+def _class_stack_route(
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    lexed: _LexedSource,
+    stack: _MarkerStack,
+):
+    try:
+        return _declaration_class_stack_route(lexed, stack)
+    except CppDeclarationError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            exc.export_name,
+            exc.message,
+        ) from exc
 
 
 def _constructor_suffix(
@@ -2011,57 +956,539 @@ def _constructor_suffix(
     module_name: str,
     class_name: str,
 ) -> tuple[bool, bool]:
-    is_noexcept = False
-    cursor = 0
-    if cursor < len(tokens) and tokens[cursor].value == "noexcept":
-        is_noexcept = True
-        cursor += 1
-        if cursor < len(tokens) and tokens[cursor].value == "(":
-            raise _source_error(
-                module_root,
-                path,
-                tokens[cursor].line,
-                module_name,
-                f"{class_name}.create",
-                "only bare noexcept is supported on a constructor",
-            )
-    deleted = False
-    if cursor < len(tokens):
-        if (
-            cursor + 2 == len(tokens)
-            and tokens[cursor].value == "="
-            and tokens[cursor + 1].value in {"default", "delete"}
-        ):
-            deleted = tokens[cursor + 1].value == "delete"
-            cursor += 2
-        else:
-            raise _source_error(
-                module_root,
-                path,
-                tokens[cursor].line,
-                module_name,
-                f"{class_name}.create",
-                "unsupported constructor suffix; only bare noexcept, "
-                "= default, or = delete is supported",
-            )
-    return is_noexcept, deleted
+    try:
+        return _decide_constructor_suffix(tokens)
+    except CppMemberDecisionError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line,
+            module_name,
+            f"{class_name}.create",
+            exc.message,
+        ) from exc
 
 
-def _parse_v2_class_source(
+def _stored_member_kind(
+    declaration: list[_Token],
+    *,
+    marked: bool,
+    value_class: bool,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    class_name: str,
+) -> CppStoredMemberKind:
+    try:
+        return _decide_stored_member_kind(
+            declaration,
+            marked=marked,
+            value_class=value_class,
+        )
+    except CppMemberShapeError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line if exc.line is not None else declaration[0].line,
+            module_name,
+            class_name,
+            exc.message,
+        ) from exc
+
+
+def _parse_v4_field_source(
     *,
     module_root: Path,
-    source_root: Path,
     path: Path,
-    text: str,
+    module_name: str,
+    relative: str,
+    class_name: str,
+    access: str,
+    declaration: list[_Token],
+    stack: _MarkerStack,
+) -> CppFieldSource:
+    intent = _intent_from_stack(
+        module_root,
+        path,
+        module_name,
+        stack,
+        DeclarationTarget.FIELD,
+        class_name,
+    )
+    if access != "public":
+        raise _source_error(
+            module_root,
+            path,
+            stack.first.line,
+            module_name,
+            class_name,
+            "a generated field must be public in C++",
+        )
+    try:
+        field = _decide_field_shape(declaration)
+    except CppMemberShapeError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line if exc.line is not None else stack.first.line,
+            module_name,
+            class_name,
+            exc.message,
+        ) from exc
+    return CppFieldSource(
+        SourceProvenance(
+            f"cpp:{relative}:{class_name}.{field.name}#field",
+            "cpp",
+            relative,
+            stack.first.line,
+        ),
+        field.name,
+        field.type_spelling,
+        intent,
+        access,
+        field.mutable,
+        field.static,
+    )
+
+
+def _constructor_is_lowerable(
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    class_name: str,
+    declaration: list[_Token],
+    groups: list[list[_Token]],
+    callable_head: CppCallableHead,
+    stack: _MarkerStack | None,
+) -> bool:
+    route = _decide_constructor_route(
+        callable_head,
+        groups,
+        cpp_name=class_name,
+        marked=stack is not None,
+    )
+    if route is CppConstructorRoute.REJECT_PREFIX:
+        raise _source_error(
+            module_root,
+            path,
+            declaration[0].line,
+            module_name,
+            f"{class_name}.create",
+            "a generated constructor may use only the optional explicit "
+            "modifier before its class name",
+        )
+    if route is CppConstructorRoute.REJECT_COPY_OR_MOVE:
+        assert stack is not None
+        raise _source_error(
+            module_root,
+            path,
+            stack.first.line,
+            module_name,
+            class_name,
+            "copy and move constructors cannot be generated creation paths",
+        )
+    return route is CppConstructorRoute.LOWER
+
+
+def _parse_v4_constructor_source(
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    relative: str,
+    class_name: str,
+    access: str,
+    declaration: list[_Token],
+    groups: list[list[_Token]],
+    suffix: list[_Token],
+    callable_head: CppCallableHead,
+    stack: _MarkerStack | None,
+    constructor_ids: set[str],
+) -> CppConstructorSource | None:
+    if not _constructor_is_lowerable(
+        module_root=module_root,
+        path=path,
+        module_name=module_name,
+        class_name=class_name,
+        declaration=declaration,
+        groups=groups,
+        callable_head=callable_head,
+        stack=stack,
+    ):
+        return None
+    intent = (
+        _intent_from_stack(
+            module_root,
+            path,
+            module_name,
+            stack,
+            DeclarationTarget.CONSTRUCTOR,
+            f"{class_name}.create",
+        )
+        if stack is not None
+        else SourceIntent(DeclarationTarget.CONSTRUCTOR)
+    )
+    if stack is not None and access != "public":
+        raise _source_error(
+            module_root,
+            path,
+            stack.first.line,
+            module_name,
+            f"{class_name}.create",
+            "SupernoteConstructor must mark a public constructor",
+        )
+    try:
+        parsed_parameters = _parse_parameters(
+            groups,
+            module_root=module_root,
+            path=path,
+            marker_line=(stack.first.line if stack else declaration[0].line),
+            module_name=module_name,
+            export_name=f"{class_name}.create",
+        )
+    except CodegenError:
+        if stack is not None:
+            raise
+        return None
+    try:
+        is_noexcept, deleted = _constructor_suffix(
+            suffix,
+            module_root=module_root,
+            path=path,
+            module_name=module_name,
+            class_name=class_name,
+        )
+    except CodegenError:
+        if stack is not None:
+            raise
+        return None
+    if stack is not None and deleted:
+        raise _source_error(
+            module_root,
+            path,
+            stack.first.line,
+            module_name,
+            f"{class_name}.create",
+            "SupernoteConstructor cannot select a deleted constructor",
+        )
+    signature = ",".join(parameter.cpp_type for parameter in parsed_parameters)
+    declaration_id = f"cpp:{relative}:constructor:{class_name}({signature})"
+    if declaration_id in constructor_ids:
+        raise _source_error(
+            module_root,
+            path,
+            declaration[0].line,
+            module_name,
+            f"{class_name}.create",
+            "duplicate constructor signature",
+        )
+    constructor_ids.add(declaration_id)
+    return CppConstructorSource(
+        provenance=SourceProvenance(
+            declaration_id=declaration_id,
+            language="cpp",
+            path=relative,
+            line=declaration[0].line,
+        ),
+        parameters=tuple(
+            CppParameterSource(parameter.cpp_type, parameter.name)
+            for parameter in parsed_parameters
+        ),
+        access=access,
+        intent=intent,
+        deleted=deleted,
+        explicit=callable_head.explicit,
+        noexcept=is_noexcept,
+    )
+
+
+def _parse_v4_method_source(
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    relative: str,
+    class_name: str,
+    access: str,
+    declaration: list[_Token],
+    opening_index: int,
+    groups: list[list[_Token]],
+    suffix: list[_Token],
+    callable_head: CppCallableHead,
+    stack: _MarkerStack,
+    method_names: dict[str, int],
+) -> CppMethodSource:
+    if callable_head.kind is CppCallableKind.DESTRUCTOR:
+        raise _source_error(
+            module_root,
+            path,
+            stack.first.line,
+            module_name,
+            class_name,
+            "destructors cannot be generated members",
+        )
+    intent = _intent_from_stack(
+        module_root,
+        path,
+        module_name,
+        stack,
+        DeclarationTarget.METHOD,
+        class_name,
+    )
+    if access != "public":
+        raise _source_error(
+            module_root,
+            path,
+            stack.first.line,
+            module_name,
+            class_name,
+            "a generated method must be public in C++",
+        )
+    try:
+        method = _decide_method_shape(
+            declaration,
+            opening_index,
+            keywords=CPP23_KEYWORDS,
+        )
+    except CppMemberShapeError as exc:
+        raise _source_error(
+            module_root,
+            path,
+            exc.line if exc.line is not None else declaration[0].line,
+            module_name,
+            class_name,
+            exc.message,
+        ) from exc
+    method_name = method.name
+    if method_name in method_names:
+        raise _source_error(
+            module_root,
+            path,
+            method.name_line,
+            module_name,
+            class_name,
+            f"duplicate generated method name {method_name!r}; first "
+            f"marked at line {method_names[method_name]}",
+        )
+    parameters = _parse_parameters(
+        groups,
+        module_root=module_root,
+        path=path,
+        marker_line=stack.first.line,
+        module_name=module_name,
+        export_name=f"{class_name}.{method_name}",
+    )
+    is_const, is_noexcept = _parse_member_qualifiers(
+        suffix,
+        module_root=module_root,
+        path=path,
+        module_name=module_name,
+        export_name=f"{class_name}.{method_name}",
+        allow_const=True,
+        allow_default=False,
+    )
+    signature = ",".join(parameter.cpp_type for parameter in parameters)
+    method_names[method_name] = method.name_line
+    return CppMethodSource(
+        provenance=SourceProvenance(
+            declaration_id=(
+                f"cpp:{relative}:{class_name}.{method_name}({signature})"
+            ),
+            language="cpp",
+            path=relative,
+            line=stack.first.line,
+        ),
+        cpp_name=method_name,
+        return_type_spelling=method.return_type_spelling,
+        parameters=tuple(
+            CppParameterSource(parameter.cpp_type, parameter.name)
+            for parameter in parameters
+        ),
+        intent=intent,
+        access=access,
+        const=is_const,
+        noexcept=is_noexcept,
+        static=method.static,
+    )
+
+
+def _class_member_callable_parts(
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    class_name: str,
+    declaration: list[_Token],
+    stack: _MarkerStack | None,
+) -> tuple[list[list[_Token]], list[_Token], CppCallableHead] | None:
+    values = [token.value for token in declaration]
+    opening_index = values.index("(")
+    try:
+        groups, closing_index = _parameter_groups(declaration, opening_index)
+    except ValueError:
+        if stack is None:
+            return None
+        raise _source_error(
+            module_root,
+            path,
+            declaration[opening_index].line,
+            module_name,
+            class_name,
+            "missing ')' in marked member declaration",
+        ) from None
+    return (
+        groups,
+        declaration[closing_index + 1:],
+        _decide_callable_head(declaration[:opening_index], class_name),
+    )
+
+
+def _parse_v4_class_members(
+    *,
+    module_root: Path,
+    path: Path,
+    module_name: str,
+    relative: str,
+    class_name: str,
+    declarations: list[tuple[str, list[_Token]]],
+    stack_by_declaration: dict[int, _MarkerStack],
+    value_class: bool,
+) -> tuple[
+    list[CppConstructorSource],
+    list[CppMethodSource],
+    list[CppFieldSource],
+    bool,
+]:
+    constructors: list[CppConstructorSource] = []
+    methods: list[CppMethodSource] = []
+    fields: list[CppFieldSource] = []
+    method_names: dict[str, int] = {}
+    constructor_ids: set[str] = set()
+    has_user_constructor = False
+    for access, declaration in declarations:
+        if not declaration:
+            continue
+        stack = stack_by_declaration.get(declaration[0].start)
+        stored_kind = _stored_member_kind(
+            declaration,
+            marked=stack is not None,
+            value_class=value_class,
+            module_root=module_root,
+            path=path,
+            module_name=module_name,
+            class_name=class_name,
+        )
+        if stored_kind is CppStoredMemberKind.IGNORE:
+            continue
+        if stored_kind is CppStoredMemberKind.FIELD:
+            assert stack is not None
+            fields.append(
+                _parse_v4_field_source(
+                    module_root=module_root,
+                    path=path,
+                    module_name=module_name,
+                    relative=relative,
+                    class_name=class_name,
+                    access=access,
+                    declaration=declaration,
+                    stack=stack,
+                )
+            )
+            continue
+        callable_parts = _class_member_callable_parts(
+            module_root=module_root,
+            path=path,
+            module_name=module_name,
+            class_name=class_name,
+            declaration=declaration,
+            stack=stack,
+        )
+        if callable_parts is None:
+            continue
+        groups, suffix, callable_head = callable_parts
+        opening_index = next(
+            index for index, token in enumerate(declaration) if token.value == "("
+        )
+        if callable_head.kind is CppCallableKind.CONSTRUCTOR:
+            has_user_constructor = True
+            constructor = _parse_v4_constructor_source(
+                module_root=module_root,
+                path=path,
+                module_name=module_name,
+                relative=relative,
+                class_name=class_name,
+                access=access,
+                declaration=declaration,
+                groups=groups,
+                suffix=suffix,
+                callable_head=callable_head,
+                stack=stack,
+                constructor_ids=constructor_ids,
+            )
+            if constructor is not None:
+                constructors.append(constructor)
+            continue
+        if stack is None:
+            continue
+        methods.append(
+            _parse_v4_method_source(
+                module_root=module_root,
+                path=path,
+                module_name=module_name,
+                relative=relative,
+                class_name=class_name,
+                access=access,
+                declaration=declaration,
+                opening_index=opening_index,
+                groups=groups,
+                suffix=suffix,
+                callable_head=callable_head,
+                stack=stack,
+                method_names=method_names,
+            )
+        )
+    return constructors, methods, fields, has_user_constructor
+
+
+def _append_implicit_constructor(
+    constructors: list[CppConstructorSource],
+    *,
+    has_user_constructor: bool,
+    relative: str,
+    class_name: str,
+    diagnostic_line: int,
+) -> None:
+    if has_user_constructor:
+        return
+    constructors.append(
+        CppConstructorSource(
+            provenance=SourceProvenance(
+                declaration_id=(
+                    f"cpp:{relative}:constructor:{class_name}()#implicit"
+                ),
+                language="cpp",
+                path=relative,
+                line=diagnostic_line,
+            ),
+            parameters=(),
+            access="public",
+            intent=SourceIntent(DeclarationTarget.CONSTRUCTOR),
+            implicit=True,
+        )
+    )
+
+
+def _class_parse_context(
+    *,
+    module_root: Path,
+    path: Path,
     lexed: _LexedSource,
+    active_tokens: list[_Token],
     class_stack: _MarkerStack | None,
     class_token: _Token | None,
-    stacks: list[_MarkerStack],
     module_name: str,
-) -> tuple[CppClassSource, set[int]]:
-    active_tokens = [
-        token for token in lexed.tokens if token.conditional_depth == 0
-    ]
+) -> _CppClassParseContext:
     if class_stack is not None:
         class_offset = class_stack.first.start
         namespace, namespace_depth = _namespace_at(lexed, class_offset)
@@ -2073,7 +1500,7 @@ def _parse_v2_class_source(
             brace_depth=namespace_depth,
             description="class",
         )
-        class_intent = _intent_from_stack(
+        intent = _intent_from_stack(
             module_root,
             path,
             module_name,
@@ -2081,9 +1508,7 @@ def _parse_v2_class_source(
             DeclarationTarget.CLASS,
             None,
         )
-        preceding = [
-            token for token in active_tokens if token.end <= class_offset
-        ]
+        preceding = [token for token in active_tokens if token.end <= class_offset]
         prefix: list[_Token] = []
         for token in reversed(preceding):
             if token.value in {";", "{", "}"}:
@@ -2101,41 +1526,84 @@ def _parse_v2_class_source(
                 f"{_tokens_text(prefix)!r}; templates and declaration "
                 "modifiers are not supported",
             )
-        following = [
-            token for token in active_tokens
-            if token.start >= class_stack.last.end
-        ]
-        diagnostic_line = class_stack.first.line
-    else:
-        if class_token is None:
-            raise ValueError("an unmarked class parse requires its class token")
-        class_offset = class_token.start
-        namespace, namespace_depth = _namespace_at(lexed, class_offset)
-        if class_token.brace_depth != namespace_depth:
-            raise _source_error(
-                module_root,
-                path,
-                class_token.line,
-                module_name,
-                None,
-                "generated members require a top-level or namespace-level "
-                "implementation owner class",
-            )
-        class_intent = SourceIntent(DeclarationTarget.CLASS)
-        following = [
-            token for token in active_tokens if token.start >= class_token.start
-        ]
-        diagnostic_line = class_token.line
-    if not following:
+        return _CppClassParseContext(
+            namespace=namespace,
+            intent=intent,
+            following=tuple(
+                token
+                for token in active_tokens
+                if token.start >= class_stack.last.end
+            ),
+            diagnostic_line=class_stack.first.line,
+        )
+    if class_token is None:
+        raise ValueError("an unmarked class parse requires its class token")
+    class_offset = class_token.start
+    namespace, namespace_depth = _namespace_at(lexed, class_offset)
+    if class_token.brace_depth != namespace_depth:
         raise _source_error(
             module_root,
             path,
-            diagnostic_line,
+            class_token.line,
             module_name,
             None,
-            "a class marker stack must be followed by a complete class or "
-            "struct definition",
+            "generated members require a top-level or namespace-level "
+            "implementation owner class",
         )
+    return _CppClassParseContext(
+        namespace=namespace,
+        intent=SourceIntent(DeclarationTarget.CLASS),
+        following=tuple(
+            token for token in active_tokens if token.start >= class_token.start
+        ),
+        diagnostic_line=class_token.line,
+    )
+
+
+def _parse_v4_class_source(
+    *,
+    module_root: Path,
+    source_root: Path,
+    path: Path,
+    text: str,
+    lexed: _LexedSource,
+    class_stack: _MarkerStack | None,
+    class_token: _Token | None,
+    stacks: list[_MarkerStack],
+    module_name: str,
+) -> tuple[CppClassSource, set[int]]:
+    active_tokens = [
+        token for token in lexed.tokens if token.conditional_depth == 0
+    ]
+    context = _class_parse_context(
+        module_root=module_root,
+        path=path,
+        lexed=lexed,
+        active_tokens=active_tokens,
+        class_stack=class_stack,
+        class_token=class_token,
+        module_name=module_name,
+    )
+    namespace = context.namespace
+    class_intent = context.intent
+    following = list(context.following)
+    diagnostic_line = context.diagnostic_line
+    if not following:
+        try:
+            _decide_class_definition_extent(
+                following,
+                diagnostic_line=diagnostic_line,
+            )
+        except CppClassSyntaxError as exc:
+            raise _source_error(
+                module_root,
+                path,
+                exc.line,
+                module_name,
+                exc.export_name,
+                exc.message,
+            ) from exc
+        raise AssertionError("an empty class token sequence cannot be valid")
     first = following[0]
     if (
         class_stack is not None
@@ -2150,93 +1618,23 @@ def _parse_v2_class_source(
             "only whitespace may appear between the final class marker and "
             "the class or struct definition",
         )
-    if first.value not in {"class", "struct"}:
+    try:
+        class_extent = _decide_class_definition_extent(
+            following,
+            diagnostic_line=diagnostic_line,
+        )
+    except CppClassSyntaxError as exc:
         raise _source_error(
             module_root,
             path,
-            first.line,
+            exc.line,
             module_name,
-            None,
-            "a class marker stack must be followed by a class or struct "
-            "definition",
-        )
-    if len(following) < 3 or following[1].kind != "identifier":
-        raise _source_error(
-            module_root,
-            path,
-            first.line,
-            module_name,
-            None,
-            "a marked class or struct must have an ordinary identifier name",
-        )
-    cpp_name = following[1].value
-    opening = next(
-        (
-            index
-            for index in range(2, len(following))
-            if following[index].value in {"{", ";"}
-        ),
-        None,
-    )
-    if opening is None or following[opening].value != "{":
-        raise _source_error(
-            module_root,
-            path,
-            first.line,
-            module_name,
-            cpp_name,
-            "a marked class requires a complete definition, not a declaration",
-        )
-    before_body = following[2:opening]
-    if any(token.value == ":" for token in before_body):
-        raise _source_error(
-            module_root,
-            path,
-            before_body[0].line,
-            module_name,
-            cpp_name,
-            "inheritance is not supported for initial V3 generated classes",
-        )
-    if before_body:
-        raise _source_error(
-            module_root,
-            path,
-            before_body[0].line,
-            module_name,
-            cpp_name,
-            f"unsupported tokens before marked class body "
-            f"{_tokens_text(before_body)!r}",
-        )
-    depth = 1
-    closing: int | None = None
-    cursor = opening + 1
-    while cursor < len(following):
-        if following[cursor].value == "{":
-            depth += 1
-        elif following[cursor].value == "}":
-            depth -= 1
-            if depth == 0:
-                closing = cursor
-                break
-        cursor += 1
-    if closing is None:
-        raise _source_error(
-            module_root,
-            path,
-            first.line,
-            module_name,
-            cpp_name,
-            "marked class definition is missing its closing '}'",
-        )
-    if closing + 1 >= len(following) or following[closing + 1].value != ";":
-        raise _source_error(
-            module_root,
-            path,
-            following[closing].line,
-            module_name,
-            cpp_name,
-            "marked class definition must end with '};'",
-        )
+            exc.export_name,
+            exc.message,
+        ) from exc
+    cpp_name = class_extent.cpp_name
+    opening = class_extent.opening_index
+    closing = class_extent.closing_index
 
     opening_token = following[opening]
     closing_token = following[closing]
@@ -2246,434 +1644,47 @@ def _parse_v2_class_source(
         body,
         default_access="private" if first.value == "class" else "public",
     )
-    member_stacks = [
-        stack
-        for stack in stacks
-        if opening_token.end <= stack.first.start < closing_token.start
-        and stack is not class_stack
-    ]
-    consumed = (
-        {comment.start for comment in class_stack.comments}
-        if class_stack is not None
-        else set()
-    )
-    stack_by_declaration: dict[int, _MarkerStack] = {}
-    for stack in member_stacks:
-        _validate_marker_stack_location(
+    try:
+        member_bindings = _declaration_member_marker_bindings(
+            text,
+            declarations,
+            stacks,
+            class_stack=class_stack,
+            opening_end=opening_token.end,
+            closing_start=closing_token.start,
+            member_depth=member_depth,
+            class_name=cpp_name,
+        )
+    except CppDeclarationError as exc:
+        raise _source_error(
             module_root,
             path,
+            exc.line,
             module_name,
-            stack,
-            brace_depth=member_depth,
-            description="class member",
-        )
-        declaration = next(
-            (
-                item
-                for item in declarations
-                if item[1] and item[1][0].start >= stack.last.end
-            ),
-            None,
-        )
-        if declaration is None:
-            raise _source_error(
-                module_root,
-                path,
-                stack.first.line,
-                module_name,
-                cpp_name,
-                "a member marker stack must be followed by a member "
-                "declaration",
-            )
-        access, tokens = declaration
-        if text[stack.last.end:tokens[0].start].strip():
-            raise _source_error(
-                module_root,
-                path,
-                stack.first.line,
-                module_name,
-                cpp_name,
-                "only whitespace may appear between the final member marker "
-                "and its declaration",
-            )
-        if tokens[0].start in stack_by_declaration:
-            raise _source_error(
-                module_root,
-                path,
-                stack.first.line,
-                module_name,
-                cpp_name,
-                "separate marker stacks cannot target the same member",
-            )
-        stack_by_declaration[tokens[0].start] = stack
-        consumed.update(comment.start for comment in stack.comments)
+            exc.export_name,
+            exc.message,
+        ) from exc
+    stack_by_declaration = dict(member_bindings.stacks_by_declaration)
+    consumed = set(member_bindings.consumed_comment_offsets)
 
-    constructors: list[CppConstructorSource] = []
-    methods: list[CppMethodSource] = []
-    fields: list[CppFieldSource] = []
-    method_names: dict[str, int] = {}
-    constructor_ids: set[str] = set()
-    has_user_constructor = False
     relative = str(path.relative_to(module_root))
-    for access, declaration in declarations:
-        if not declaration:
-            continue
-        stack = stack_by_declaration.get(declaration[0].start)
-        values = [token.value for token in declaration]
-        if "(" not in values:
-            if stack is None:
-                if class_intent.declares_value and "static" not in values:
-                    raise _source_error(
-                        module_root,
-                        path,
-                        declaration[0].line,
-                        module_name,
-                        cpp_name,
-                        "every non-static stored value member requires "
-                        "SupernotePluginExport",
-                    )
-                continue
-            intent = _intent_from_stack(
-                module_root,
-                path,
-                module_name,
-                stack,
-                DeclarationTarget.FIELD,
-                cpp_name,
-            )
-            if access != "public":
-                raise _source_error(
-                    module_root,
-                    path,
-                    stack.first.line,
-                    module_name,
-                    cpp_name,
-                    "a generated field must be public in C++",
-                )
-            if any(value in values for value in {"=", ",", "*", "[["}):
-                raise _source_error(
-                    module_root,
-                    path,
-                    stack.first.line,
-                    module_name,
-                    cpp_name,
-                    "a generated field must be one directly declared named "
-                    "canonical V3 field without initializer, pointer, attribute, "
-                    "or multiple declarator",
-                )
-            is_static = values[0] == "static"
-            field_tokens = declaration[1:] if is_static else declaration
-            is_const = bool(field_tokens and field_tokens[0].value == "const")
-            if is_const:
-                field_tokens = field_tokens[1:]
-            if len(field_tokens) < 2 or field_tokens[-1].kind != "identifier":
-                raise _source_error(
-                    module_root, path, stack.first.line, module_name, cpp_name,
-                    "a generated field requires a canonical type and ordinary name",
-                )
-            field_type = _cpp_type_spelling(field_tokens[:-1])
-            if field_type is None:
-                raise _source_error(
-                    module_root, path, stack.first.line, module_name, cpp_name,
-                    "unsupported generated field type spelling",
-                )
-            field_name = field_tokens[-1].value
-            fields.append(
-                CppFieldSource(
-                    SourceProvenance(
-                        f"cpp:{relative}:{cpp_name}.{field_name}#field",
-                        "cpp",
-                        relative,
-                        stack.first.line,
-                    ),
-                    field_name,
-                    field_type,
-                    intent,
-                    access,
-                    not is_const,
-                    is_static,
-                )
-            )
-            continue
-        opening_index = values.index("(")
-        try:
-            groups, closing_index = _parameter_groups(
-                declaration,
-                opening_index,
-            )
-        except ValueError:
-            if stack is None:
-                continue
-            raise _source_error(
-                module_root,
-                path,
-                declaration[opening_index].line,
-                module_name,
-                cpp_name,
-                "missing ')' in marked member declaration",
-            ) from None
-        prefix_values = values[:opening_index]
-        suffix = declaration[closing_index + 1:]
-        is_destructor = prefix_values == ["~", cpp_name]
-        is_constructor = (
-            not is_destructor
-            and bool(prefix_values)
-            and prefix_values[-1] == cpp_name
-        )
-        if is_constructor:
-            has_user_constructor = True
-            if prefix_values not in ([cpp_name], ["explicit", cpp_name]):
-                if stack is not None:
-                    raise _source_error(
-                        module_root,
-                        path,
-                        declaration[0].line,
-                        module_name,
-                        f"{cpp_name}.create",
-                        "a generated constructor may use only the optional "
-                        "explicit modifier before its class name",
-                    )
-                continue
-            if _is_copy_or_move_constructor(groups, cpp_name):
-                if stack is not None:
-                    raise _source_error(
-                        module_root,
-                        path,
-                        stack.first.line,
-                        module_name,
-                        cpp_name,
-                        "copy and move constructors cannot be generated "
-                        "creation paths",
-                    )
-                continue
-            intent = (
-                _intent_from_stack(
-                    module_root,
-                    path,
-                    module_name,
-                    stack,
-                    DeclarationTarget.CONSTRUCTOR,
-                    f"{cpp_name}.create",
-                )
-                if stack is not None
-                else SourceIntent(DeclarationTarget.CONSTRUCTOR)
-            )
-            if stack is not None and access != "public":
-                raise _source_error(
-                    module_root,
-                    path,
-                    stack.first.line,
-                    module_name,
-                    f"{cpp_name}.create",
-                    "SupernoteConstructor must mark a public constructor",
-                )
-            try:
-                parsed_parameters = _parse_parameters(
-                    groups,
-                    module_root=module_root,
-                    path=path,
-                    marker_line=(stack.first.line if stack else declaration[0].line),
-                    module_name=module_name,
-                    export_name=f"{cpp_name}.create",
-                )
-            except CodegenError:
-                if stack is not None:
-                    raise
-                continue
-            try:
-                is_noexcept, deleted = _constructor_suffix(
-                    suffix,
-                    module_root=module_root,
-                    path=path,
-                    module_name=module_name,
-                    class_name=cpp_name,
-                )
-            except CodegenError:
-                if stack is not None:
-                    raise
-                continue
-            if stack is not None and deleted:
-                raise _source_error(
-                    module_root,
-                    path,
-                    stack.first.line,
-                    module_name,
-                    f"{cpp_name}.create",
-                    "SupernoteConstructor cannot select a deleted constructor",
-                )
-            signature = ",".join(
-                parameter.cpp_type for parameter in parsed_parameters
-            )
-            declaration_id = (
-                f"cpp:{relative}:constructor:{cpp_name}({signature})"
-            )
-            if declaration_id in constructor_ids:
-                raise _source_error(
-                    module_root,
-                    path,
-                    declaration[0].line,
-                    module_name,
-                    f"{cpp_name}.create",
-                    "duplicate constructor signature",
-                )
-            constructor_ids.add(declaration_id)
-            constructors.append(
-                CppConstructorSource(
-                    provenance=SourceProvenance(
-                        declaration_id=declaration_id,
-                        language="cpp",
-                        path=relative,
-                        line=declaration[0].line,
-                    ),
-                    parameters=tuple(
-                        CppParameterSource(parameter.cpp_type, parameter.name)
-                        for parameter in parsed_parameters
-                    ),
-                    access=access,
-                    intent=intent,
-                    deleted=deleted,
-                    explicit=prefix_values[0] == "explicit",
-                    noexcept=is_noexcept,
-                )
-            )
-            continue
-        if stack is None:
-            continue
-        if is_destructor:
-            raise _source_error(
-                module_root,
-                path,
-                stack.first.line,
-                module_name,
-                cpp_name,
-                "destructors cannot be generated members",
-            )
-        intent = _intent_from_stack(
-            module_root,
-            path,
-            module_name,
-            stack,
-            DeclarationTarget.METHOD,
-            cpp_name,
-        )
-        if access != "public":
-            raise _source_error(
-                module_root,
-                path,
-                stack.first.line,
-                module_name,
-                cpp_name,
-                "a generated method must be public in C++",
-            )
-        for forbidden, description in (
-            ("operator", "operators"),
-            ("virtual", "virtual methods"),
-        ):
-            if forbidden in prefix_values:
-                raise _source_error(
-                    module_root,
-                    path,
-                    declaration[prefix_values.index(forbidden)].line,
-                    module_name,
-                    cpp_name,
-                    f"{description} are deferred generated-member forms",
-                )
-        method_prefix = declaration[:opening_index]
-        is_static = bool(method_prefix and method_prefix[0].value == "static")
-        if is_static:
-            method_prefix = method_prefix[1:]
-        return_type = _cpp_type_spelling(method_prefix[:-1])
-        method_token = method_prefix[-1] if method_prefix else declaration[0]
-        if return_type is None or not method_prefix or method_token.kind != "identifier":
-            raise _source_error(
-                module_root,
-                path,
-                declaration[0].line,
-                module_name,
-                cpp_name,
-                "a marked method must use one canonical V3 result type "
-                "followed by an ordinary method name",
-            )
-        method_name = method_token.value
-        if method_name in CPP23_KEYWORDS:
-            raise _source_error(
-                module_root,
-                path,
-                method_token.line,
-                module_name,
-                cpp_name,
-                f"method name {method_name!r} is a C++23 keyword",
-            )
-        if method_name in method_names:
-            raise _source_error(
-                module_root,
-                path,
-                method_token.line,
-                module_name,
-                cpp_name,
-                f"duplicate generated method name {method_name!r}; first "
-                f"marked at line {method_names[method_name]}",
-            )
-        parameters = _parse_parameters(
-            groups,
-            module_root=module_root,
-            path=path,
-            marker_line=stack.first.line,
-            module_name=module_name,
-            export_name=f"{cpp_name}.{method_name}",
-        )
-        is_const, is_noexcept = _parse_member_qualifiers(
-            suffix,
-            module_root=module_root,
-            path=path,
-            module_name=module_name,
-            export_name=f"{cpp_name}.{method_name}",
-            allow_const=True,
-            allow_default=False,
-        )
-        signature = ",".join(parameter.cpp_type for parameter in parameters)
-        method_names[method_name] = method_token.line
-        methods.append(
-            CppMethodSource(
-                provenance=SourceProvenance(
-                    declaration_id=(
-                        f"cpp:{relative}:{cpp_name}.{method_name}({signature})"
-                    ),
-                    language="cpp",
-                    path=relative,
-                    line=stack.first.line,
-                ),
-                cpp_name=method_name,
-                return_type_spelling=return_type,
-                parameters=tuple(
-                    CppParameterSource(parameter.cpp_type, parameter.name)
-                    for parameter in parameters
-                ),
-                intent=intent,
-                access=access,
-                const=is_const,
-                noexcept=is_noexcept,
-                static=is_static,
-            )
-        )
-
-    if not has_user_constructor:
-        constructors.append(
-            CppConstructorSource(
-                provenance=SourceProvenance(
-                    declaration_id=(
-                        f"cpp:{relative}:constructor:{cpp_name}()#implicit"
-                    ),
-                    language="cpp",
-                    path=relative,
-                    line=diagnostic_line,
-                ),
-                parameters=(),
-                access="public",
-                intent=SourceIntent(DeclarationTarget.CONSTRUCTOR),
-                implicit=True,
-            )
-        )
+    constructors, methods, fields, has_user_constructor = _parse_v4_class_members(
+        module_root=module_root,
+        path=path,
+        module_name=module_name,
+        relative=relative,
+        class_name=cpp_name,
+        declarations=declarations,
+        stack_by_declaration=stack_by_declaration,
+        value_class=class_intent.declares_value,
+    )
+    _append_implicit_constructor(
+        constructors,
+        has_user_constructor=has_user_constructor,
+        relative=relative,
+        class_name=cpp_name,
+        diagnostic_line=diagnostic_line,
+    )
     class_source = CppClassSource(
         provenance=SourceProvenance(
             declaration_id=f"cpp:{relative}:class:{cpp_name}",
@@ -2686,7 +1697,7 @@ def _parse_v2_class_source(
         intent=class_intent,
         constructors=tuple(constructors),
         methods=tuple(methods),
-        declaration_kind=first.value,
+        declaration_kind=class_extent.declaration_kind,
         fields=tuple(fields),
         namespace=namespace,
     )
@@ -2739,7 +1750,7 @@ def scan_cpp_class_source_model(
         raise CodegenError(f"missing C/C++ source directory: {source_root}")
     _, module_name = _scan_context(module_root, None, module_name)
     classes: list[CppClassSource] = []
-    for path in sorted(source_root.rglob("*")):
+    for path in _iter_source_tree_no_follow(source_root):
         if not path.is_file() or path.suffix.lower() not in CPP_HEADER_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8")
@@ -2749,35 +1760,15 @@ def scan_cpp_class_source_model(
         consumed: set[int] = set()
         parsed_class_offsets: set[int] = set()
         for stack in stacks:
-            namespace, namespace_depth = _namespace_at(lexed, stack.first.start)
-            if stack.first.brace_depth != namespace_depth:
-                if any(
-                    marker in {SupernoteMarker.OBJECT, SupernoteMarker.VALUE}
-                    for marker in stack.markers
-                ):
-                    raise _source_error(
-                        module_root,
-                        path,
-                        stack.first.line,
-                        module_name,
-                        None,
-                        "marked C++ types must be at global or named-namespace "
-                        "brace depth; anonymous namespaces and nested types "
-                        "are unsupported",
-                    )
-                continue
-            following = next(
-                (
-                    item for item in lexed.tokens
-                    if item.conditional_depth == 0
-                    and item.start >= stack.last.end
-                ),
-                None,
+            route = _class_stack_route(
+                module_root, path, module_name, lexed, stack
             )
-            if following is not None and following.value == "enum":
+            if route.kind is ClassStackKind.IGNORE:
+                continue
+            if route.kind is ClassStackKind.ENUM:
                 consumed.update(comment.start for comment in stack.comments)
                 continue
-            item, item_consumed = _parse_v2_class_source(
+            item, item_consumed = _parse_v4_class_source(
                 module_root=module_root,
                 source_root=source_root,
                 path=path,
@@ -2790,30 +1781,18 @@ def scan_cpp_class_source_model(
             )
             classes.append(item)
             consumed.update(item_consumed)
-            if following is not None:
-                parsed_class_offsets.add(following.start)
+            if route.following is not None:
+                parsed_class_offsets.add(route.following.start)
 
         extents = _top_level_class_extents(lexed)
-        owner_offsets: set[int] = set()
-        for stack in stacks:
-            if all(comment.start in consumed for comment in stack.comments):
-                continue
-            owner = next(
-                (
-                    extent for extent in extents
-                    if extent[1].end <= stack.first.start < extent[2].start
-                ),
-                None,
-            )
-            if owner is not None:
-                owner_offsets.add(owner[0].start)
-        for owner_offset in sorted(owner_offsets):
-            if owner_offset in parsed_class_offsets:
-                continue
+        owner_offsets = _declaration_owner_offsets(
+            stacks, consumed, extents, parsed_class_offsets
+        )
+        for owner_offset in owner_offsets:
             class_token = next(
                 token for token, _, _ in extents if token.start == owner_offset
             )
-            item, item_consumed = _parse_v2_class_source(
+            item, item_consumed = _parse_v4_class_source(
                 module_root=module_root,
                 source_root=source_root,
                 path=path,
@@ -2826,17 +1805,17 @@ def scan_cpp_class_source_model(
             )
             classes.append(item)
             consumed.update(item_consumed)
-        for comment, _ in entries:
-            if comment.start not in consumed:
-                raise _source_error(
-                    module_root,
-                    path,
-                    comment.line,
-                    module_name,
-                    None,
-                    "a marked C++ member requires a top-level or namespace-level "
-                    "implementation owner class",
-                )
+        unconsumed = _declaration_first_unconsumed_marker(entries, consumed)
+        if unconsumed is not None:
+            raise _source_error(
+                module_root,
+                path,
+                unconsumed.line,
+                module_name,
+                None,
+                "a marked C++ member requires a top-level or namespace-level "
+                "implementation owner class",
+            )
     classes.sort(
         key=lambda item: (
             item.provenance.path,
@@ -2943,7 +1922,7 @@ def scan_cpp_enum_source_model(
     source_root = module_root / "android/src/main/cpp"
     _, resolved_name = _scan_context(module_root, None, module_name)
     result: list[CppEnumSource] = []
-    for path in sorted(source_root.rglob("*")):
+    for path in _iter_source_tree_no_follow(source_root):
         if not path.is_file() or path.suffix.lower() not in CPP_HEADER_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8")
@@ -2968,83 +1947,98 @@ def scan_cpp_enum_source_model(
     return sorted(result, key=lambda item: (item.provenance.path, item.provenance.line))
 
 
-def scan_cpp_source_model(
+def _inspect_cpp_source_files(
     module_root: Path,
-    *,
-    module_name: str | None = None,
-) -> list[CppFunctionSource]:
-    source_root = module_root / "android/src/main/cpp"
-    if not source_root.is_dir():
-        raise CodegenError(f"missing C/C++ source directory: {source_root}")
-
-    _, module_name = _scan_context(module_root, None, module_name)
-    all_sources = sorted(path for path in source_root.rglob("*") if path.is_file())
+    paths: list[Path],
+    module_name: str,
+) -> dict[Path, _LexedSource]:
     lexed_sources: dict[Path, _LexedSource] = {}
-    for path in all_sources:
-        suffix = path.suffix.lower()
-        if suffix not in CPP_SUFFIXES | FORBIDDEN_TAG_SUFFIXES:
+    for path in paths:
+        route = _cpp_source_route(path.suffix)
+        if not route.inspect:
             continue
         text = path.read_text(encoding="utf-8")
         lexed = _lex_source(text)
         lexed_sources[path] = lexed
-        active_tokens = [
+        active_tokens = tuple(
             token for token in lexed.tokens if token.conditional_depth == 0
-        ]
-        for index, token in enumerate(active_tokens[:-1]):
-            if (
-                token.value == "JNI_OnLoad"
-                and active_tokens[index + 1].value == "("
-            ):
-                raise _source_error(
-                    module_root,
-                    path,
-                    token.line,
-                    module_name,
-                    "JNI_OnLoad",
-                    "user sources must not declare or define JNI_OnLoad because "
-                    "the generated binding layer owns that bootstrap symbol",
-                )
-        if suffix not in FORBIDDEN_TAG_SUFFIXES:
-            continue
-        if suffix in CPP_HEADER_SUFFIXES:
-            # Header markers are parsed by scan_cpp_class_source_model().
-            continue
-        for comment, marker in _marker_entries(
-            module_root, path, lexed, module_name
-        ):
-            if suffix == ".c":
-                message = (
-                    "direct marked C bindings are unsupported in initial V3; "
-                    "use ordinary C23 implementation code behind a canonical "
-                    "marked C++ boundary"
-                )
-            else:
-                message = (
-                    "free-function Supernote markers are allowed only in .cc, "
-                    ".cpp, or .cxx files"
-                )
+        )
+        bootstrap = _first_owned_jni_bootstrap(active_tokens)
+        if bootstrap is not None:
             raise _source_error(
                 module_root,
                 path,
-                comment.line,
+                bootstrap.line,
+                module_name,
+                "JNI_OnLoad",
+                "user sources must not declare or define JNI_OnLoad because "
+                "the generated binding layer owns that bootstrap symbol",
+            )
+        marker_error = _forbidden_marker_message(route)
+        if marker_error is None:
+            continue
+        entries = _marker_entries(module_root, path, lexed, module_name)
+        if entries:
+            raise _source_error(
+                module_root,
+                path,
+                entries[0][0].line,
                 module_name,
                 None,
-                message,
+                marker_error,
             )
+    return lexed_sources
 
+
+def _reject_source_only_type_markers(
+    module_root: Path,
+    path: Path,
+    entries: list[tuple[_LineComment, SupernoteMarker]],
+    module_name: str,
+) -> None:
+    for comment, marker in entries:
+        if marker not in {SupernoteMarker.OBJECT, SupernoteMarker.VALUE}:
+            continue
+        raise _source_error(
+            module_root,
+            path,
+            comment.line,
+            module_name,
+            None,
+            "bindable C++ classes, structs, values, and enums must have "
+            "their complete structural definition in a header; a marked "
+            "type defined only in a .cc, .cpp, or .cxx source file is not "
+            "supported. Move the complete marked definition to a header; "
+            "constructors and member functions may remain implemented "
+            "out-of-line in this source file",
+        )
+
+
+def _parse_cpp_function_sources(
+    module_root: Path,
+    paths: list[Path],
+    lexed_sources: dict[Path, _LexedSource],
+    module_name: str,
+) -> list[CppFunctionSource]:
     sources: list[CppFunctionSource] = []
-    for path in all_sources:
-        if path.suffix.lower() not in CPP_SUFFIXES:
+    for path in paths:
+        if not _cpp_source_route(path.suffix).parses_functions:
             continue
         text = path.read_text(encoding="utf-8")
         lexed = lexed_sources[path]
-        stacks = _marker_stacks(
-            text,
-            _marker_entries(module_root, path, lexed, module_name),
+        entries = _marker_entries(module_root, path, lexed, module_name)
+        _reject_source_only_type_markers(
+            module_root,
+            path,
+            entries,
+            module_name,
         )
+        stacks = _marker_stacks(text, entries)
         for index, stack in enumerate(stacks):
             next_marker = (
-                stacks[index + 1].first.start if index + 1 < len(stacks) else None
+                stacks[index + 1].first.start
+                if index + 1 < len(stacks)
+                else None
             )
             sources.append(
                 _parse_function_source(
@@ -3057,14 +2051,13 @@ def scan_cpp_source_model(
                     module_name=module_name,
                 )
             )
+    return sources
 
-    sources.sort(
-        key=lambda item: (
-            item.provenance.path,
-            item.provenance.line,
-            item.cpp_name,
-        )
-    )
+
+def _reject_duplicate_cpp_function_names(
+    sources: list[CppFunctionSource],
+    module_name: str,
+) -> None:
     native_names: dict[str, CppFunctionSource] = {}
     for source in sources:
         if source.cpp_name in native_names:
@@ -3074,10 +2067,43 @@ def scan_cpp_source_model(
                 f"{module_name!r}, export {source.cpp_name!r}: overloaded or "
                 f"duplicate routable C++ function {source.cpp_name!r}; first "
                 f"marked at {first.provenance.path}:{first.provenance.line}. "
-                "Rename one C++ function; "
-                "overloads are not supported"
+                "Rename one C++ function; overloads are not supported"
             )
         native_names[source.cpp_name] = source
+
+
+def scan_cpp_source_model(
+    module_root: Path,
+    *,
+    module_name: str | None = None,
+) -> list[CppFunctionSource]:
+    source_root = module_root / "android/src/main/cpp"
+    if not source_root.is_dir():
+        raise CodegenError(f"missing C/C++ source directory: {source_root}")
+
+    _, module_name = _scan_context(module_root, None, module_name)
+    all_sources = [
+        path for path in _iter_source_tree_no_follow(source_root) if path.is_file()
+    ]
+    lexed_sources = _inspect_cpp_source_files(
+        module_root,
+        all_sources,
+        module_name,
+    )
+    sources = _parse_cpp_function_sources(
+        module_root,
+        all_sources,
+        lexed_sources,
+        module_name,
+    )
+    sources.sort(
+        key=lambda item: (
+            item.provenance.path,
+            item.provenance.line,
+            item.cpp_name,
+        )
+    )
+    _reject_duplicate_cpp_function_names(sources, module_name)
     _reject_untagged_global_functions(
         module_root,
         lexed_sources,
@@ -3387,7 +2413,7 @@ def scan_objects(
     if not source_root.is_dir():
         raise CodegenError(f"missing C/C++ source directory: {source_root}")
     backend, module_name = _scan_context(module_root, backend, module_name)
-    for path in sorted(source_root.rglob("*")):
+    for path in _iter_source_tree_no_follow(source_root):
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8")
@@ -3402,7 +2428,7 @@ def scan_objects(
                 comment.line,
                 module_name,
                 None,
-                "SupernoteExportObject is removed in V3; mark the class with "
+                "SupernoteExportObject is removed in V4; mark the class with "
                 "SupernotePluginExport and mark each generated method explicitly",
             )
     class_sources = scan_cpp_class_source_model(
@@ -3523,12 +2549,12 @@ def scan_bindings(
     return ScannedBindings(tuple(exports), tuple(objects))
 
 
-def scan_v2_bindings(
+def scan_v4_bindings(
     module_root: Path,
     *,
     module_name: str,
 ) -> ScannedBindings:
-    """Lower the implemented V2 routes without changing the V1 facade."""
+    """Lower source declarations into the active V4 binding model."""
 
     function_sources = scan_cpp_source_model(
         module_root, module_name=module_name
@@ -4388,7 +3414,7 @@ facebook::jsi::Value supernote_make_uint8_array(
 
 def _jsi_async_helpers() -> str:
     return r'''constexpr char kPromiseContinuationsGlobal[] =
-    "__supernoteV3PromiseContinuations_a7db36cf3b5e";
+    "__supernoteV4PromiseContinuations_a7db36cf3b5e";
 
 facebook::jsi::Object supernote_error_object(
     facebook::jsi::Runtime &runtime,
@@ -5067,6 +4093,131 @@ def _jsi_object_registration(
     )
 
 
+def _jsi_sync_registration(
+    module_name: str,
+    export: Export,
+    *,
+    feature_scoped: bool,
+) -> str:
+    expected_parameters = ", ".join(
+        _jsi_expected_type(parameter.cpp_type) + f" {parameter.name}"
+        for parameter in export.parameters
+    )
+    expected_description = (
+        f"{len(export.parameters)} argument"
+        f"{'' if len(export.parameters) == 1 else 's'}"
+        f" ({expected_parameters})"
+    )
+    count_prefix = (
+        f"{module_name}.{export.js_name}: expected "
+        f"{expected_description}; received "
+    )
+    type_checks: list[str] = []
+    for number, parameter in enumerate(export.parameters):
+        js_type = _jsi_expected_type(parameter.cpp_type)
+        type_error = (
+            f"{module_name}.{export.js_name}: argument {number + 1} "
+            f"({parameter.name}) must be a {js_type}; expected "
+            f"{expected_description}"
+        )
+        type_checks.append(
+            f"          if ({_jsi_type_check(parameter, number)}) {{\n"
+            "            supernote_throw_type_error(\n"
+            f"                runtime, {json.dumps(type_error)});\n"
+            "          }"
+        )
+        type_checks.extend(
+            _jsi_range_validation(
+                parameter,
+                number,
+                diagnostic_name=f"{module_name}.{export.js_name}",
+                indent="          ",
+            )
+        )
+    arguments = ", ".join(
+        _jsi_argument(parameter, number)
+        for number, parameter in enumerate(export.parameters)
+    )
+    call = f"{export.cpp_name}({arguments})"
+    result = "\n".join(_jsi_result_lines(call, export.return_type, "        "))
+    sync_capture = "[feature_session]" if feature_scoped else "[]"
+    sync_scope = (
+        "          supernote::runtime::FeatureCallScope feature_call_scope(\n"
+        "              feature_session);\n"
+        if feature_scoped
+        else ""
+    )
+    return (
+        "  {\n"
+        "    auto function = Function::createFromHostFunction(\n"
+        "        runtime,\n"
+        f"        PropNameID::forAscii(runtime, {json.dumps(export.js_name)}),\n"
+        f"        {len(export.parameters)},\n"
+        f"        {sync_capture}(facebook::jsi::Runtime &runtime,\n"
+        "           const Value &,\n"
+        "           const Value *arguments,\n"
+        "           std::size_t argument_count) -> Value {\n"
+        f"          if (argument_count != {len(export.parameters)}) {{\n"
+        "            supernote_throw_type_error(\n"
+        f"                runtime, std::string({json.dumps(count_prefix)}) + "
+        "std::to_string(argument_count));\n"
+        "          }\n"
+        f"{chr(10).join(type_checks)}"
+        f"{chr(10) if type_checks else ''}"
+        f"{sync_scope}"
+        "          try {\n"
+        f"{result}\n"
+        "          } catch (const facebook::jsi::JSError &error) {\n"
+        "            __android_log_print(\n"
+        "                ANDROID_LOG_ERROR, kLogTag,\n"
+        f"                {json.dumps(module_name + '.' + export.js_name + ': generated JSI conversion failed: %s')},\n"
+        "                error.what());\n"
+        "            supernote_throw_error(\n"
+        "                runtime, \"INTERNAL\",\n"
+        f"                {json.dumps(module_name + '.' + export.js_name + ': generated binding conversion failed')});\n"
+        "          } catch (const std::exception &error) {\n"
+        "            supernote_throw_error(\n"
+        "                runtime, \"IMPLEMENTATION_ERROR\",\n"
+        f"                std::string({json.dumps(module_name + '.' + export.js_name + ': ')}) + error.what());\n"
+        "          } catch (...) {\n"
+        "            supernote_throw_error(\n"
+        "                runtime, \"IMPLEMENTATION_ERROR\",\n"
+        f"                {json.dumps(module_name + '.' + export.js_name + ': unknown C++ exception')});\n"
+        "          }\n"
+        "        });\n"
+        f"    exports.setProperty(runtime, {json.dumps(export.js_name)}, "
+        "std::move(function));\n"
+        "  }"
+    )
+
+
+def _jsi_export_registrations(
+    module_name: str,
+    exports: list[Export],
+    mode: JsiBindingMode,
+) -> list[str]:
+    registrations: list[str] = []
+    for export in exports:
+        try:
+            kind = _jsi_registration_kind(
+                async_export=export.async_,
+                mode=mode,
+            )
+        except JsiBindingDecisionError as exc:
+            raise CodegenError(str(exc)) from exc
+        if kind is JsiRegistrationKind.ASYNC:
+            registrations.append(_jsi_async_registration(module_name, export))
+        else:
+            registrations.append(
+                _jsi_sync_registration(
+                    module_name,
+                    export,
+                    feature_scoped=mode.feature_scoped,
+                )
+            )
+    return registrations
+
+
 def _jsi_binding(
     config: dict[str, object],
     exports: list[Export],
@@ -5084,11 +4235,11 @@ def _jsi_binding(
     class_prefix = str(config["class_prefix"])
     installer = f"{namespace}.generated.{class_prefix}JsiModule"
     global_name = str(config["jsi_global_name"])
-    feature_suffix = ""
-    if feature_id is not None:
-        if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
-            raise CodegenError(f"invalid V3 feature identity {feature_id!r}")
-        feature_suffix = feature_id.removeprefix("supernote:feature:")
+    try:
+        mode = _jsi_binding_mode(feature_id)
+    except JsiBindingDecisionError as exc:
+        raise CodegenError(str(exc)) from exc
+    feature_suffix = mode.feature_suffix
     declarations = _cpp_declarations(exports)
     object_includes = "\n".join(
         f'#include "{include}"'
@@ -5102,7 +4253,7 @@ def _jsi_binding(
             module_name,
             item,
             index,
-            session_aware=feature_id is not None,
+            session_aware=mode.feature_scoped,
         )
         for index, item in enumerate(objects)
     )
@@ -5111,112 +4262,13 @@ def _jsi_binding(
             filter(None, (object_wrappers, *extra_wrappers))
         )
     object_wrapper_block = f"{object_wrappers}\n\n" if object_wrappers else ""
-    registrations: list[str] = []
-    sync_capture = "[feature_session]" if feature_id is not None else "[]"
-    sync_scope = (
-        "          supernote::runtime::FeatureCallScope feature_call_scope(\n"
-        "              feature_session);\n"
-        if feature_id is not None
-        else ""
-    )
-    for export in exports:
-        if export.async_:
-            if feature_id is None:
-                raise CodegenError(
-                    "V3 async bindings require plugin-level feature lowering"
-                )
-            registrations.append(_jsi_async_registration(module_name, export))
-            continue
-        expected_parameters = ", ".join(
-            _jsi_expected_type(parameter.cpp_type)
-            + f" {parameter.name}"
-            for parameter in export.parameters
-        )
-        expected_description = (
-            f"{len(export.parameters)} argument"
-            f"{'' if len(export.parameters) == 1 else 's'}"
-            f" ({expected_parameters})"
-        )
-        count_prefix = (
-            f"{module_name}.{export.js_name}: expected "
-            f"{expected_description}; received "
-        )
-        type_checks: list[str] = []
-        for number, parameter in enumerate(export.parameters):
-            js_type = _jsi_expected_type(parameter.cpp_type)
-            type_error = (
-                f"{module_name}.{export.js_name}: argument {number + 1} "
-                f"({parameter.name}) must be a {js_type}; expected "
-                f"{expected_description}"
-            )
-            type_checks.append(
-                f"          if ({_jsi_type_check(parameter, number)}) {{\n"
-                "            supernote_throw_type_error(\n"
-                f"                runtime, {json.dumps(type_error)});\n"
-                "          }"
-            )
-            type_checks.extend(
-                _jsi_range_validation(
-                    parameter,
-                    number,
-                    diagnostic_name=f"{module_name}.{export.js_name}",
-                    indent="          ",
-                )
-            )
-        arguments = ", ".join(
-            _jsi_argument(parameter, number)
-            for number, parameter in enumerate(export.parameters)
-        )
-        call = f"{export.cpp_name}({arguments})"
-        result = "\n".join(_jsi_result_lines(call, export.return_type, "        "))
-        registrations.append(
-            "  {\n"
-            "    auto function = Function::createFromHostFunction(\n"
-            "        runtime,\n"
-            f"        PropNameID::forAscii(runtime, {json.dumps(export.js_name)}),\n"
-            f"        {len(export.parameters)},\n"
-            f"        {sync_capture}(facebook::jsi::Runtime &runtime,\n"
-            "           const Value &,\n"
-            "           const Value *arguments,\n"
-            "           std::size_t argument_count) -> Value {\n"
-            f"          if (argument_count != {len(export.parameters)}) {{\n"
-            "            supernote_throw_type_error(\n"
-            f"                runtime, std::string({json.dumps(count_prefix)}) + "
-            "std::to_string(argument_count));\n"
-            "          }\n"
-            f"{chr(10).join(type_checks)}"
-            f"{chr(10) if type_checks else ''}"
-            f"{sync_scope}"
-            "          try {\n"
-            f"{result}\n"
-            "          } catch (const facebook::jsi::JSError &error) {\n"
-            "            __android_log_print(\n"
-            "                ANDROID_LOG_ERROR, kLogTag,\n"
-            f"                {json.dumps(module_name + '.' + export.js_name + ': generated JSI conversion failed: %s')},\n"
-            "                error.what());\n"
-            "            supernote_throw_error(\n"
-            "                runtime, \"INTERNAL\",\n"
-            f"                {json.dumps(module_name + '.' + export.js_name + ': generated binding conversion failed')});\n"
-            "          } catch (const std::exception &error) {\n"
-            "            supernote_throw_error(\n"
-            "                runtime, \"IMPLEMENTATION_ERROR\",\n"
-            f"                std::string({json.dumps(module_name + '.' + export.js_name + ': ')}) + error.what());\n"
-            "          } catch (...) {\n"
-            "            supernote_throw_error(\n"
-            "                runtime, \"IMPLEMENTATION_ERROR\",\n"
-            f"                {json.dumps(module_name + '.' + export.js_name + ': unknown C++ exception')});\n"
-            "          }\n"
-            "        });\n"
-            f"    exports.setProperty(runtime, {json.dumps(export.js_name)}, "
-            "std::move(function));\n"
-            "  }"
-        )
+    registrations = _jsi_export_registrations(module_name, exports, mode)
     registrations.extend(
         _jsi_object_registration(
             module_name,
             item,
             index,
-            session_aware=feature_id is not None,
+            session_aware=mode.feature_scoped,
         )
         for index, item in enumerate(objects)
     )
@@ -5226,8 +4278,12 @@ def _jsi_binding(
     )
     async_helper_block = (
         _jsi_async_helpers() + "\n\n"
-        if feature_id is not None
-        and (any(item.async_ for item in exports) or has_async_methods or extra_uses_async)
+        if _jsi_async_helpers_required(
+            mode,
+            has_async_export=any(item.async_ for item in exports),
+            has_async_method=has_async_methods,
+            extra_uses_async=extra_uses_async,
+        )
         else ""
     )
     namespace_open = (
@@ -5242,7 +4298,7 @@ constexpr char kGlobalName[] = {json.dumps(global_name)};
 """
     else:
         bootstrap_constants = f"""constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV3FeatureRegistry_63f6999c8c67";
+    "__supernoteV4FeatureRegistry_63f6999c8c67";
 constexpr char kFeatureId[] = {json.dumps(feature_id)};
 """
     value_helpers = _jsi_value_helpers()
@@ -5273,47 +4329,47 @@ constexpr char kFeatureId[] = {json.dumps(feature_id)};
             f"{feature_suffix}\n"
         )
     else:
-        bootstrap_tail = f"""
-jboolean native_install(JNIEnv *, jobject, jlong runtime_pointer) {{
-  if (runtime_pointer == 0) {{
+        bootstrap_tail = """
+jboolean native_install(JNIEnv *, jobject, jlong runtime_pointer) {
+  if (runtime_pointer == 0) {
     return JNI_FALSE;
-  }}
+  }
   auto *runtime = reinterpret_cast<facebook::jsi::Runtime *>(
       static_cast<std::uintptr_t>(runtime_pointer));
-  try {{
+  try {
     install_exports(*runtime);
     return JNI_TRUE;
-  }} catch (const std::exception &error) {{
+  } catch (const std::exception &error) {
     __android_log_print(
         ANDROID_LOG_ERROR, kLogTag, "JSI installation failed: %s", error.what());
     return JNI_FALSE;
-  }} catch (...) {{
+  } catch (...) {
     __android_log_print(
         ANDROID_LOG_ERROR, kLogTag, "JSI installation failed");
     return JNI_FALSE;
-  }}
-}}
+  }
+}
 
-bool register_installer_natives(JNIEnv *env) {{
+bool register_installer_natives(JNIEnv *env) {
   jclass thread_class = env->FindClass("java/lang/Thread");
-  if (thread_class == nullptr) {{
+  if (thread_class == nullptr) {
     clear_pending_exception(env, "FindClass(Thread)");
     return false;
-  }}
+  }
   jmethodID current_thread =
       env->GetStaticMethodID(thread_class, "currentThread", "()Ljava/lang/Thread;");
   jmethodID get_loader = env->GetMethodID(
       thread_class, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
-  if (current_thread == nullptr || get_loader == nullptr) {{
+  if (current_thread == nullptr || get_loader == nullptr) {
     clear_pending_exception(env, "resolve Thread methods");
     return false;
-  }}
+  }
   jobject thread = env->CallStaticObjectMethod(thread_class, current_thread);
   jobject loader = env->CallObjectMethod(thread, get_loader);
-  if (env->ExceptionCheck() || loader == nullptr) {{
+  if (env->ExceptionCheck() || loader == nullptr) {
     clear_pending_exception(env, "get context classloader");
     return false;
-  }}
+  }
   jclass loader_class = env->FindClass("java/lang/ClassLoader");
   jmethodID load_class = loader_class == nullptr
       ? nullptr
@@ -5321,37 +4377,37 @@ bool register_installer_natives(JNIEnv *env) {{
             loader_class,
             "loadClass",
             "(Ljava/lang/String;)Ljava/lang/Class;");
-  if (load_class == nullptr) {{
+  if (load_class == nullptr) {
     clear_pending_exception(env, "resolve ClassLoader.loadClass");
     return false;
-  }}
+  }
   jstring class_name = env->NewStringUTF(kInstallerClassName);
   jobject installer =
       env->CallObjectMethod(loader, load_class, class_name);
-  if (env->ExceptionCheck() || installer == nullptr) {{
+  if (env->ExceptionCheck() || installer == nullptr) {
     clear_pending_exception(env, "load plugin installer");
     return false;
-  }}
-  JNINativeMethod methods[] = {{
-      {{const_cast<char *>("nativeInstall"),
+  }
+  JNINativeMethod methods[] = {
+      {const_cast<char *>("nativeInstall"),
         const_cast<char *>("(J)Z"),
-        reinterpret_cast<void *>(native_install)}},
-  }};
+        reinterpret_cast<void *>(native_install)},
+  };
   return env->RegisterNatives(
              static_cast<jclass>(installer), methods, 1) == JNI_OK;
-}}
+}
 
-}}  // namespace
+}  // namespace
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {
   JNIEnv *env = nullptr;
   if (java_vm->GetEnv(
           reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK ||
-      env == nullptr) {{
+      env == nullptr) {
     return JNI_ERR;
-  }}
+  }
   return register_installer_natives(env) ? JNI_VERSION_1_6 : JNI_ERR;
-}}
+}
 """
     exception_helper = ""
     if feature_id is None:
@@ -5416,7 +4472,7 @@ void {install_name}(
 """
 
 
-def render_v2_feature_jsi(
+def render_v4_feature_jsi(
     module_root: Path,
     *,
     module_name: str,
@@ -5472,7 +4528,7 @@ def render_v2_feature_jsi(
             )
         except (CppProjectionError, CppRouteError, SourceModelError, ValueError) as exc:
             raise CodegenError(str(exc)) from exc
-        # The V3 route renderer owns every public C++ function, including
+        # The V4 route renderer owns every public C++ function, including
         # scalar-only functions.  Keeping the legacy scalar renderer empty is
         # important because it loses namespace ownership and cannot safely
         # distinguish identical starter symbols from separate features.
@@ -5480,10 +4536,10 @@ def render_v2_feature_jsi(
     else:
         bindings = ScannedBindings((), ())
     config: dict[str, object] = {
-        "android_namespace": "supernote.generated.v3",
+        "android_namespace": "supernote.generated.v4",
         "module_name": module_name,
-        "class_prefix": "V3Feature",
-        "jsi_global_name": "__supernoteV3",
+        "class_prefix": "V4Feature",
+        "jsi_global_name": "__supernoteV4",
     }
     rendered = _jsi_binding(
         config,
@@ -5499,16 +4555,16 @@ def render_v2_feature_jsi(
     if conversion_digest is None:
         return rendered
     if not re.fullmatch(r"[0-9a-f]{64}", conversion_digest):
-        raise CodegenError("invalid V3 conversion-plan digest")
+        raise CodegenError("invalid V4 conversion-plan digest")
     return (
-        f"// Supernote V3 conversion plan SHA-256: {conversion_digest}\n"
+        f"// Supernote V4 conversion plan SHA-256: {conversion_digest}\n"
         "#include <supernote/conversion.hpp>\n"
         "#include <supernote/cpp_objects.hpp>\n"
         + rendered
     )
 
 
-def render_v2_plugin_jsi(
+def render_v4_plugin_jsi(
     feature_ids: list[str],
     *,
     jvm_feature_ids: list[str] | None = None,
@@ -5518,16 +4574,16 @@ def render_v2_plugin_jsi(
     validated: list[tuple[str, str]] = []
     for feature_id in feature_ids:
         if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
-            raise CodegenError(f"invalid V3 feature identity {feature_id!r}")
+            raise CodegenError(f"invalid V4 feature identity {feature_id!r}")
         validated.append(
             (feature_id, feature_id.removeprefix("supernote:feature:"))
         )
     if len({feature_id for feature_id, _ in validated}) != len(validated):
-        raise CodegenError("duplicate V3 feature identity in plugin registry")
+        raise CodegenError("duplicate V4 feature identity in plugin registry")
     jvm_features = set(jvm_feature_ids or ())
     unknown_jvm = jvm_features - {feature_id for feature_id, _ in validated}
     if unknown_jvm:
-        raise CodegenError("JVM routes refer to an unknown V3 feature")
+        raise CodegenError("JVM routes refer to an unknown V4 feature")
     declarations = "\n".join(
         "namespace supernote::generated::feature_"
         f"{suffix} {{\n"
@@ -5579,7 +4635,7 @@ namespace supernote::generated {{
 namespace {{
 
 constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV3FeatureRegistry_63f6999c8c67";
+    "__supernoteV4FeatureRegistry_63f6999c8c67";
 
 [[noreturn]] void throw_type_error(
     facebook::jsi::Runtime &runtime, const std::string &message) {{
@@ -5616,7 +4672,7 @@ void install_plugin_bindings(
         if (argument_count != 1 || !arguments[0].isString()) {{
           throw_type_error(
               runtime,
-              "Supernote V3 runtime feature(id) expects exactly one string");
+              "Supernote V4 runtime feature(id) expects exactly one string");
         }}
         const auto feature_id = arguments[0].asString(runtime).utf8(runtime);
         auto registry = runtime.global().getPropertyAsObject(
@@ -5624,13 +4680,13 @@ void install_plugin_bindings(
         auto binding = registry.getProperty(runtime, feature_id.c_str());
         if (binding.isUndefined()) {{
           throw_type_error(
-              runtime, "unknown Supernote V3 feature: " + feature_id);
+              runtime, "unknown Supernote V4 feature: " + feature_id);
         }}
         return binding;
       }});
   public_runtime.setProperty(runtime, "feature", std::move(feature));
   runtime.global().setProperty(
-      runtime, "__supernoteV3", std::move(public_runtime));
+      runtime, "__supernoteV4", std::move(public_runtime));
 }}
 
 }}  // namespace supernote::generated

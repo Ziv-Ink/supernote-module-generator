@@ -1,4 +1,4 @@
-"""Language-neutral feature ownership and plugin runtime registry for V3."""
+"""Language-neutral feature ownership and plugin runtime registry for V4."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,12 +8,16 @@ from pathlib import PurePosixPath
 import re
 from typing import Dict, Iterable, Tuple
 
+from .errors import ValidationError
+from .feature_identity import canonical_feature_id
+from .naming import validate_android_namespace, validate_package_name
+
 from .semantic import (
     ExecutionMode,
     SemanticApi,
     SemanticObjectDeclaration,
 )
-from .v3_schemas import (
+from .v4_schemas import (
     FEATURE_MANIFEST_KIND,
     FEATURE_MANIFEST_SCHEMA_VERSION,
     PLUGIN_REGISTRY_KIND,
@@ -24,7 +28,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class FeatureModelError(ValueError):
-    """Raised when V3 ownership/build metadata violates its contract."""
+    """Raised when V4 ownership/build metadata violates its contract."""
 
 
 class StarterFamily(str, Enum):
@@ -72,18 +76,21 @@ class FeatureManifest:
                 "unsupported feature manifest schema "
                 f"{self.schema_version}; expected {FEATURE_MANIFEST_SCHEMA_VERSION}"
             )
-        if not self.feature_id.startswith("supernote:feature:"):
+        try:
+            validate_package_name(self.npm_name)
+            validate_android_namespace(self.android_namespace)
+        except ValidationError as exc:
+            raise FeatureModelError(str(exc)) from exc
+        expected_feature_id = canonical_feature_id(self.npm_name)
+        if self.feature_id != expected_feature_id:
             raise FeatureModelError(
-                "feature identity must start with 'supernote:feature:'"
+                f"feature identity mismatch: expected {expected_feature_id!r}, "
+                f"got {self.feature_id!r}"
             )
-        if not self.npm_name:
-            raise FeatureModelError("feature npm name cannot be empty")
         if not _IDENTIFIER.fullmatch(self.public_name):
             raise FeatureModelError(
                 f"invalid feature public name {self.public_name!r}"
             )
-        if not self.android_namespace or "." not in self.android_namespace:
-            raise FeatureModelError("feature Android namespace is invalid")
         _reject_duplicates(self.starter_files, "starter file")
         for path in self.starter_files:
             _validate_relative_path(path, "starter file")
@@ -293,8 +300,7 @@ class PluginRuntimeRegistry:
 
 
 def feature_identity(npm_name: str) -> str:
-    digest = hashlib.sha256(npm_name.encode("utf-8")).hexdigest()[:16]
-    return f"supernote:feature:{digest}"
+    return canonical_feature_id(npm_name)
 
 
 def plugin_runtime_component_name(plugin_id: str) -> str:

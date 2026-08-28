@@ -6,7 +6,7 @@ from typing import Dict
 
 ROOT_HELP = """Supernote Module Generator
 
-Generate and manage language-neutral V3 features in an existing Supernote plugin.
+Generate and manage language-neutral V4 features in an existing Supernote plugin.
 
 Usage:
   supernote-module
@@ -16,7 +16,10 @@ Commands:
   add        Create and link a local feature.
   update     Refresh generated parts of one feature.
   validate   Check feature structure, integration, and optionally its build.
+  check      Authoritatively compare all V4 generated state with semantic inputs.
+  repair     Preview or apply the complete canonical V4 generation plan.
   remove     Permanently delete one or all features.
+  template   Compare or explicitly sync the versioned template capability.
   doctor     Verify the development environment.
   help       Show help for a command.
 
@@ -140,6 +143,9 @@ Arguments:
   MODULE                         Managed feature package name.
 
 Options:
+      --all                     Update the complete project generation.
+      --dry-run                 Preview the complete affected closure without writes.
+      --diff                    Include a unified owned-content diff.
       --package-manager <npm|yarn>
                                      Package manager when refresh is required.
       --skip-install             Skip a required dependency refresh.
@@ -175,6 +181,49 @@ Exit:
   2 usage or input error
   3 partial completion requiring recovery
   130 interrupted
+"""
+
+CHECK_HELP = """Supernote Module Generator
+
+Authoritatively compare semantic inputs, the V4 manifest, wiring, and every
+generator-owned artifact with the current filesystem.
+
+Usage:
+  supernote-module check [--build] [output options]
+
+Options:
+      --build  Add Android compilation after integrity and syntax checks pass.
+      --build-hook
+               Read-only Gradle integration mode after the KSP frontend.
+      --jvm-manifest-root <PATH>
+               KSP build-directory semantic manifests for --build-hook.
+  -h, --help   Show help.
+"""
+
+REPAIR_HELP = """Supernote Module Generator
+
+Preview or apply one complete canonical V4 generation transaction.
+
+Usage:
+  supernote-module repair [--dry-run] [--diff] [--yes] [output options]
+
+Behavior:
+  Repair is a dry-run unless --yes is supplied. The plan lists requested and
+  transitively affected targets and never changes user-owned source files.
+"""
+
+TEMPLATE_HELP = """Supernote Module Generator
+
+Compare or explicitly synchronize the versioned official-template launch capability.
+
+Usage:
+  supernote-module template status [output options]
+  supernote-module template sync [--dry-run | --yes] [output options]
+
+Behavior:
+  status is read-only and reports current, drifted, or missing Bash/PowerShell
+  launch-script state. sync previews by default. --yes transactionally applies
+  only a recognized official-template baseline and refuses unknown drift.
 """
 
 VALIDATE_HELP = """Supernote Module Generator
@@ -276,13 +325,14 @@ Exit:
 
 DOCTOR_HELP = """Supernote Module Generator
 
-Verify the development environment required by this V3 plugin.
+Verify the development environment selected by this V4 plugin.
 
 Usage:
   supernote-module doctor [options]
 
 Options:
-  -h, --help   Show help.
+  -h, --help  Show help.
+      --build  Run the authoritative read-only state check and full Android build.
 
 Output options:
       --quiet     Show errors and one final result line.
@@ -293,15 +343,19 @@ Output options:
       --debug     Include internal diagnostics and tracebacks.
 
 Behavior:
-  Doctor checks JavaScript, Kotlin/KSP, Gradle, Java 17 through 23 (Java 17 is
-  recommended), Android SDK/NDK tools, NDK Clang with C23/C++23, CMake, and JSI
-  requirements used by the plugin-level V3 runtime. It also reports the target-
-  device runtime boundary that cannot be proven locally. Inside a plugin root,
-  configured devconfig.json paths take priority over the launching environment.
+  Doctor distinguishes configured, found, project-selected, executable-probed,
+  compiler-probed, project-built, and device-tested states. It checks JavaScript,
+  Gradle, Java 17 through 23 (Java 17 is recommended), the selected Android SDK
+  platform/build tools/NDK, configured ADB, NDK Clang with C23/C++23, CMake, and
+  the JSI boundary. Merely finding files never claims KSP, JSI, project-build, or
+  device success. Inside a plugin root, configured devconfig.json paths take
+  priority over the launching environment. --build adds the authoritative V4
+  read-only state check and full Gradle/KSP/Kotlin/CMake/JNI/JSI build probe.
 
 Examples:
   supernote-module doctor
   supernote-module doctor --json
+  supernote-module doctor --build --json
 
 Exit:
   0 required checks passed
@@ -329,7 +383,10 @@ COMMAND_HELP: Dict[str, str] = {
     "add": ADD_HELP,
     "update": UPDATE_HELP,
     "validate": VALIDATE_HELP,
+    "check": CHECK_HELP,
+    "repair": REPAIR_HELP,
     "remove": REMOVE_HELP,
+    "template": TEMPLATE_HELP,
     "doctor": DOCTOR_HELP,
     "help": HELP_HELP,
 }

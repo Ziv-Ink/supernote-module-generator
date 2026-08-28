@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from supernote_module_generator.cli import main
+from supernote_module_generator.feature_identity import canonical_feature_id
+from supernote_module_generator.feature_operations import FeatureOperationService
 from supernote_module_generator.platform_tools import gradle_wrapper_path
 
 
@@ -60,7 +62,7 @@ def _feature(root: Path) -> Path:
     [
         ("{", "invalid JSON at line 1"),
         ({"schema_version": 99}, "unsupported feature manifest schema 99"),
-        ({"kind": "something_else"}, "kind must be 'supernote_v3_feature'"),
+        ({"kind": "something_else"}, "kind must be 'supernote_v4_feature'"),
         ({"public_name": None}, "public_name must be a non-empty string"),
     ],
 )
@@ -159,3 +161,76 @@ def test_marked_cpp_boundary_error_has_source_preflight_classification(tmp_path:
     source_location = str(Path("android/src/main/cpp/Safe.cpp")) + ":2"
     assert source_location in result["error"]["message"]
     assert "raw pointers are not supported" in result["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["update", "safe", "--skip-install", "--yes"],
+        ["validate", "safe"],
+        ["remove", "safe", "--skip-install", "--yes"],
+    ],
+)
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({"package_version": "4.0"}, "invalid package version"),
+        ({"android_namespace": "com.class.safe"}, "invalid Android namespace"),
+        ({"feature_id": "supernote:feature:wrong"}, "feature identity mismatch"),
+        ({"npm_name": "../escaped"}, "invalid package name"),
+    ],
+)
+def test_every_command_rejects_invalid_identity_metadata_before_mutation(
+    tmp_path: Path,
+    arguments: list[str],
+    change: dict[str, str],
+    expected: str,
+):
+    root = _plugin(tmp_path)
+    feature = _feature(root)
+    metadata = feature / ".supernote-module.json"
+    value = json.loads(metadata.read_text(encoding="utf-8"))
+    value.update(change)
+    if "npm_name" in change and change["npm_name"] != "../escaped":
+        value["feature_id"] = canonical_feature_id(change["npm_name"])
+    metadata.write_text(json.dumps(value) + "\n", encoding="utf-8")
+    before = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+    code, _, stderr = _invoke(root, arguments)
+
+    after = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    assert code != 0
+    assert expected in stderr
+    assert after == before
+
+
+def test_nested_feature_metadata_is_not_discovered(tmp_path: Path):
+    root = _plugin(tmp_path)
+    nested = root / "local_modules/vendor/nested"
+    nested.mkdir(parents=True)
+    (nested / ".supernote-module.json").write_text("{ invalid", encoding="utf-8")
+
+    assert FeatureOperationService(root).feature_paths() == []
+
+
+def test_manifest_directory_must_match_its_canonical_package_path(tmp_path: Path):
+    root = _plugin(tmp_path)
+    feature = _feature(root)
+    metadata = feature / ".supernote-module.json"
+    value = json.loads(metadata.read_text(encoding="utf-8"))
+    value["npm_name"] = "other"
+    value["feature_id"] = canonical_feature_id("other")
+    metadata.write_text(json.dumps(value) + "\n", encoding="utf-8")
+
+    code, _, stderr = _invoke(root, ["validate", "safe"])
+
+    assert code != 0
+    assert "noncanonical directory" in stderr

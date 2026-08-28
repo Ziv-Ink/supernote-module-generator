@@ -5,3 +5,51 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Begin with correctness checks that must remain clean across the complete active
+# source and test tree. Formatting and broader style policy can be introduced
+# independently without hiding undefined names, import mistakes, or syntax bugs.
+select = ["F"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.mypy]
+python_version = "3.9"
+files = [
+    "src/supernote_module_generator/arguments.py",
+    "src/supernote_module_generator/cpp_class_syntax.py",
+    "src/supernote_module_generator/cpp_declarations.py",
+    "src/supernote_module_generator/cpp_function_syntax.py",
+    "src/supernote_module_generator/cpp_global_functions.py",
+    "src/supernote_module_generator/cpp_lexer.py",
+    "src/supernote_module_generator/cpp_member_semantics.py",
+    "src/supernote_module_generator/cpp_member_shapes.py",
+    "src/supernote_module_generator/cpp_members.py",
+    "src/supernote_module_generator/cpp_source_routing.py",
+    "src/supernote_module_generator/cpp_type_syntax.py",
+    "src/supernote_module_generator/feature_identity.py",
+    "src/supernote_module_generator/semantic_ir.py",
+    "src/supernote_module_generator/generation_plan.py",
+    "src/supernote_module_generator/integrity_manifest.py",
+    "src/supernote_module_generator/jsi_binding_decisions.py",
+    "src/supernote_module_generator/models.py",
+    "src/supernote_module_generator/semantic_types.py",
+    "src/supernote_module_generator/template_contract.py",
+    "src/supernote_module_generator/transaction.py",
+]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+incremental = false
+no_implicit_optional = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_ignores = true
