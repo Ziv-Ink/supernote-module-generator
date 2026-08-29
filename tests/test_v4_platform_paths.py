@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 import supernote_module_generator.filesystem as filesystem_module
+import supernote_module_generator.transaction as transaction_module
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.errors import FilesystemError
@@ -96,6 +97,19 @@ def test_windows_long_path_reaches_active_v4_mutation_validation_and_rollback(
     _exercise_mutation_validation_and_rollback(root)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows transaction paths")
+def test_windows_transaction_entry_accepts_native_absolute_path(tmp_path: Path) -> None:
+    destination = tmp_path / "project with spaces" / "package.json"
+    destination.parent.mkdir()
+    destination.write_bytes(b"{}\n")
+
+    assert transaction_module._validate_absolute_entry_path(
+        tmp_path,
+        str(destination),
+        allow_missing_ancestors=False,
+    ) == destination
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows reparse-point contract")
 def test_windows_junction_is_never_traversed_or_observed(tmp_path: Path) -> None:
     external = tmp_path / "external"
@@ -146,7 +160,7 @@ def test_windows_contained_classifier_retains_ancestor_against_junction_swap(
     external = tmp_path / "external"
     external.mkdir()
     sentinel = external / "runPlugin.ps1"
-    sentinel.write_text("outside\n", encoding="utf-8")
+    sentinel.write_bytes(b"outside\n")
     expected = sentinel.lstat()
     original_retain = filesystem_module._windows_retain_non_reparse_ancestors
     attempted = False

@@ -977,8 +977,10 @@ def _validate_absolute_entry_path(
     if (
         not isinstance(value, str)
         or not value
-        or "\\" in value
-        or (windows is not None and windows.drive)
+        or (
+            os.name != "nt"
+            and ("\\" in value or (windows is not None and windows.drive))
+        )
     ):
         raise FilesystemError("Transaction entry path is invalid")
     path = Path(value)
