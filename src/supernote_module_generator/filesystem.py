@@ -59,7 +59,9 @@ def _windows_host() -> bool:
 def _windows_kernel32() -> Any:
     import ctypes
 
-    loader = getattr(ctypes, "WinDLL")
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        return None
     return loader("kernel32", use_last_error=True)
 
 
@@ -255,6 +257,23 @@ def _windows_path_key(path: Path) -> str:
     elif value.startswith("\\\\?\\"):
         value = value[4:]
     value = os.path.abspath(value)
+    if _windows_host():
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = _windows_kernel32()
+        if kernel32 is not None and hasattr(kernel32, "GetLongPathNameW"):
+            get_long_path = kernel32.GetLongPathNameW
+            get_long_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+            get_long_path.restype = wintypes.DWORD
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = get_long_path(_windows_api_path(Path(value)), buffer, len(buffer))
+            if 0 < size < len(buffer):
+                value = buffer.value
+                if value.startswith("\\\\?\\UNC\\"):
+                    value = "\\\\" + value[8:]
+                elif value.startswith("\\\\?\\"):
+                    value = value[4:]
     return os.path.normcase(os.path.normpath(value))
 
 
@@ -333,7 +352,7 @@ def _windows_create_raw_handle(path: Path, desired_access: int) -> int:
     handle = create_file(
         _windows_api_path(path),
         desired_access,
-        0x1 | 0x2 | 0x4,
+        0x1 | 0x2,
         None,
         3,
         0x00200000 | 0x02000000,
@@ -448,7 +467,7 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             handle = create_file(
                 _windows_api_path(current),
                 0x1 | 0x80,  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
-                0x1 | 0x2 | 0x4,
+                0x1,
                 None,
                 3,
                 0x00200000 | 0x02000000,
@@ -1527,8 +1546,16 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
         if (
             stat.S_IFMT(restored.st_mode) != stat.S_IFMT(metadata.st_mode)
             or stat.S_IMODE(restored.st_mode) != desired_mode
-            or restored.st_atime_ns != metadata.st_atime_ns
-            or restored.st_mtime_ns != metadata.st_mtime_ns
+            or (
+                (restored.st_atime_ns // 100 != metadata.st_atime_ns // 100)
+                if _windows_host()
+                else restored.st_atime_ns != metadata.st_atime_ns
+            )
+            or (
+                (restored.st_mtime_ns // 100 != metadata.st_mtime_ns // 100)
+                if _windows_host()
+                else restored.st_mtime_ns != metadata.st_mtime_ns
+            )
         ):
             raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
         return
@@ -2011,8 +2038,16 @@ def restore_protected_directory_metadata(
             continue
         if (
             stat.S_IMODE(value.st_mode) != mode
-            or value.st_atime_ns != atime_ns
-            or value.st_mtime_ns != mtime_ns
+            or (
+                (value.st_atime_ns // 100 != atime_ns // 100)
+                if _windows_host()
+                else value.st_atime_ns != atime_ns
+            )
+            or (
+                (value.st_mtime_ns // 100 != mtime_ns // 100)
+                if _windows_host()
+                else value.st_mtime_ns != mtime_ns
+            )
         ):
             marker = f"modified:{relative}"
             if marker not in failures:
@@ -2081,8 +2116,16 @@ def _apply_contained_directory_metadata(
             _windows_close_handle(handle)
         if (
             stat.S_IMODE(restored.st_mode) != mode
-            or restored.st_atime_ns != atime_ns
-            or restored.st_mtime_ns != mtime_ns
+            or (
+                (restored.st_atime_ns // 100 != atime_ns // 100)
+                if _windows_host()
+                else restored.st_atime_ns != atime_ns
+            )
+            or (
+                (restored.st_mtime_ns // 100 != mtime_ns // 100)
+                if _windows_host()
+                else restored.st_mtime_ns != mtime_ns
+            )
         ):
             raise FilesystemError(
                 f"Could not restore exact protected directory metadata: {directory}"

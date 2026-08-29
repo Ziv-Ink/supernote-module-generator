@@ -89,7 +89,7 @@ def test_windows_long_path_reaches_active_v4_mutation_validation_and_rollback(
 ) -> None:
     root = tmp_path
     component = "long-v4-path-segment-0123456789"
-    while len(str(root / component)) < 285:
+    while len(str(root)) < 285:
         root /= component
     root = _plugin(root)
 
