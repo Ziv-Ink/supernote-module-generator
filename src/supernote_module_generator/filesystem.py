@@ -882,7 +882,11 @@ def _observed_directory_entries(
             raise ConcurrentSourceMutation(
                 f"Source directory changed while it was inspected: {path}"
             )
-        if after.st_atime_ns != before.st_atime_ns:
+        if (
+            (after.st_atime_ns // 100 != before.st_atime_ns // 100)
+            if _windows_host()
+            else after.st_atime_ns != before.st_atime_ns
+        ):
             _windows_apply_handle_metadata_values(
                 handle,
                 mode=None,
@@ -892,7 +896,9 @@ def _observed_directory_entries(
             )
             restored = path.lstat()
             if not _same_observed_entry(before, restored) or (
-                restored.st_atime_ns != before.st_atime_ns
+                (restored.st_atime_ns // 100 != before.st_atime_ns // 100)
+                if _windows_host()
+                else restored.st_atime_ns != before.st_atime_ns
             ):
                 raise ConcurrentSourceMutation(
                     f"Source directory changed while it was inspected: {path}"
@@ -908,7 +914,11 @@ def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
         and before.st_ino == after.st_ino
         and stat.S_IFMT(before.st_mode) == stat.S_IFMT(after.st_mode)
         and stat.S_IMODE(before.st_mode) == stat.S_IMODE(after.st_mode)
-        and before.st_mtime_ns == after.st_mtime_ns
+        and (
+            (before.st_mtime_ns // 100 == after.st_mtime_ns // 100)
+            if _windows_host()
+            else before.st_mtime_ns == after.st_mtime_ns
+        )
         and before.st_size == after.st_size
     )
 
@@ -945,7 +955,11 @@ def _finish_observed_atime(
             return False
         return (
             _same_observed_entry(before, restored)
-            and restored.st_atime_ns == before.st_atime_ns
+            and (
+                (restored.st_atime_ns // 100 == before.st_atime_ns // 100)
+                if _windows_host()
+                else restored.st_atime_ns == before.st_atime_ns
+            )
         )
 
     after = os.fstat(descriptor)
@@ -1045,7 +1059,11 @@ def _restore_observed_path_atime(path: Path, before: os.stat_result) -> bool:
             current = path.lstat()
             if not _same_observed_entry(before, current):
                 return False
-            if current.st_atime_ns != before.st_atime_ns:
+            if (
+                (current.st_atime_ns // 100 != before.st_atime_ns // 100)
+                if _windows_host()
+                else current.st_atime_ns != before.st_atime_ns
+            ):
                 _windows_apply_handle_metadata_values(
                     handle,
                     mode=None,
@@ -1055,7 +1073,9 @@ def _restore_observed_path_atime(path: Path, before: os.stat_result) -> bool:
                 )
             restored = path.lstat()
             return _same_observed_entry(before, restored) and (
-                restored.st_atime_ns == before.st_atime_ns
+                (restored.st_atime_ns // 100 == before.st_atime_ns // 100)
+                if _windows_host()
+                else restored.st_atime_ns == before.st_atime_ns
             )
         except OSError:
             return False
@@ -1875,7 +1895,11 @@ def source_tree_inventory(root: Path) -> SourceTreeInventory:
             try:
                 metadata = child.stat(follow_symlinks=False)
                 mode = stat.S_IMODE(metadata.st_mode)
-                modified_ns = metadata.st_mtime_ns
+                modified_ns = (
+                    (metadata.st_mtime_ns // 100) * 100
+                    if _windows_host()
+                    else metadata.st_mtime_ns
+                )
                 if child.is_symlink():
                     target, _link_metadata = _read_symlink_identity_bound(
                         path,

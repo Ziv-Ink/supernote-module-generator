@@ -20,6 +20,8 @@ from .feature_cli_operations import FeatureCliOperationService
 from .feature_workflows import FeatureDecisionCollector, FeatureValidateDecisions
 from .errors import ConfigurationError, GeneratorError, OperationCancelled, PartialFailure
 from .filesystem import (
+    _windows_host,
+    _windows_path_key,
     contained_entry_kind_no_follow,
     read_contained_regular_bytes_no_follow,
 )
@@ -529,7 +531,14 @@ def _trusted_parent_build_hook(parsed: ParsedArguments, root: Path) -> bool:
         isinstance(journal, dict)
         and journal.get("schema") == 1
         and journal.get("id") == transaction_id
-        and journal.get("root") == str(root)
+        and (
+            (
+                _windows_path_key(Path(str(journal.get("root"))))
+                == _windows_path_key(root)
+            )
+            if _windows_host()
+            else journal.get("root") == str(root)
+        )
         and journal.get("phase") != "commit"
     )
 

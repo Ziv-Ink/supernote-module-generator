@@ -21,6 +21,8 @@ from .filesystem import (
     _observed_directory_entries,
     _open_contained_directory_descriptor,
     _open_contained_parent_descriptor,
+    _windows_host,
+    _windows_path_key,
     copy_entry_no_follow,
     entry_kind,
     hash_entry_no_follow,
@@ -3237,7 +3239,14 @@ def recover_pending(
         return RecoveryOutcome(RollbackResult(), None, None)
     try:
         data = json.loads(journal.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or data.get("root") != str(root):
+        if not isinstance(data, dict) or (
+            (
+                _windows_path_key(Path(str(data.get("root"))))
+                != _windows_path_key(root)
+            )
+            if _windows_host()
+            else data.get("root") != str(root)
+        ):
             raise ValueError("journal root does not match the current plugin")
         command = str(data.get("command", "operation"))
         modules = data.get("modules", [])
