@@ -298,9 +298,10 @@ def _windows_open_no_follow_handle(
     if not _windows_host():
         raise OSError("Windows handle operations are unavailable")
     ancestor_handles = _windows_retain_non_reparse_ancestors(path)
-    desired_access = 0x80000000 | 0x80  # GENERIC_READ | FILE_READ_ATTRIBUTES
     if directory:
-        desired_access |= 0x1  # FILE_LIST_DIRECTORY
+        desired_access = 0x1 | 0x80  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
+    else:
+        desired_access = 0x80000000 | 0x80  # GENERIC_READ | FILE_READ_ATTRIBUTES
     if write_metadata:
         desired_access |= 0x100  # FILE_WRITE_ATTRIBUTES
     try:
