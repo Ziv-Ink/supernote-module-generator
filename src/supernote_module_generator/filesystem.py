@@ -1109,8 +1109,12 @@ def validate_contained_path_no_follow(
         relative = path.relative_to(canonical_root).as_posix()
     except ValueError as exc:
         raise FilesystemError(f"Project path is outside the plugin root: {path}") from exc
-    candidate = canonical_root.joinpath(
-        *validate_persisted_relative_path(relative).parts
+    candidate = (
+        canonical_root
+        if relative == "."
+        else canonical_root.joinpath(
+            *validate_persisted_relative_path(relative).parts
+        )
     )
     kind = contained_entry_kind_no_follow(canonical_root, candidate)
     if kind not in allowed_final_kinds:
@@ -1128,6 +1132,8 @@ def contained_entry_kind_no_follow(root: Path, path: Path) -> Optional[str]:
         relative = path.relative_to(canonical_root).as_posix()
     except ValueError as exc:
         raise FilesystemError(f"Project path is outside the plugin root: {path}") from exc
+    if relative == ".":
+        return "directory"
     parsed = validate_persisted_relative_path(relative)
     if _windows_host():
         return _windows_contained_entry_kind(canonical_root, parsed)
