@@ -333,7 +333,7 @@ def _windows_create_raw_handle(path: Path, desired_access: int) -> int:
     handle = create_file(
         _windows_api_path(path),
         desired_access,
-        0x1 | 0x2,
+        0x1 | 0x2 | 0x4,
         None,
         3,
         0x00200000 | 0x02000000,
@@ -448,7 +448,7 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             handle = create_file(
                 _windows_api_path(current),
                 0x1 | 0x80,  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
-                0x1,
+                0x1 | 0x2 | 0x4,
                 None,
                 3,
                 0x00200000 | 0x02000000,

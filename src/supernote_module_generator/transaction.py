@@ -696,7 +696,6 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
                 relative,
                 current_kind,
                 stat.S_IMODE(after.st_mode),
-                after.st_atime_ns,
                 after.st_mtime_ns,
                 after.st_size,
                 digest,

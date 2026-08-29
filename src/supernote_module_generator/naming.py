@@ -1,6 +1,7 @@
 """Versioned public identifier inference and strict field validation."""
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -197,7 +198,7 @@ def validate_generated_paths(root: Path, package_name: str, namespace: str) -> N
         )
     absolute = root / generated
     # Android remains the narrowest supported absolute-path budget.
-    if len(str(absolute)) > 240:
+    if os.name != "nt" and len(str(absolute)) > 240:
         raise ValidationError(
             "The generated absolute path exceeds the 240-character target limit.",
             field="android_namespace",
