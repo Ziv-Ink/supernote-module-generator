@@ -14,7 +14,7 @@ Usage:
 
 Commands:
   add        Create and link a local feature.
-  update     Refresh generated parts of one feature.
+  update     Refresh generated parts of one or all managed features.
   validate   Check feature structure, integration, and optionally its build.
   check      Authoritatively compare all V4 generated state with semantic inputs.
   repair     Preview or apply the complete canonical V4 generation plan.
@@ -134,7 +134,7 @@ Exit:
 
 UPDATE_HELP = """Supernote Module Generator
 
-Refresh generated parts of one feature while preserving implementation source.
+Refresh generated parts of one or all managed features while preserving source.
 
 Usage:
   supernote-module update [MODULE] [options]
@@ -165,13 +165,15 @@ Behavior:
   Without --yes, interactive Update shows what will be preserved and
   regenerated; confirmation defaults to Yes. Dependencies are refreshed only
   when the parent dependency entry or installed local link needs repair. Update
-  always targets one feature. Add and Update run the generated semantics task so
-  index.d.ts and the feature README match the marked public API. --build adds a
-  complete Android build after that generation step.
+  targets MODULE unless --all selects the complete managed project. Add and
+  Update run the generated semantics task so index.d.ts and the feature README
+  match the marked public API. --build adds a complete Android build after that
+  generation step.
 
 Examples:
   supernote-module update
   supernote-module update local-math
+  supernote-module update --all --dry-run
   supernote-module update local-math --build
   supernote-module update local-math --yes --json
 

@@ -262,6 +262,19 @@ def test_cli_identifies_an_existing_plugin_as_the_product_boundary():
     assert "existing Supernote plugin" in ROOT_HELP
 
 
+def test_update_help_and_ownership_adr_describe_the_active_plan_contract():
+    update_help = COMMAND_HELP["update"]
+    ownership_adr = (
+        ROOT / "architecture/decisions/0001-generated-ownership-and-transactions.md"
+    ).read_text(encoding="utf-8")
+
+    assert "one or all managed features" in ROOT_HELP
+    assert "--all selects the complete managed project" in update_help
+    assert "update --all --dry-run" in update_help
+    assert "read-only `--dry-run` plan" in ownership_adr
+    assert "does not offer\na dry-run" not in ownership_adr
+
+
 def test_jsi_is_supported_without_overstating_runtime_availability():
     current_material = [
         ROOT / "README.md",

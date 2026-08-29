@@ -14,6 +14,7 @@ from supernote_module_generator.errors import (
 )
 from supernote_module_generator.filesystem import (
     contained_directory_entries_no_follow,
+    iter_tree_no_follow,
 )
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
@@ -58,11 +59,15 @@ def invoke(root: Path, arguments: list[str]) -> tuple[int, dict[str, object]]:
 
 
 def exact_metadata(root: Path) -> dict[str, tuple[int, int, int]]:
+    # Path.rglob()/os.walk() can advance directory atime on Linux. Traverse
+    # through the production no-follow observer so this assertion does not
+    # create the metadata drift it is intended to detect.
+    paths = tuple(iter_tree_no_follow(root))
     return {
         ".": _metadata(root),
         **{
             path.relative_to(root).as_posix(): _metadata(path)
-            for path in root.rglob("*")
+            for path in paths
             if not path.is_symlink()
         },
     }
@@ -119,8 +124,8 @@ def test_public_commands_reject_unmanifested_v4_runtime_without_mutation(
     assert result["error"]["phase"] == "preflight"
     assert "cannot prove ownership" in result["error"]["message"]
     assert "schema-4 integrity manifest" in result["next_action"]
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
     assert outside.read_bytes() == outside_before
 
@@ -145,8 +150,8 @@ def test_public_commands_reject_unmanifested_v4_wiring_without_mutation(
 
     assert code == 1
     assert result["error"]["kind"] == "unmanifested_generated_project"
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
 
 
 def test_clean_public_add_uses_transaction_scoped_v4_bootstrap(tmp_path: Path):
@@ -265,8 +270,8 @@ def test_public_commands_reject_legacy_runtime_before_any_mutation(
     assert result["error"]["phase"] == "preflight"
     assert "does not migrate" in result["error"]["message"]
     assert "Create a clean V4 plugin" in result["next_action"]
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
 
 
@@ -303,8 +308,8 @@ def test_every_public_command_rejects_known_historical_layouts_exactly(
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
 
 
@@ -340,8 +345,8 @@ def test_v4_manifest_never_masks_known_historical_layouts(
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
 
 
 @pytest.mark.parametrize("version", ("v1", "v2", "v3"))
@@ -363,8 +368,8 @@ def test_v4_manifest_never_masks_legacy_runtime_roots(
 
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
 
 
 @pytest.mark.parametrize("legacy_version", ("v1", "v2", "v3"))
@@ -397,8 +402,8 @@ def test_manifest_claim_never_masks_live_legacy_feature_metadata(
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert inventory_project(root) == before
     assert exact_metadata(root) == before_metadata
+    assert inventory_project(root) == before
 
 
 @pytest.mark.parametrize("directory_name", ["local-modules", "modules"])

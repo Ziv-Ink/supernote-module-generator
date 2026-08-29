@@ -31,10 +31,10 @@ retains recoverable source until parent changes, dependency reconciliation, and
 postconditions succeed. Mutations journal affected paths; failed or interrupted
 work rolls back when possible and exits with a partial/recovery result when not.
 
-The generated README is infrastructure, not user storage. Update does not offer
-a dry-run or file-level diff, so the interactive plan and Git status are
-advisory and contributors document version control as the independent recovery
-path.
+The generated README is infrastructure, not user storage. Update offers a
+read-only `--dry-run` plan and optional owned-content `--diff`; these are exact
+projections of the generation plan. Version control remains an independent
+recovery boundary for developer-owned source.
 
 ## Consequences
 

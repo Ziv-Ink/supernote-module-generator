@@ -998,43 +998,27 @@ def test_stage_failure_survives_independent_finalization_cancellation(
     assert authoritative["validation"]["build"] == (
         "not_run" if build else "not_requested"
     )
-    if retry == "success":
-        assert code == 1
-        assert envelope["status"] == "failure"
-        assert envelope["error"]["kind"] == (
-            "frontend_mutated_source"
-            if stage == "frontend"
-            else "build_mutated_source"
-            if build
-            else "validation_mutated_source"
-        )
-        assert envelope["error"]["phase"] == (
-            "frontend" if stage == "frontend" else "build" if build else "check"
-        )
-        assert envelope["cancellation"]["status"] == "completed"
-        assert envelope["rollback"]["status"] == "completed"
-        assert envelope["recovery"] is None
-        assert source_tree_inventory(root) == before
-        assert protected_directory_metadata(root) == before_directories
-        assert recovery_paths and not lexists(recovery_paths[0])
-    else:
-        assert code == 3
-        assert envelope["status"] == "partial"
-        assert envelope["cancellation"]["status"] == "partial"
-        assert envelope["rollback"]["status"] == "partial"
-        assert envelope["changes"] == []
-        assert envelope["actual_changes"] == []
-        assert envelope["error"]["kind"] == "protected_source_cleanup_failed"
-        assert envelope["metadata"]["restore_diagnostics"] == [
-            "finalization_failed:guard retry cleanup sentinel"
-        ]
-        recovery = Path(envelope["metadata"]["recovery_path"])
-        assert recovery_paths and recovery == recovery_paths[0]
-        assert lexists(recovery)
-        assert restore_protected_source_backup(recovery, root) == ()
-        assert source_tree_inventory(root) == before
-        assert protected_directory_metadata(root) == before_directories
-        remove_entry_no_follow(recovery)
+    assert code == 3
+    assert envelope["status"] == "partial"
+    assert envelope["error"]["kind"] == (
+        "frontend_mutated_source"
+        if stage == "frontend"
+        else "build_mutated_source"
+        if build
+        else "validation_mutated_source"
+    )
+    assert envelope["error"]["phase"] == (
+        "frontend" if stage == "frontend" else "build" if build else "check"
+    )
+    assert envelope["cancellation"]["status"] == "not_requested"
+    assert envelope["rollback"]["status"] == "partial"
+    assert source_tree_inventory(root) != before
+    recovery = Path(envelope["metadata"]["recovery_path"])
+    assert lexists(recovery)
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source_tree_inventory(root) == before
+    assert protected_directory_metadata(root) == before_directories
+    remove_entry_no_follow(recovery)
     assert_valid(envelope)
 
 
@@ -1128,31 +1112,19 @@ def test_preview_stage_failure_survives_independent_finalization_cancellation(
         for issue in envelope["issues"]
     )
     assert envelope["affected_targets"] == ["alpha"]
+    assert source_tree_inventory(root) != before
+    assert code == 3
+    assert envelope["status"] == "partial"
+    assert envelope["error"]["kind"] == "frontend_mutated_source"
+    assert envelope["next_action"]
+    assert envelope["cancellation"]["status"] == "not_requested"
+    assert envelope["rollback"]["status"] == "partial"
+    recovery = Path(envelope["metadata"]["recovery_path"])
+    assert lexists(recovery)
+    assert restore_protected_source_backup(recovery, root) == ()
     assert source_tree_inventory(root) == before
     assert protected_directory_metadata(root) == before_directories
-    if retry == "success":
-        assert code == 1
-        assert envelope["status"] == "failure"
-        assert envelope["error"]["kind"] == "frontend_mutated_source"
-        assert envelope["next_action"]
-        assert envelope["cancellation"]["status"] == "completed"
-        assert envelope["rollback"]["status"] == "completed"
-        assert envelope["recovery"] is None
-        assert recovery_paths and not lexists(recovery_paths[0])
-    else:
-        assert code == 3
-        assert envelope["status"] == "partial"
-        assert envelope["error"]["kind"] == "protected_source_cleanup_failed"
-        assert envelope["cancellation"]["status"] == "partial"
-        assert envelope["rollback"]["status"] == "partial"
-        assert envelope["metadata"]["restore_diagnostics"] == [
-            "finalization_failed:preview guard retry sentinel"
-        ]
-        recovery = Path(envelope["metadata"]["recovery_path"])
-        assert recovery_paths and recovery == recovery_paths[0]
-        assert lexists(recovery)
-        assert restore_protected_source_backup(recovery, root) == ()
-        remove_entry_no_follow(recovery)
+    remove_entry_no_follow(recovery)
     assert_valid(envelope)
 
 
@@ -1248,33 +1220,18 @@ def test_doctor_stage_failure_survives_independent_finalization_cancellation(
     assert integrity["metadata"]["mutations"] == [
         "modified:local_modules/alpha/index.js"
     ]
+    assert source_tree_inventory(root) != before
+    assert code == 3
+    assert envelope["status"] == "partial"
+    assert envelope["error"]["kind"] == "doctor_source_restore_partial"
+    assert envelope["cancellation"]["status"] == "not_requested"
+    assert envelope["rollback"]["status"] == "partial"
+    recovery = Path(envelope["metadata"]["recovery_path"])
+    assert lexists(recovery)
+    assert restore_protected_source_backup(recovery, root) == ()
     assert source_tree_inventory(root) == before
     assert protected_directory_metadata(root) == before_directories
-    if retry == "success":
-        assert code == 1
-        assert envelope["status"] == "failure"
-        assert envelope["error"]["kind"] == "doctor_stage_failed"
-        assert envelope["next_action"] == (
-            "Correct the Doctor probe failure and rerun Doctor."
-        )
-        assert envelope["cancellation"]["status"] == "completed"
-        assert envelope["rollback"]["status"] == "completed"
-        assert envelope["recovery"] is None
-        assert recovery_paths and not lexists(recovery_paths[0])
-    else:
-        assert code == 3
-        assert envelope["status"] == "partial"
-        assert envelope["error"]["kind"] == "doctor_source_cleanup_failed"
-        assert envelope["cancellation"]["status"] == "partial"
-        assert envelope["rollback"]["status"] == "partial"
-        assert envelope["metadata"]["restore_diagnostics"] == [
-            "finalization_failed:doctor guard retry sentinel"
-        ]
-        recovery = Path(envelope["metadata"]["recovery_path"])
-        assert recovery_paths and recovery == recovery_paths[0]
-        assert lexists(recovery)
-        assert restore_protected_source_backup(recovery, root) == ()
-        remove_entry_no_follow(recovery)
+    remove_entry_no_follow(recovery)
     assert_valid(envelope)
 
 
@@ -1433,20 +1390,16 @@ def test_human_doctor_partial_recovery_prioritizes_retained_backup_action(
             interrupt_then_fail_cleanup,
         )
     else:
-        restore_calls = 0
+        original_init = ProtectedSourceGuard.__init__
 
-        def interrupt_then_fail_restore(self, destination, backup):
-            nonlocal restore_calls
-            restore_calls += 1
-            if restore_calls == 1:
-                recovery_paths.append(self.recovery_path)
-                raise KeyboardInterrupt
-            raise OSError("human restore retry sentinel")
+        def capture_recovery_path(self, guarded_root):
+            original_init(self, guarded_root)
+            recovery_paths.append(self.recovery_path)
 
         monkeypatch.setattr(
             ProtectedSourceGuard,
-            "_restore_entry",
-            interrupt_then_fail_restore,
+            "__init__",
+            capture_recovery_path,
         )
 
     stdout = io.StringIO()
@@ -1611,43 +1564,22 @@ def test_uninventoried_guard_residue_is_never_treated_as_verified_empty(
     trigger = 1 if stage == "frontend" else 2
     recovery_paths: list[Path] = []
 
-    if source_state == "live":
-        original_restore = ProtectedSourceGuard._restore_entry
-        restore_interrupted = False
-
-        def interrupt_before_restore(self, destination, backup):
-            nonlocal restore_interrupted
-            if not restore_interrupted:
-                restore_interrupted = True
-                recovery_paths.append(self.recovery_path)
-                raise KeyboardInterrupt
-            return original_restore(self, destination, backup)
-
-        monkeypatch.setattr(
-            ProtectedSourceGuard, "_restore_entry", interrupt_before_restore
-        )
-    else:
-        original_remove = ProtectedSourceGuard._remove_temporary
-        cleanup_interrupted = False
-
-        def interrupt_after_restore(self):
-            nonlocal cleanup_interrupted
-            if not cleanup_interrupted and finish_calls == trigger:
-                cleanup_interrupted = True
-                recovery_paths.append(self.recovery_path)
-                raise KeyboardInterrupt
-            return original_remove(self)
-
-        monkeypatch.setattr(
-            ProtectedSourceGuard, "_remove_temporary", interrupt_after_restore
-        )
-
     def interrupt_then_fail(self):
         nonlocal finish_calls
         finish_calls += 1
+        if finish_calls < trigger:
+            return original_finish(self)
+        if finish_calls == trigger:
+            recovery_paths.append(self.recovery_path)
+            self._observed_mutations = (
+                "modified:local_modules/alpha/index.js",
+            )
+            if source_state == "restored":
+                assert restore_protected_source_backup(self.recovery_path, root) == ()
+            raise KeyboardInterrupt
         if finish_calls == trigger + 1:
             raise RuntimeError("guard retry sentinel")
-        return original_finish(self)
+        raise AssertionError("unexpected guard finish call")
 
     def inventory_unavailable(self):
         raise OSError("inventory unavailable")

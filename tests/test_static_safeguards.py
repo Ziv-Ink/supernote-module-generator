@@ -11,6 +11,8 @@ except ImportError:  # pragma: no cover - Python 3.9 and 3.10 CI
 
 import pytest
 
+from ci.complexity_ratchet import findings as complexity_findings
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src/supernote_module_generator"
@@ -28,14 +30,19 @@ TYPED_V4_BOUNDARIES = {
     "src/supernote_module_generator/cpp_source_routing.py",
     "src/supernote_module_generator/cpp_type_syntax.py",
     "src/supernote_module_generator/feature_identity.py",
+    "src/supernote_module_generator/filesystem.py",
+    "src/supernote_module_generator/filesystem_inventory.py",
     "src/supernote_module_generator/semantic_ir.py",
     "src/supernote_module_generator/generation_plan.py",
+    "src/supernote_module_generator/generation_execution.py",
+    "src/supernote_module_generator/generation_service.py",
     "src/supernote_module_generator/integrity_manifest.py",
     "src/supernote_module_generator/jsi_binding_decisions.py",
     "src/supernote_module_generator/models.py",
     "src/supernote_module_generator/semantic_types.py",
     "src/supernote_module_generator/template_contract.py",
     "src/supernote_module_generator/transaction.py",
+    "src/supernote_module_generator/transaction_registry.py",
 }
 
 LOW_LEVEL_CONTRACT_MODULES = {
@@ -51,14 +58,18 @@ LOW_LEVEL_CONTRACT_MODULES = {
     "cpp_source_routing.py",
     "cpp_type_syntax.py",
     "feature_identity.py",
+    "filesystem.py",
+    "filesystem_inventory.py",
     "semantic_ir.py",
     "generation_plan.py",
+    "generation_execution.py",
     "integrity_manifest.py",
     "jsi_binding_decisions.py",
     "models.py",
     "semantic_types.py",
     "template_contract.py",
     "transaction.py",
+    "transaction_registry.py",
 }
 
 FORBIDDEN_HIGH_LEVEL_IMPORTS = {
@@ -142,6 +153,48 @@ def test_static_correctness_and_gradual_typing_baselines_are_checked_in():
     ):
         assert f"src/supernote_module_generator/{path}" in workflow
     assert "python -m mypy" in workflow
+    assert "python ci/check_filesystem_complexity.py" in workflow
+    assert "python ci/check_transaction_complexity.py" in workflow
+    filesystem_ratchet = (ROOT / "ci/check_filesystem_complexity.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"_windows_open_no_follow_handle"' not in filesystem_ratchet
+    assert '"_windows_list_directory_entries"' not in filesystem_ratchet
+    assert '("filesystem_inventory.py", ())' in filesystem_ratchet
+    transaction_ratchet = (ROOT / "ci/check_transaction_complexity.py").read_text(
+        encoding="utf-8"
+    )
+    assert '("transaction_registry.py", ())' in transaction_ratchet
+    assert '("generation_service.py", ())' in transaction_ratchet
+    assert '("generation_execution.py", ())' in transaction_ratchet
+
+
+def test_complexity_ratchet_rejects_a_missing_target(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="not a regular file"):
+        complexity_findings(ROOT, tmp_path / "missing.py")
+
+
+def test_complexity_ratchet_preserves_duplicate_function_names(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "duplicate_names.py"
+    conditions = "\n".join(
+        f"        if value == {index}:\n            return {index}"
+        for index in range(11)
+    )
+    target.write_text(
+        "class First:\n"
+        "    def route(self, value):\n"
+        f"{conditions}\n"
+        "        return -1\n\n"
+        "class Second:\n"
+        "    def route(self, value):\n"
+        f"{conditions}\n"
+        "        return -1\n",
+        encoding="utf-8",
+    )
+
+    assert complexity_findings(ROOT, target) == (("route", 12), ("route", 12))
 
 
 def test_low_level_v4_contracts_do_not_depend_on_command_or_ui_layers():

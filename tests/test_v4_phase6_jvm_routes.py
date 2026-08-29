@@ -118,10 +118,11 @@ def _matrix():
             _constructor(
                 point_name,
                 language,
-                "(DLjava/lang/Long;)V",
+                "(DLjava/lang/Long;[B)V",
                 (
                     JvmParameterSource("kotlin.Double", "x"),
                     JvmParameterSource("kotlin.Long", "tag", nullable=True),
+                    JvmParameterSource("kotlin.ByteArray", "bytes"),
                 ),
             ),
         ),
@@ -133,6 +134,12 @@ def _matrix():
                 language,
                 "tag",
                 JvmTypeSource("kotlin.Long", nullable=True),
+            ),
+            _field(
+                point_name,
+                language,
+                "bytes",
+                JvmTypeSource("kotlin.ByteArray"),
             ),
         ),
         is_data=True,
@@ -225,7 +232,7 @@ def test_jvm_route_plan_uses_exact_adapter_descriptors_and_nominal_types():
     point = plan.values[0]
     assert point.constructor.adapter_descriptor == (
         "(Lcom/facebook/react/bridge/ReactApplicationContext;"
-        "DLjava/lang/Long;)Lcom/example/Point;"
+        "DLjava/lang/Long;[B)Lcom/example/Point;"
     )
     assert point.fields[1].getter_descriptor == (
         "(Lcom/example/Point;)Ljava/lang/Long;"
@@ -385,6 +392,98 @@ def test_generated_ksp_processor_emits_live_field_accessors():
     assert '"$name${if (type.nullable) "?" else ""}.map { item -> $mapped }"' in template
 
 
+def test_generated_ksp_processor_emits_an_empty_manifest_for_every_feature_root():
+    from pathlib import Path
+
+    template = Path(
+        "src/supernote_module_generator/templates/"
+        "v4.SupernoteV4Processor.kt.tmpl"
+    ).read_text(encoding="utf-8")
+
+    assert "roots.sortedBy { it.featureId }.forEach { root ->" in template
+    assert "generateFeature(root, grouped[root].orEmpty())" in template
+    assert '"owners" to owners.map(::ownerJson)' in template
+
+
+def test_jvm_byte_input_uses_one_view_snapshot_and_budgets_before_copy():
+    owner_name = "com.example.BlobApiKt"
+    language = JvmLanguage.KOTLIN
+    declaration_id = jvm_declaration_identity(owner_name, "echoBytes", "([B)[B")
+    declaration = JvmDeclarationSource(
+        _source(declaration_id, language, "BlobApi.kt"),
+        jvm_owner_identity(owner_name),
+        owner_name,
+        "echoBytes",
+        "([B)[B",
+        (JvmParameterSource("kotlin.ByteArray", "value"),),
+        "kotlin.ByteArray",
+        False,
+        _intent(DeclarationTarget.FUNCTION, SupernoteMarker.EXPORT),
+        "public",
+        jvm_adapter_identity(declaration_id),
+        language,
+        False,
+        True,
+    )
+    owner = JvmOwnerSource(
+        _source(jvm_owner_identity(owner_name), language, "BlobApi.kt"),
+        language,
+        owner_name,
+        "BlobApiKt",
+        JvmOwnerForm.KOTLIN_TOP_LEVEL,
+        _intent(DeclarationTarget.CLASS),
+        (),
+        (declaration,),
+    )
+    api = project_jvm_owners((owner,), feature_id=FEATURE)
+    generated = render_jvm_feature_jsi(
+        JvmSourceManifest(FEATURE, "4.0.0.dev0", (owner,)),
+        api,
+        feature_id=FEATURE,
+        module_name="Drawing",
+    )
+
+    assert generated.count(
+        'supernote_view_index(runtime, view, "byteOffset")'
+    ) == 1
+    assert generated.count(
+        'supernote_view_index(runtime, view, "byteLength")'
+    ) == 1
+    budget = generated.index("if (snapshot.length > kMaxByteBufferBytes)")
+    allocation = generated.index("std::vector<std::byte> result(snapshot.length)", budget)
+    caller_snapshot = generated.index(
+        "auto snapshot = supernote_snapshot_uint8_array(runtime, value)"
+    )
+    caller_copy = generated.index(
+        "return supernote_copy_uint8_array(runtime, snapshot)", caller_snapshot
+    )
+    assert budget < allocation < caller_snapshot < caller_copy
+    accepts_start = generated.index('"echoBytes.accepts"')
+    check_start = generated.index('"echoBytes.checkArguments"')
+    attach_start = generated.index("function = supernote_attach_preflight(", check_start)
+    for preflight in (
+        generated[accepts_start:check_start],
+        generated[check_start:attach_start],
+    ):
+        assert preflight.count(
+            "auto supernote_snapshot_0 = supernote_snapshot_uint8_array("
+        ) == 1
+        assert preflight.count(
+            "supernote_check_uint8_array_snapshot_limit("
+        ) == 1
+        assert "supernote_copy_uint8_array" not in preflight
+        assert "std::vector<std::byte> result" not in preflight
+    assert generated.count(
+        "auto supernote_snapshot_0 = supernote_snapshot_uint8_array("
+    ) == 3
+    assert generated.count(
+        "supernote_copy_uint8_array(runtime, supernote_snapshot_0)"
+    ) == 1
+    assert "supernote_copy_uint8_array(runtime, arguments[0])" not in generated
+    assert '"LIMIT_EXCEEDED"' in generated
+    assert '"at most 33554432 bytes"' in generated
+
+
 def test_jvm_object_codegen_emits_nominal_wrappers_converters_and_registry():
     owners = _matrix()
     api = project_jvm_owners(owners, feature_id=FEATURE)
@@ -416,6 +515,21 @@ def test_jvm_object_codegen_emits_nominal_wrappers_converters_and_registry():
     assert "retained_input_state = std::make_shared<std::tuple<" in generated
     assert "operation->set_retained_state(retained_input_state)" in generated
     assert "schedule_completion" in generated
+    assert generated.count("LocalFrame item_frame(env);") >= 2
+    input_loop = generated.index(
+        "for (std::uint64_t index = 0; index < length; ++index)"
+    )
+    input_frame = generated.index("LocalFrame item_frame(env);", input_loop)
+    input_add = generated.index("CallStaticVoidMethodA", input_frame)
+    assert input_loop < input_frame < input_add
+    output_loop = generated.index("for (jint index = 0; index < length; ++index)")
+    output_frame = generated.index("LocalFrame item_frame(env);", output_loop)
+    output_get = generated.index("CallStaticObjectMethodA", output_frame)
+    assert output_loop < output_frame < output_get
+    own_index = generated.index("if (!supernote_array_has_own_index")
+    item_read = generated.index("array.getValueAtIndex", own_index)
+    assert own_index < item_read
+    assert generated.count("budget.check_byte_buffer(path, snapshot.length)") >= 2
     assert 'exports.setProperty(runtime, "Stroke"' in generated
     assert "supernote_attach_preflight" in generated
     assert '"echoAll.accepts"' in generated

@@ -217,6 +217,9 @@ def test_release_version_has_a_dated_changelog_section() -> None:
 def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> None:
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
     setup = (ROOT / "setup.cfg").read_text(encoding="utf-8")
+    platform_paths = (ROOT / "tests/test_v4_platform_paths.py").read_text(
+        encoding="utf-8"
+    )
 
     for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
         assert runner in quality
@@ -226,15 +229,31 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
     assert "tests/test_v4_platform_paths.py" in quality
     assert "python -m compileall -q src tests ci" in quality
     assert "python -m coverage run -m pytest -q" in quality
+    assert "--data-file=.coverage.platform-${{ runner.os }}" in quality
+    assert "pattern: coverage-*" in quality
+    assert "python -m coverage combine coverage-data" in quality
     assert "python -m coverage report" in quality
     assert "needs: [test, coverage, platform]" in quality
     assert "coverage[toml]>=7.6,<8" in setup
-    assert "fail_under = 81" in setup
+    assert "relative_files = True" in setup
+    assert "fail_under = 82.03" in setup
+    assert "precision = 2" in setup
     assert "tests/test_v4_regression_harness.py" in quality
     assert "Parse the Bash launch boundary" in quality
     assert "Parse the PowerShell launch boundary" in quality
     assert "npm run run" in quality
     assert "template_launch_contract.py output" in quality
+    assert "'setuptools>=58'" in quality
+    assert "'wheel>=0.41,<1'" in quality
+    assert "--no-build-isolation" in quality
+    assert "test_windows_junction_is_never_traversed_or_observed" in platform_paths
+    assert (
+        "test_windows_copy_preserves_exact_supported_file_and_directory_metadata"
+        in platform_paths
+    )
+    assert "test_windows_contained_classifier_retains_ancestor_against_junction_swap" in platform_paths
+    assert "test_windows_symlink_target_read_retains_identity_across_aba_attempt" in platform_paths
+    assert "test_windows_atime_neutralization_preserves_concurrent_mtime" in platform_paths
 
 
 def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> None:
@@ -251,6 +270,7 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     assert "Prove the Wiki project is canonical and source-read-only" in quality
     assert "Build and verify the Wiki acceptance package" in quality
     assert "run_file_reader_acceptance.py" in quality
+    assert '"pluginID": "file_reader_test"' in quality
     assert "v4-bounded-note-doc-2026-08-27" in quality
     assert "7.11-bounded-note-doc-device-evidence" in (
         ROOT / "ci/run_file_reader_acceptance.py"

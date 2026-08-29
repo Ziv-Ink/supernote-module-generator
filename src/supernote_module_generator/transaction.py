@@ -17,11 +17,10 @@ from .errors import ConcurrentSourceMutation, FilesystemError, PartialFailure
 from .filesystem import (
     SourceTreeInventory,
     _descriptor_relative_io_supported,
-    _finish_observed_atime,
     _is_build_or_cache_path,
+    _observed_directory_entries,
     _open_contained_directory_descriptor,
     _open_contained_parent_descriptor,
-    _open_observed,
     copy_entry_no_follow,
     entry_kind,
     hash_entry_no_follow,
@@ -38,6 +37,15 @@ from .filesystem import (
     validate_protected_directory_metadata,
 )
 from .models import RollbackResult, WarningInfo
+from .transaction_registry import (
+    entry_kind_fields_are_valid as _entry_kind_fields_are_valid,
+    entry_digest as _registry_entry_digest,
+    parse_recovery_pointer,
+    private_recovery_registry,
+    recovery_pointer_path,
+    recovery_pointer_payload,
+    validated_transaction_identifier,
+)
 
 JOURNAL_NAME = ".supernote-module-transaction.json"
 STATE_PREFIX = ".supernote-module-transaction-"
@@ -49,7 +57,6 @@ CONDITIONAL_CONFLICT_AUTHORITY_NAME = (
 CONDITIONAL_RETENTION_AUTHORITY_NAME = (
     "modules/conditional-retention-authority.json"
 )
-RECOVERY_POINTER_SCHEMA = 1
 
 
 class TransactionCleanupError(FilesystemError):
@@ -645,6 +652,7 @@ class _PreparedRegularReplacement:
     baseline_sha256: str
     baseline_mode: int
     published_sha256: str
+    published_entry_hash: str
     published_mode: int
     published_dev: int
     published_ino: int
@@ -715,7 +723,10 @@ def _copy_verified_entry(
     last_error: BaseException | None = None
     for _ in range(attempts):
         if lexists(destination):
-            remove_entry_no_follow(destination)
+            raise ConcurrentSourceMutation(
+                "Recovery destination was occupied while a stable copy was created: "
+                f"{destination}"
+            )
         try:
             before = _exact_entry_state(source)
             if before != ((".", None),):
@@ -730,10 +741,11 @@ def _copy_verified_entry(
         except ConcurrentSourceMutation as exc:
             last_error = exc
             if lexists(destination):
-                remove_entry_no_follow(destination)
+                # There is no portable atomic conditional unlink for the live
+                # pathname. It may already be a concurrent editor replacement,
+                # so retain it as truthful recovery residue instead of deleting.
+                raise
         except BaseException:
-            if lexists(destination):
-                remove_entry_no_follow(destination)
             raise
     assert last_error is not None
     raise last_error
@@ -741,11 +753,24 @@ def _copy_verified_entry(
 
 def _write_json_atomic(path: Path, value: Dict[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            closefd=False,
+        ) as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
     os.replace(temporary, path)
 
 
@@ -788,16 +813,7 @@ def _capture_live_tree_metadata(
     while pending:
         directory = pending.pop()
         try:
-            descriptor, before = _open_observed(directory, directory=True)
-            try:
-                with os.scandir(directory) as stream:
-                    children = list(stream)
-                if not _finish_observed_atime(directory, descriptor, before):
-                    raise FilesystemError(
-                        f"Source directory changed while it was inspected: {directory}"
-                    )
-            finally:
-                os.close(descriptor)
+            children, _before = _observed_directory_entries(directory)
         except OSError as exc:
             raise FilesystemError(f"Cannot inspect source directory {directory}: {exc}") from exc
         for child in children:
@@ -806,9 +822,7 @@ def _capture_live_tree_metadata(
             if _is_build_or_cache_path(child_relative):
                 continue
             metadata = child.stat(follow_symlinks=False)
-            kind = entry_kind(path)
-            if kind is None:
-                continue
+            kind = child.kind
             captured[child_relative] = (
                 kind,
                 stat.S_IMODE(metadata.st_mode),
@@ -821,40 +835,26 @@ def _capture_live_tree_metadata(
 
 
 def _validated_transaction_identifier(data: Dict[str, object]) -> str:
-    identifier = data.get("id")
-    if (
-        not isinstance(identifier, str)
-        or len(identifier) != 32
-        or any(character not in "0123456789abcdef" for character in identifier)
-    ):
-        raise FilesystemError("Transaction identity is invalid")
-    return identifier
+    return validated_transaction_identifier(data)
 
 
 def _entry_digest(entries: object) -> str:
-    encoded = json.dumps(
-        entries,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _registry_entry_digest(entries)
 
 
 def _recovery_registry() -> Path:
     identity = str(os.getuid()) if hasattr(os, "getuid") else "user"
-    registry = Path(tempfile.gettempdir()) / f"supernote-module-v4-recovery-{identity}"
-    kind = entry_kind(registry)
-    if kind is None:
-        registry.mkdir(mode=0o700)
-    elif kind != "directory":
-        raise FilesystemError("Transaction recovery registry is unsafe")
-    return registry.resolve(strict=True)
+    effective_uid = os.geteuid() if hasattr(os, "geteuid") else None
+    return private_recovery_registry(
+        Path(tempfile.gettempdir()),
+        identity=identity,
+        effective_uid=effective_uid,
+        windows=os.name == "nt",
+    )
 
 
 def _recovery_pointer_path(root: Path) -> Path:
-    key = hashlib.sha256(str(root.resolve(strict=True)).encode("utf-8")).hexdigest()
-    return _recovery_registry() / f"{key}.json"
+    return recovery_pointer_path(root, _recovery_registry())
 
 
 def _publish_recovery_pointer(
@@ -866,27 +866,17 @@ def _publish_recovery_pointer(
     bundle_id: str,
     manifest_sha256: str,
 ) -> Path:
-    identifier = _validated_transaction_identifier(data)
-    if outcome not in {"rollback", "commit", "abandon"}:
-        raise FilesystemError("Transaction recovery outcome is invalid")
-    if entry_kind(recovery_path) != "directory":
-        raise FilesystemError("Transaction recovery bundle is unavailable")
     pointer = _recovery_pointer_path(root)
-    modules_value = data.get("modules", [])
-    modules = list(modules_value) if isinstance(modules_value, list) else []
     _write_json_atomic(
         pointer,
-        {
-            "schema_version": RECOVERY_POINTER_SCHEMA,
-            "plugin_root": str(root.resolve(strict=True)),
-            "transaction_id": identifier,
-            "outcome": outcome,
-            "recovery_path": str(recovery_path.resolve(strict=True)),
-            "bundle_id": bundle_id,
-            "manifest_sha256": manifest_sha256,
-            "command": str(data.get("command", "operation")),
-            "modules": modules,
-        },
+        recovery_pointer_payload(
+            root,
+            data,
+            recovery_path,
+            outcome,
+            bundle_id=bundle_id,
+            manifest_sha256=manifest_sha256,
+        ),
     )
     return pointer
 
@@ -898,53 +888,28 @@ def _load_recovery_pointer(root: Path) -> tuple[Path, Dict[str, object]] | None:
         return None
     if kind != "file":
         raise FilesystemError("Transaction recovery pointer is unsafe")
-    raw = _read_json_regular_no_follow(pointer, "Transaction recovery pointer")
-    if not isinstance(raw, dict):
-        raise FilesystemError("Transaction recovery pointer is invalid")
-    identifier = raw.get("transaction_id")
-    outcome = raw.get("outcome")
-    recovery_path = raw.get("recovery_path")
-    bundle_id = raw.get("bundle_id")
-    manifest_sha256 = raw.get("manifest_sha256")
-    expected_fields = {
-        "schema_version",
-        "plugin_root",
-        "transaction_id",
-        "outcome",
-        "recovery_path",
-        "bundle_id",
-        "manifest_sha256",
-        "command",
-        "modules",
-    }
+    pointer_metadata = pointer.lstat()
     if (
-        set(raw) != expected_fields
-        or raw.get("schema_version") != RECOVERY_POINTER_SCHEMA
-        or raw.get("plugin_root") != str(root.resolve(strict=True))
-        or not isinstance(identifier, str)
-        or len(identifier) != 32
-        or any(character not in "0123456789abcdef" for character in identifier)
-        or outcome not in {"rollback", "commit", "abandon"}
-        or not isinstance(recovery_path, str)
-        or not isinstance(bundle_id, str)
-        or len(bundle_id) != 32
-        or any(character not in "0123456789abcdef" for character in bundle_id)
-        or not isinstance(manifest_sha256, str)
-        or len(manifest_sha256) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in manifest_sha256
+        (
+            hasattr(os, "geteuid")
+            and getattr(pointer_metadata, "st_uid", -1) != os.geteuid()
         )
+        or (os.name != "nt" and stat.S_IMODE(pointer_metadata.st_mode) & 0o077)
     ):
-        raise FilesystemError("Transaction recovery pointer is invalid")
+        raise FilesystemError(
+            "Transaction recovery pointer is not private to the current user"
+        )
+    raw = _read_json_regular_no_follow(pointer, "Transaction recovery pointer")
+    parsed = parse_recovery_pointer(raw, root)
     validate_transaction_metadata_recovery(
-        Path(recovery_path),
+        parsed.recovery_path,
         root,
-        transaction_id=identifier,
-        outcome=str(outcome),
-        bundle_id=bundle_id,
-        manifest_sha256=manifest_sha256,
+        transaction_id=parsed.transaction_id,
+        outcome=parsed.outcome,
+        bundle_id=parsed.bundle_id,
+        manifest_sha256=parsed.manifest_sha256,
     )
+    assert isinstance(raw, dict)
     return pointer, raw
 
 
@@ -1000,88 +965,6 @@ def _complete_recovery_pointer(
             recovery_path=recovery_path,
         ) from exc
     return str(raw["outcome"])
-
-
-def _entry_kind_fields_are_valid(raw: Dict[str, object]) -> bool:
-    allowed_fields = {
-        "path",
-        "restore",
-        "existed",
-        "kind",
-        "entry_type",
-        "hash",
-        "restored",
-        "capture",
-        "published_sha256",
-        "published_mode",
-        "published_dev",
-        "published_ino",
-    }
-    if set(raw) - allowed_fields:
-        return False
-    existed = raw.get("existed")
-    entry_type = raw.get("entry_type")
-    digest = raw.get("hash")
-    if not isinstance(existed, bool):
-        return False
-    if raw.get("restored") is not None and not isinstance(raw.get("restored"), bool):
-        return False
-    if entry_type not in {None, "file", "directory", "symlink", "other"}:
-        return False
-    valid_digest = (
-        isinstance(digest, str)
-        and len(digest) == 64
-        and all(character in "0123456789abcdef" for character in digest)
-    )
-    kind = raw.get("kind")
-    conditional_fields = {
-        "capture",
-        "published_sha256",
-        "published_mode",
-        "published_dev",
-        "published_ino",
-    }
-    if kind == "conditional_replace":
-        published_digest = raw.get("published_sha256")
-        published_mode = raw.get("published_mode")
-        published_dev = raw.get("published_dev")
-        published_ino = raw.get("published_ino")
-        return (
-            existed is True
-            and entry_type == "file"
-            and valid_digest
-            and isinstance(raw.get("capture"), str)
-            and isinstance(published_digest, str)
-            and len(published_digest) == 64
-            and all(
-                character in "0123456789abcdef"
-                for character in published_digest
-            )
-            and isinstance(published_mode, int)
-            and not isinstance(published_mode, bool)
-            and 0 <= published_mode <= 0o7777
-            and isinstance(published_dev, int)
-            and not isinstance(published_dev, bool)
-            and published_dev >= 0
-            and isinstance(published_ino, int)
-            and not isinstance(published_ino, bool)
-            and published_ino >= 0
-        )
-    if set(raw) & conditional_fields:
-        return False
-    if kind == "created":
-        return existed is False and entry_type is not None and digest is None
-    if kind == "created_directory":
-        return existed is False and entry_type is None and digest is None
-    if kind == "preserved_external":
-        if existed:
-            return entry_type is not None and valid_digest
-        return entry_type is None and digest is None
-    if kind in {"detach", "covered_detach"}:
-        return existed is True and entry_type is not None and valid_digest
-    if existed:
-        return entry_type is not None and valid_digest
-    return entry_type is None and digest is None
 
 
 def _validate_absolute_entry_path(
@@ -1295,6 +1178,28 @@ def _conditional_conflict_is_durable(
         return False
     assert isinstance(authority_name, str)
     identifier = _validated_transaction_identifier(data)
+    authority, retention_authority = _read_conditional_authorities(
+        root,
+        identifier,
+        authority_name,
+    )
+    if authority is None:
+        return _markerless_conditional_conflict_is_durable(
+            root,
+            data,
+            identifier,
+            retention_authority,
+            allow_parent_fallback=allow_parent_fallback,
+        )
+    _validate_conditional_conflict_authority(authority, data, identifier)
+    return True
+
+
+def _read_conditional_authorities(
+    root: Path,
+    identifier: str,
+    authority_name: str,
+) -> tuple[object, object]:
     state_descriptor = _open_contained_directory_descriptor(
         root, f"{STATE_PREFIX}{identifier}"
     )
@@ -1304,88 +1209,85 @@ def _conditional_conflict_is_durable(
                 "modules", _directory_open_flags(), dir_fd=state_descriptor
             )
         except FileNotFoundError:
-            return False
+            return None, None
     finally:
         os.close(state_descriptor)
     try:
         marker_name = PurePosixPath(authority_name).name
-        kind = _relative_kind(marker_name, modules_descriptor)
-        if kind is None:
-            authority = None
-        elif kind != "file":
-            raise FilesystemError("Transaction conflict authority is unsafe")
-        else:
-            content, _metadata = _read_relative_regular_bytes(
-                marker_name, modules_descriptor
-            )
-            try:
-                authority = json.loads(content.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise FilesystemError(
-                    "Transaction conflict authority is unreadable"
-                ) from exc
+        authority = _read_optional_relative_json_authority(
+            modules_descriptor,
+            marker_name,
+            "Transaction conflict authority",
+        )
         retention_name = PurePosixPath(
             CONDITIONAL_RETENTION_AUTHORITY_NAME
         ).name
-        retention_kind = _relative_kind(retention_name, modules_descriptor)
-        if retention_kind is None:
-            retention_authority = None
-        elif retention_kind != "file":
-            raise FilesystemError(
-                "Transaction retention authority is unsafe"
-            )
-        else:
-            retention_content, _retention_metadata = (
-                _read_relative_regular_bytes(
-                    retention_name, modules_descriptor
-                )
-            )
-            try:
-                retention_authority = json.loads(
-                    retention_content.decode("utf-8")
-                )
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise FilesystemError(
-                    "Transaction retention authority is unreadable"
-                ) from exc
+        retention_authority = _read_optional_relative_json_authority(
+            modules_descriptor,
+            retention_name,
+            "Transaction retention authority",
+        )
     finally:
         os.close(modules_descriptor)
-    if authority is None:
-        if not allow_parent_fallback:
-            return False
-        parent_authority = data.get("conditional_destination_parents")
-        if (
-            data.get("phase") != "stage"
-            or not isinstance(parent_authority, list)
-            or not parent_authority
-        ):
-            return False
-        if (
-            not isinstance(retention_authority, dict)
-            or retention_authority.get("schema_version") != 1
-            or retention_authority.get("transaction_id") != identifier
-            or retention_authority.get("destination_parents_sha256")
-            != _entry_digest(parent_authority)
-        ):
-            return False
-        _validate_transaction_entries(root, data)
-        entries = data.get("entries", [])
-        if not isinstance(entries, list) or not any(
-            isinstance(raw, dict)
-            and raw.get("kind") == "replace"
-            and raw.get("existed") is True
-            and raw.get("entry_type") == "file"
-            and entry_kind(Path(str(raw.get("restore", "")))) == "file"
-            for raw in entries
-        ):
-            return False
-        # The durable stage journal, parent authority, entry authority, and
-        # independent restore payload together form the fail-closed precursor
-        # to the optional conflict marker.  Once retention has made that state
-        # observable, restoring the canonical parent identity is only one
-        # resolution prerequisite: it must not re-enable pathname rollback
-        # before every live entry is proven exact against its restore payload.
-        return True
+    return authority, retention_authority
+
+
+def _read_optional_relative_json_authority(
+    descriptor: int,
+    name: str,
+    description: str,
+) -> object:
+    kind = _relative_kind(name, descriptor)
+    if kind is None:
+        return None
+    if kind != "file":
+        raise FilesystemError(f"{description} is unsafe")
+    content, _metadata = _read_relative_regular_bytes(name, descriptor)
+    try:
+        return json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise FilesystemError(f"{description} is unreadable") from exc
+
+
+def _markerless_conditional_conflict_is_durable(
+    root: Path,
+    data: Dict[str, object],
+    identifier: str,
+    retention_authority: object,
+    *,
+    allow_parent_fallback: bool,
+) -> bool:
+    if not allow_parent_fallback:
+        return False
+    parent_authority = data.get("conditional_destination_parents")
+    if (
+        data.get("phase") != "stage"
+        or not isinstance(parent_authority, list)
+        or not parent_authority
+        or not isinstance(retention_authority, dict)
+        or retention_authority.get("schema_version") != 1
+        or retention_authority.get("transaction_id") != identifier
+        or retention_authority.get("destination_parents_sha256")
+        != _entry_digest(parent_authority)
+    ):
+        return False
+    _validate_transaction_entries(root, data)
+    entries = data.get("entries", [])
+    return isinstance(entries, list) and any(
+        isinstance(raw, dict)
+        and raw.get("kind") == "replace"
+        and raw.get("existed") is True
+        and raw.get("entry_type") == "file"
+        and entry_kind(Path(str(raw.get("restore", "")))) == "file"
+        for raw in entries
+    )
+
+
+def _validate_conditional_conflict_authority(
+    authority: object,
+    data: Dict[str, object],
+    identifier: str,
+) -> None:
     entries = data.get("entries", [])
     destination_parents = data.get("conditional_destination_parents", [])
     if (
@@ -1397,7 +1299,6 @@ def _conditional_conflict_is_durable(
         != _entry_digest(destination_parents)
     ):
         raise FilesystemError("Transaction conflict authority is invalid")
-    return True
 
 
 def _conditional_conflict_is_resolved(
@@ -1602,17 +1503,26 @@ def _validate_transaction_entries(root: Path, data: Dict[str, object]) -> None:
             restore_root = state_dir / "restore"
             canonical_name = str(index)
             version_prefix = f"{index}-adopt-"
+            attempt_prefix = f"{index}-attempt-"
             restore_name = restore.name
             version = restore_name[len(version_prefix):]
+            attempt = restore_name[len(attempt_prefix):]
             valid_version = (
                 restore.parent == restore_root
                 and restore_name.startswith(version_prefix)
                 and len(version) == 32
                 and all(character in "0123456789abcdef" for character in version)
             )
+            valid_attempt = (
+                restore.parent == restore_root
+                and restore_name.startswith(attempt_prefix)
+                and len(attempt) == 32
+                and all(character in "0123456789abcdef" for character in attempt)
+            )
             if not (
                 restore == restore_root / canonical_name
                 or valid_version
+                or valid_attempt
             ):
                 raise FilesystemError("Transaction restore slot is noncanonical")
             expected_restore = restore
@@ -1668,11 +1578,20 @@ def _validate_transaction_entries(root: Path, data: Dict[str, object]) -> None:
                 and (path == owned or path in owned.parents or owned in path.parents)
             ]
             composite_replace = kind in {"replace", "conditional_replace"} and all(
-                owned_kind == "snapshot" and path in owned.parents
+                owned_kind in {"snapshot", "replace"} and (
+                    owned == path
+                    or owned in path.parents
+                    or path in owned.parents
+                )
                 for owned, owned_kind in overlaps
             )
             if overlaps and not composite_replace:
-                raise FilesystemError("Transaction entry paths overlap")
+                detail = ", ".join(
+                    f"{owned_kind}:{owned}" for owned, owned_kind in overlaps
+                )
+                raise FilesystemError(
+                    f"Transaction entry paths overlap: {kind}:{path} with {detail}"
+                )
             if kind in {"replace", "conditional_replace"}:
                 covering_entries.append((path, restore))
         primary_paths.append((path, kind))
@@ -1896,14 +1815,16 @@ class Transaction:
             copied: tuple[tuple[object, ...], ...] | None = None
             last_error: ConcurrentSourceMutation | None = None
             for _ in range(3):
+                candidate = restore_root / f"{index}-attempt-{uuid.uuid4().hex}"
                 try:
-                    candidate_state = _copy_verified_entry(managed, restore)
+                    candidate_state = _copy_verified_entry(managed, candidate)
                     if _exact_entry_state(managed) != candidate_state:
                         raise ConcurrentSourceMutation(
                             "Source entry changed before its recovery copy was "
                             f"authorized: {managed}"
                         )
                     copied = candidate_state
+                    restore = candidate
                     break
                 except ConcurrentSourceMutation as exc:
                     last_error = exc
@@ -2079,13 +2000,17 @@ class Transaction:
             )
             candidate_authorized = False
             try:
-                if lexists(original_restore):
+                if path != snapshot_path and lexists(original_restore):
                     _copy_verified_entry(original_restore, candidate)
                 target = (
                     candidate
                     if path == snapshot_path
                     else candidate / path.relative_to(snapshot_path)
                 )
+                if path != snapshot_path and lexists(target):
+                    # This is an unpublished entry inside the fresh private
+                    # candidate tree copied above, not a live project path.
+                    remove_entry_no_follow(target)
                 adopted_state = _copy_verified_entry(path, target)
                 # Catch an edit injected immediately after the copy helper's
                 # own source verification, before journal authority changes.
@@ -2134,8 +2059,6 @@ class Transaction:
                 return
             except ConcurrentSourceMutation as exc:
                 last_error = exc
-                if lexists(candidate):
-                    remove_entry_no_follow(candidate)
                 entry.clear()
                 entry.update(original_entry)
                 for raw, previous_restore in covered:
@@ -2143,8 +2066,6 @@ class Transaction:
                 continue
             except BaseException:
                 if not candidate_authorized:
-                    if lexists(candidate):
-                        remove_entry_no_follow(candidate)
                     entry.clear()
                     entry.update(original_entry)
                     for raw, previous_restore in covered:
@@ -2275,6 +2196,37 @@ class Transaction:
         self._authorize_entries()
         return mutations
 
+    def preserve_rollback_external_changes(
+        self,
+        baseline: SourceTreeInventory,
+    ) -> tuple[str, ...]:
+        """Adopt live states not produced by this transaction before rollback."""
+
+        transaction_owned: list[Path] = []
+        for raw in self._entries():
+            if raw.get("kind") not in {
+                "snapshot",
+                "replace",
+                "detach",
+                "covered_replace",
+                "covered_detach",
+                "conditional_replace",
+            }:
+                continue
+            if "result_kind" not in raw or "result_hash" not in raw:
+                continue
+            path = Path(str(raw.get("path", "")))
+            expected_kind = raw.get("result_kind")
+            expected_hash = raw.get("result_hash")
+            live_kind = entry_kind(path)
+            live_hash = _hash_path(path) if live_kind is not None else None
+            if live_kind == expected_kind and live_hash == expected_hash:
+                transaction_owned.append(path)
+        return self.preserve_external_source_changes(
+            baseline,
+            excluded_roots=transaction_owned,
+        )
+
     def activate(self, staged: Path, destination: Path) -> None:
         destination = _managed_entry(self.root, destination)
         staged = _managed_entry(self.root, staged)
@@ -2300,6 +2252,8 @@ class Transaction:
                     "kind": "covered_replace",
                     "entry_type": entry_kind(destination),
                     "hash": _hash_path(destination),
+                    "result_kind": entry_kind(staged),
+                    "result_hash": _hash_path(staged),
                 }
             )
             self.data["mutated"] = True
@@ -2318,6 +2272,8 @@ class Transaction:
             "kind": "replace",
             "entry_type": entry_kind(destination),
             "hash": _hash_path(destination) if existed else None,
+            "result_kind": entry_kind(staged),
+            "result_hash": _hash_path(staged),
         }
         self._entries().append(entry)
         self.data["mutated"] = True
@@ -2459,6 +2415,7 @@ class Transaction:
                     raise ConcurrentSourceMutation(
                         "Destination parent changed during conditional publication"
                     )
+
             for replacement in activated:
                 os.unlink(replacement.staged.name, dir_fd=descriptors.staged)
             if not descriptors.destination_parents_match(self.root):
@@ -2494,11 +2451,6 @@ class Transaction:
                 or _relative_kind(staged.name, descriptors.staged) != "file"
             ):
                 raise FilesystemError(f"Staged path is not a regular file: {staged}")
-            if self._covering_snapshot(destination) is not None:
-                raise FilesystemError(
-                    "Conditional replacement requires exact entry ownership: "
-                    f"{destination}"
-                )
             destination_descriptor, destination_name = descriptors.destination(
                 destination
             )
@@ -2516,6 +2468,9 @@ class Transaction:
                     baseline_sha256=expected_sha256,
                     baseline_mode=expected_mode,
                     published_sha256=hashlib.sha256(content).hexdigest(),
+                    published_entry_hash=_regular_entry_hash(
+                        content, stat.S_IMODE(metadata.st_mode)
+                    ),
                     published_mode=stat.S_IMODE(metadata.st_mode),
                     published_dev=metadata.st_dev,
                     published_ino=metadata.st_ino,
@@ -2548,6 +2503,8 @@ class Transaction:
             "kind": "replace",
             "entry_type": "file",
             "hash": live_hash,
+            "result_kind": "file",
+            "result_hash": replacement.published_entry_hash,
         }
         entries.append(entry)
         self.data["mutated"] = True
@@ -2968,6 +2925,8 @@ class Transaction:
                     "kind": "covered_detach",
                     "entry_type": entry_kind(destination),
                     "hash": _hash_path(destination),
+                    "result_kind": None,
+                    "result_hash": None,
                 }
             )
             self.data["mutated"] = True
@@ -2983,6 +2942,8 @@ class Transaction:
             "kind": "detach",
             "entry_type": entry_kind(destination),
             "hash": _hash_path(destination),
+            "result_kind": None,
+            "result_hash": None,
         }
         self._entries().append(entry)
         self.data["mutated"] = True
@@ -2992,6 +2953,40 @@ class Transaction:
     def mark_write(self) -> None:
         self.data["mutated"] = True
         self._persist()
+
+    def record_snapshot_results(self, paths: Iterable[Path]) -> None:
+        """Bind direct, transaction-owned writes to their snapshot entries."""
+
+        changed = False
+        for path in paths:
+            managed = _managed_entry(self.root, path)
+            candidates = [
+                raw
+                for raw in self._entries()
+                if raw.get("kind") == "snapshot"
+                and (
+                    Path(str(raw.get("path", ""))) == managed
+                    or Path(str(raw.get("path", ""))) in managed.parents
+                )
+            ]
+            if not candidates:
+                raise FilesystemError(
+                    f"Direct transaction write lacks a covering snapshot: {managed}"
+                )
+            entry = max(
+                candidates,
+                key=lambda raw: len(Path(str(raw.get("path", ""))).parts),
+            )
+            snapshot_path = Path(str(entry["path"]))
+            result_kind = entry_kind(snapshot_path)
+            entry["result_kind"] = result_kind
+            entry["result_hash"] = (
+                _hash_path(snapshot_path) if result_kind is not None else None
+            )
+            changed = True
+        if changed:
+            self.data["mutated"] = True
+            self._authorize_entries()
 
     def mark_external(self, command: List[str]) -> None:
         self.data["external_command"] = list(command)
@@ -3422,6 +3417,39 @@ def _rollback_data(
         data["rollback_failures"] = failures
         _write_transaction_data(root, journal, data)
         return RollbackResult(True, "partial", restored)
+    created_roots = tuple(
+        Path(str(raw.get("path", "")))
+        for raw in entries
+        if isinstance(raw, dict)
+        and raw.get("kind") in {"created", "created_directory"}
+    )
+    directory_metadata = {
+        relative: value
+        for relative, value in directory_metadata.items()
+        if not (
+            entry_kind(
+                root
+                if relative == "."
+                else root.joinpath(*PurePosixPath(relative).parts)
+            )
+            is None
+            and any(
+                (
+                    root
+                    if relative == "."
+                    else root.joinpath(*PurePosixPath(relative).parts)
+                )
+                == created
+                or created
+                in (
+                    root
+                    if relative == "."
+                    else root.joinpath(*PurePosixPath(relative).parts)
+                ).parents
+                for created in created_roots
+            )
+        )
+    }
     try:
         recovery_path, bundle_id, manifest_sha256 = retain_directory_metadata_recovery(
             root,

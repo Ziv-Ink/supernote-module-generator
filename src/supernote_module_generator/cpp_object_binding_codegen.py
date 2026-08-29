@@ -202,8 +202,8 @@ def _validate_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
             else:
                 lines.extend([
                     f"  if (!supernote_is_uint8_array(runtime, value)) {_input_type_error('a Uint8Array')};",
-                    "  auto view = value.getObject(runtime);",
-                    "  budget.check_byte_buffer(path, supernote_view_index(runtime, view, \"byteLength\"));",
+                    "  auto snapshot = supernote_snapshot_uint8_array(runtime, value);",
+                    "  budget.check_byte_buffer(path, snapshot.length);",
                 ])
         elif kind is SemanticTypeKind.OBJECT_REF:
             assert semantic.type_id is not None
@@ -243,8 +243,12 @@ def _validate_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                 "  const auto length = static_cast<std::uint64_t>(array.size(runtime));",
                 "  budget.check_array_length(path, length);",
                 "  for (std::uint64_t index = 0; index < length; ++index) {",
-                "    auto item = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 "    auto item_path = supernote::conversion::index_path(path, index);",
+                "    if (!supernote_array_has_own_index(runtime, array, static_cast<std::size_t>(index))) {",
+                "      supernote_throw_type_error(runtime, item_path + \": expected a present array element\",",
+                "          \"TYPE_MISMATCH\", item_path, \"present array element\", \"missing\");",
+                "    }",
+                "    auto item = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 f"    {_validate_js_name(semantic.element)}(",
                 "        runtime, item, budget, item_path, depth + 1);",
                 "  }",
@@ -368,11 +372,10 @@ def _from_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                 assert scalar is ScalarKind.BYTES
                 lines.extend([
                     f"  if (!supernote_is_uint8_array(runtime, value)) {_input_type_error('a Uint8Array')};",
-                    "  auto view = value.getObject(runtime);",
-                    "  const auto length = supernote_view_index(runtime, view, \"byteLength\");",
-                    "  budget.check_byte_buffer(path, length);",
-                    "  budget.reserve(path, length);",
-                    "  return supernote_copy_uint8_array(runtime, value);",
+                    "  auto snapshot = supernote_snapshot_uint8_array(runtime, value);",
+                    "  budget.check_byte_buffer(path, snapshot.length);",
+                    "  budget.reserve(path, snapshot.length);",
+                    "  return supernote_copy_uint8_array(runtime, snapshot);",
                 ])
         elif kind is SemanticTypeKind.OBJECT_REF:
             assert semantic.type_id is not None
@@ -425,6 +428,10 @@ def _from_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                 "  result.reserve(static_cast<std::size_t>(length));",
                 "  for (std::uint64_t index = 0; index < length; ++index) {",
                 "    const auto item_path = supernote::conversion::index_path(path, index);",
+                "    if (!supernote_array_has_own_index(runtime, array, static_cast<std::size_t>(index))) {",
+                "      supernote_throw_type_error(runtime, item_path + \": expected a present array element\",",
+                "          \"TYPE_MISMATCH\", item_path, \"present array element\", \"missing\");",
+                "    }",
                 "    auto item = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 f"    result.push_back({child}(runtime, item, budget, retained, item_path, depth + 1));",
                 "  }",

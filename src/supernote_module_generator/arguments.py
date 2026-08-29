@@ -169,6 +169,8 @@ def _consume_value_option(
         if index >= len(arguments):
             raise ConfigurationError(f"{option} requires a value")
         value = arguments[index]
+        if value.startswith("-"):
+            raise ConfigurationError(f"{option} requires a value")
     if name == "starter":
         selected = collection.repeated_values.setdefault(name, [])
         if value in selected:

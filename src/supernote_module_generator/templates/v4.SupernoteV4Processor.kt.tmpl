@@ -78,8 +78,8 @@ class SupernoteV4Processor(
       roots.singleOrNull { it.contains(file.filePath) }
         ?: fail(symbol, "marked declaration is outside every configured feature JVM root")
     }
-    grouped.toSortedMap(compareBy { it.featureId }).forEach { (root, featureSymbols) ->
-      generateFeature(root, featureSymbols)
+    roots.sortedBy { it.featureId }.forEach { root ->
+      generateFeature(root, grouped[root].orEmpty())
     }
     generated = true
     return emptyList()

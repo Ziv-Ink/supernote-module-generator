@@ -216,8 +216,8 @@ def _validate_definition(semantic: SemanticType, plan: JvmRoutePlan) -> str:
             else:
                 lines.extend([
                     f"  if (!supernote_is_uint8_array(runtime, value)) {_type_error('a Uint8Array')};",
-                    "  auto view = value.getObject(runtime);",
-                    "  budget.check_byte_buffer(path, supernote_view_index(runtime, view, \"byteLength\"));",
+                    "  auto snapshot = supernote_snapshot_uint8_array(runtime, value);",
+                    "  budget.check_byte_buffer(path, snapshot.length);",
                 ])
         elif kind is SemanticTypeKind.OBJECT_REF:
             assert semantic.type_id is not None
@@ -256,8 +256,12 @@ def _validate_definition(semantic: SemanticType, plan: JvmRoutePlan) -> str:
                 "  const auto length = static_cast<std::uint64_t>(array.size(runtime));",
                 "  budget.check_array_length(path, length);",
                 "  for (std::uint64_t index = 0; index < length; ++index) {",
-                "    auto item = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 "    auto item_path = supernote::conversion::index_path(path, index);",
+                "    if (!supernote_array_has_own_index(runtime, array, static_cast<std::size_t>(index))) {",
+                "      supernote_throw_type_error(runtime, item_path + \": expected a present array element\",",
+                "          \"TYPE_MISMATCH\", item_path, \"present array element\", \"missing\");",
+                "    }",
+                "    auto item = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 f"    {_validate_name(semantic.element)}(",
                 "        runtime, item, budget, item_path, depth + 1);",
                 "  }",
@@ -469,10 +473,10 @@ def _from_definition(
             else:
                 lines.extend([
                     f"  if (!supernote_is_uint8_array(runtime, value)) {_type_error('a Uint8Array')};",
-                    "  auto result = supernote_copy_uint8_array(runtime, value);",
-                    "  budget.check_byte_buffer(path, result.size());",
-                    "  budget.reserve(path, result.size());",
-                    "  return result;",
+                    "  auto snapshot = supernote_snapshot_uint8_array(runtime, value);",
+                    "  budget.check_byte_buffer(path, snapshot.length);",
+                    "  budget.reserve(path, snapshot.length);",
+                    "  return supernote_copy_uint8_array(runtime, snapshot);",
                 ])
         elif kind is SemanticTypeKind.OBJECT_REF:
             assert semantic.type_id is not None
@@ -535,8 +539,13 @@ def _from_definition(
                 "  if (list == nullptr) throw std::runtime_error(\"JVM list adapter returned null\");",
                 f"  auto add_route = {add};",
                 "  for (std::uint64_t index = 0; index < length; ++index) {",
-                "    auto item_value = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 "    auto item_path = supernote::conversion::index_path(path, index);",
+                "    if (!supernote_array_has_own_index(runtime, array, static_cast<std::size_t>(index))) {",
+                "      supernote_throw_type_error(runtime, item_path + \": expected a present array element\",",
+                "          \"TYPE_MISMATCH\", item_path, \"present array element\", \"missing\");",
+                "    }",
+                "    LocalFrame item_frame(env);",
+                "    auto item_value = array.getValueAtIndex(runtime, static_cast<std::size_t>(index));",
                 f"    auto item = {_from_name(child)}(runtime, item_value, env, feature, budget, item_path, depth + 1);",
             ])
             lines.extend(_as_jobject(child, "item", feature_id, "    "))
@@ -822,6 +831,7 @@ def _to_definition(
             "  facebook::jsi::Array result(runtime, static_cast<std::size_t>(length));",
             f"  auto get_route = {get_route};",
             "  for (jint index = 0; index < length; ++index) {",
+            "    LocalFrame item_frame(env);",
             "    jvalue get_arguments[2]{};",
             "    get_arguments[0].l = value.get();",
             "    get_arguments[1].i = index;",

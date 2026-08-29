@@ -127,6 +127,15 @@ int main() {
   } catch (const Failure &failure) {
     if (failure.kind() != FailureKind::RANGE || failure.path() != "counter") return 8;
   }
+  try {
+    Budget budget;
+    budget.check_byte_buffer(
+        "oversized-bytes", Limits::max_byte_buffer_bytes + 1);
+    return 9;
+  } catch (const Failure &failure) {
+    if (failure.kind() != FailureKind::RANGE ||
+        failure.path() != "oversized-bytes") return 10;
+  }
   std::cout << "CPP_CONVERSION_KERNEL_PASS\n";
   return 0;
 }

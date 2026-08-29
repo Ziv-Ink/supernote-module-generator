@@ -78,6 +78,25 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def isolate_source_guard_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Give one test ownership of only its source-guard backup namespace."""
+
+    private_root = tmp_path.parent / f"{tmp_path.name}-guard-temporary"
+    private_root.mkdir()
+    original_mkdtemp = tempfile.mkdtemp
+
+    def isolated_mkdtemp(*args, **kwargs):
+        if kwargs.get("prefix") == "supernote-v4-source-guard-":
+            kwargs["dir"] = private_root
+        return original_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", isolated_mkdtemp)
+    return private_root
+
+
 def test_update_all_dry_run_json_exposes_complete_plan_without_writes(tmp_path: Path):
     root = plugin(tmp_path)
     source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
@@ -619,7 +638,7 @@ def test_check_build_json_exposes_additive_build_and_diagnostics(
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "interrupt"])
-def test_check_build_restores_source_writes_before_returning(
+def test_check_build_preserves_unattributed_source_writes_with_recovery(
     tmp_path: Path,
     monkeypatch,
     outcome: str,
@@ -651,20 +670,22 @@ def test_check_build_restores_source_writes_before_returning(
     payload = json.loads(stdout)
 
     assert stderr == ""
-    assert source_tree_inventory(root) == before
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
+    assert code == 3
+    assert payload["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
+    assert source_tree_inventory(root) != before
+    assert generated.read_text().endswith("// build mutation\n")
+    assert any(
+        issue["code"] == "SNV4_BUILD_MUTATED_SOURCE"
+        for issue in payload["issues"]
+    )
     if outcome == "interrupt":
-        assert code == 130
-        assert payload["status"] == "cancelled"
-        assert payload["cancellation"]["status"] == "completed"
-    else:
-        assert code == 1
-        assert payload["status"] == "failure"
-        assert any(
-            issue["code"] == "SNV4_BUILD_MUTATED_SOURCE"
-            for issue in payload["issues"]
-        )
+        assert payload["cancellation"]["status"] == "partial"
+    recovery = Path(payload["metadata"]["recovery_path"])
+    assert recovery.is_dir()
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source_tree_inventory(root) == before
+    remove_entry_no_follow(recovery)
 
 
 @pytest.mark.parametrize(
@@ -675,7 +696,7 @@ def test_check_build_restores_source_writes_before_returning(
     ),
 )
 @pytest.mark.parametrize("outcome", ("return", "error", "interrupt"))
-def test_nonbuild_validator_stage_owns_and_restores_its_backup(
+def test_nonbuild_validator_stage_preserves_live_change_and_retains_backup(
     tmp_path: Path,
     monkeypatch,
     arguments: list[str],
@@ -700,24 +721,23 @@ def test_nonbuild_validator_stage_owns_and_restores_its_backup(
     payload = json.loads(stdout)
 
     assert stderr == ""
+    assert code == 3
+    assert payload["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
+    assert source_tree_inventory(root) != before
+    assert source.read_text().endswith("// validation mutation\n")
+    assert any(
+        issue["code"] == "SNV4_VALIDATION_MUTATED_SOURCE"
+        for issue in payload["issues"]
+    )
+    if outcome == "interrupt":
+        assert payload["cancellation"]["status"] == "partial"
+    recovery = Path(payload["metadata"]["recovery_path"])
+    assert recovery.is_dir()
+    assert restore_protected_source_backup(recovery, root) == ()
     assert source_tree_inventory(root) == before
     assert protected_directory_metadata(root) == before_directories
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
-    assert payload["recovery"] is None
-    if outcome == "interrupt":
-        assert code == 130
-        assert payload["status"] == "cancelled"
-        assert payload["cancellation"]["status"] == "completed"
-    else:
-        assert code == 1
-        assert payload["status"] == "failure"
-        assert payload["error"]["kind"] == "validation_mutated_source"
-        assert payload["error"]["phase"] == "check"
-        assert any(
-            issue["code"] == "SNV4_VALIDATION_MUTATED_SOURCE"
-            for issue in payload["issues"]
-        )
+    remove_entry_no_follow(recovery)
 
 
 @pytest.mark.parametrize(
@@ -783,28 +803,19 @@ def test_validator_guard_finalization_interrupt_is_recovered_or_actionable(
         else "SNV4_VALIDATION_MUTATED_SOURCE"
     )
     assert any(issue["code"] == expected_issue for issue in payload["issues"])
-    if retry == "success":
-        assert code == 130
-        assert payload["status"] == "cancelled"
-        assert payload["rollback"]["status"] == "completed"
-        assert payload["cancellation"]["status"] == "completed"
-        assert payload["recovery"] is None
-        assert source_tree_inventory(root) == before
-        assert protected_directory_metadata(root) == before_directories
-        assert not any(path.exists() for path in recovery_paths)
-    else:
-        assert code == 3
-        assert payload["status"] == "partial"
-        assert payload["rollback"]["status"] == "partial"
-        assert payload["cancellation"]["status"] == "partial"
-        assert payload["recovery"] is not None
-        recovery = Path(payload["metadata"]["recovery_path"])
-        assert recovery == recovery_paths[0]
-        assert recovery.exists()
-        assert restore_protected_source_backup(recovery, root) == ()
-        assert source_tree_inventory(root) == before
-        assert protected_directory_metadata(root) == before_directories
-        remove_entry_no_follow(recovery)
+    assert code == 3
+    assert payload["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
+    assert payload["cancellation"]["status"] == "partial"
+    assert payload["recovery"] is not None
+    recovery = Path(payload["metadata"]["recovery_path"])
+    assert recovery == recovery_paths[0]
+    assert recovery.exists()
+    assert source.read_text().endswith("// validator mutation\n")
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source_tree_inventory(root) == before
+    assert protected_directory_metadata(root) == before_directories
+    remove_entry_no_follow(recovery)
 
 
 @pytest.mark.parametrize(
@@ -860,27 +871,18 @@ def test_frontend_guard_finalization_interrupt_is_recovered_or_actionable(
         issue["code"] == "SNV4_FRONTEND_MUTATED_SOURCE"
         for issue in payload["issues"]
     )
-    if retry == "success":
-        assert code == 130
-        assert payload["status"] == "cancelled"
-        assert payload["rollback"]["status"] == "completed"
-        assert payload["cancellation"]["status"] == "completed"
-        assert payload["recovery"] is None
-        assert source_tree_inventory(root) == before
-        assert protected_directory_metadata(root) == before_directories
-        assert not any(path.exists() for path in recovery_paths)
-    else:
-        assert code == 3
-        assert payload["status"] == "partial"
-        assert payload["rollback"]["status"] == "partial"
-        assert payload["cancellation"]["status"] == "partial"
-        recovery = Path(payload["metadata"]["recovery_path"])
-        assert recovery == recovery_paths[0]
-        assert recovery.exists()
-        assert restore_protected_source_backup(recovery, root) == ()
-        assert source_tree_inventory(root) == before
-        assert protected_directory_metadata(root) == before_directories
-        remove_entry_no_follow(recovery)
+    assert code == 3
+    assert payload["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
+    assert payload["cancellation"]["status"] == "partial"
+    recovery = Path(payload["metadata"]["recovery_path"])
+    assert recovery == recovery_paths[0]
+    assert recovery.exists()
+    assert source.read_text().endswith("// frontend mutation\n")
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source_tree_inventory(root) == before
+    assert protected_directory_metadata(root) == before_directories
+    remove_entry_no_follow(recovery)
 
 
 def test_validate_uses_authoritative_v4_integrity_before_build(
@@ -926,7 +928,7 @@ def test_validate_uses_authoritative_v4_integrity_before_build(
         ["--json", "repair", "--diff"],
     ],
 )
-def test_read_only_frontend_mutation_is_rejected_and_restored(
+def test_read_only_frontend_mutation_preserves_live_bytes_and_backup(
     tmp_path: Path,
     monkeypatch,
     arguments: list[str],
@@ -954,15 +956,18 @@ def test_read_only_frontend_mutation_is_rejected_and_restored(
     code, stdout, stderr = invoke(root, arguments)
     payload = json.loads(stdout)
 
-    assert code == 1, (stderr, payload.get("error"), payload.get("metadata"))
-    assert payload["error"]["kind"] == "frontend_mutated_source"
+    assert code == 3, (stderr, payload.get("error"), payload.get("metadata"))
+    assert payload["status"] == "partial"
     assert payload["issues"][0]["code"] == "SNV4_FRONTEND_MUTATED_SOURCE"
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
+    assert payload["rollback"]["status"] == "partial"
+    assert source.read_bytes() == b"class Mutated\n"
+    recovery = Path(payload["metadata"]["recovery_path"])
+    assert restore_protected_source_backup(recovery, root) == ()
     assert source.read_bytes() == before
+    remove_entry_no_follow(recovery)
 
 
-def test_update_all_frontend_mutation_rolls_back_before_noop(
+def test_update_all_frontend_mutation_preserves_live_bytes_before_noop(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -986,11 +991,13 @@ def test_update_all_frontend_mutation_rolls_back_before_noop(
     )
     payload = json.loads(stdout)
 
-    assert code == 1, stderr
-    assert payload["error"]["kind"] == "frontend_mutated_source"
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
-    assert source.read_bytes() == before
+    assert code == 3, stderr
+    assert payload["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
+    assert source.read_bytes() == b"class Mutated\n"
+    assert "recovery_path" not in payload["metadata"]
+    assert payload["actual_changes"]
+    assert before != source.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -1001,7 +1008,7 @@ def test_update_all_frontend_mutation_rolls_back_before_noop(
         ["--json", "update", "--all", "--yes"],
     ],
 )
-def test_frontend_interrupt_restores_source_and_cleans_recovery_state(
+def test_frontend_interrupt_preserves_source_and_retains_recovery_state(
     tmp_path: Path,
     monkeypatch,
     arguments: list[str],
@@ -1020,9 +1027,6 @@ def test_frontend_interrupt_restores_source_and_cleans_recovery_state(
             if path.is_dir()
         },
     }
-    temporary_root = Path(tempfile.gettempdir())
-    guards_before = set(temporary_root.glob("supernote-v4-source-guard-*"))
-
     def interrupting_frontend(self):
         source.write_text("class Mutated\n")
         raise KeyboardInterrupt
@@ -1034,15 +1038,24 @@ def test_frontend_interrupt_restores_source_and_cleans_recovery_state(
     code, stdout, stderr = invoke(root, arguments)
     payload = json.loads(stdout)
 
-    assert code == 130, stderr
-    assert payload["status"] == "cancelled"
+    assert code == 3, stderr
+    assert payload["status"] == "partial"
     assert payload["cancellation"]["requested"] is True
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
-    assert source.read_bytes() == before
+    assert payload["cancellation"]["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
+    assert source.read_bytes() == b"class Mutated\n"
     assert not (root / ".supernote-module-transaction.json").exists()
     assert not list(root.glob(".supernote-module-transaction-*"))
-    assert set(temporary_root.glob("supernote-v4-source-guard-*")) == guards_before
+    if arguments[1] == "update":
+        assert "recovery_path" not in payload["metadata"]
+        assert payload["actual_changes"]
+        assert before != source.read_bytes()
+    else:
+        recovery = Path(payload["metadata"]["recovery_path"])
+        assert recovery.is_dir()
+        assert restore_protected_source_backup(recovery, root) == ()
+        assert source.read_bytes() == before
+        remove_entry_no_follow(recovery)
     assert {
         ".": root.lstat().st_mtime_ns,
         **{
@@ -1053,11 +1066,8 @@ def test_frontend_interrupt_restores_source_and_cleans_recovery_state(
     } == directory_mtimes
 
 
-@pytest.mark.parametrize("failure_point", ["before", "during", "after"])
-def test_protected_guard_retains_backup_without_losing_live_entry_on_restore_fault(
+def test_protected_guard_never_overwrites_an_unattributed_live_entry(
     tmp_path: Path,
-    monkeypatch,
-    failure_point: str,
 ):
     root = plugin(tmp_path)
     source = root / "sentinel.txt"
@@ -1065,53 +1075,17 @@ def test_protected_guard_retains_backup_without_losing_live_entry_on_restore_fau
     guard = ProtectedSourceGuard(root)
     source.write_text("mutated\n")
 
-    import supernote_module_generator.filesystem as filesystem
-
-    original_copy = filesystem.copy_entry_no_follow
-    original_replace = filesystem.os.replace
-    original_remove = filesystem.remove_entry_no_follow
-    fired = False
-
-    def failing_copy(src, dst):
-        nonlocal fired
-        if failure_point == "before" and "supernote-v4-restore" in Path(dst).name:
-            fired = True
-            raise OSError("copy fault")
-        return original_copy(src, dst)
-
-    def failing_replace(src, dst):
-        nonlocal fired
-        if failure_point == "during" and "supernote-v4-restore" in Path(src).name:
-            fired = True
-            raise OSError("activation fault")
-        return original_replace(src, dst)
-
-    def failing_remove(path):
-        nonlocal fired
-        if failure_point == "after" and "supernote-v4-displaced" in Path(path).name:
-            fired = True
-            raise OSError("cleanup fault")
-        return original_remove(path)
-
-    monkeypatch.setattr(filesystem, "copy_entry_no_follow", failing_copy)
-    monkeypatch.setattr(filesystem.os, "replace", failing_replace)
-    monkeypatch.setattr(filesystem, "remove_entry_no_follow", failing_remove)
-
     with pytest.raises(ProtectedSourceRestoreError) as raised:
         guard.finish()
 
-    assert fired is True
     assert source.is_file()
-    assert source.read_text() in {"baseline\n", "mutated\n"}
+    assert source.read_text() == "mutated\n"
+    assert raised.value.remaining == ("modified:sentinel.txt",)
     assert raised.value.recovery_path.is_dir()
     assert any(raised.value.recovery_path.iterdir())
-
-    monkeypatch.setattr(filesystem, "copy_entry_no_follow", original_copy)
-    monkeypatch.setattr(filesystem.os, "replace", original_replace)
-    monkeypatch.setattr(filesystem, "remove_entry_no_follow", original_remove)
-    for displaced in root.glob(".*.supernote-v4-displaced-*"):
-        original_remove(displaced)
-    shutil.rmtree(raised.value.recovery_path)
+    assert restore_protected_source_backup(raised.value.recovery_path, root) == ()
+    assert source.read_text() == "baseline\n"
+    remove_entry_no_follow(raised.value.recovery_path)
 
 
 def test_guard_restore_failure_reports_residue_and_recovery_backup(
@@ -1124,8 +1098,7 @@ def test_guard_restore_failure_reports_residue_and_recovery_backup(
     source.write_text("baseline\n")
     manifest = root / ".supernote-module/manifest.json"
     manifest_before = manifest.read_bytes()
-    temporary_root = Path(tempfile.gettempdir())
-    guards_before = set(temporary_root.glob("supernote-v4-source-guard-*"))
+    temporary_root = isolate_source_guard_temp(tmp_path, monkeypatch)
 
     def mutating_frontend(self):
         source.write_text("mutated\n")
@@ -1147,7 +1120,7 @@ def test_guard_restore_failure_reports_residue_and_recovery_backup(
 
     code, stdout, stderr = invoke(root, ["--json", "check"])
     payload = json.loads(stdout)
-    retained = set(temporary_root.glob("supernote-v4-source-guard-*")) - guards_before
+    retained = set(temporary_root.glob("supernote-v4-source-guard-*"))
 
     assert code == 3, stderr
     assert payload["status"] == "partial"
@@ -1189,8 +1162,7 @@ def test_retained_guard_backup_restores_content_and_directory_metadata_fresh(
     source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
     before = source.read_bytes()
     directory_before = protected_directory_metadata(root)
-    temporary_root = Path(tempfile.gettempdir())
-    guards_before = set(temporary_root.glob("supernote-v4-source-guard-*"))
+    temporary_root = isolate_source_guard_temp(tmp_path, monkeypatch)
 
     def mutating_frontend(self):
         source.write_text("mutated\n")
@@ -1209,7 +1181,7 @@ def test_retained_guard_backup_restores_content_and_directory_metadata_fresh(
     monkeypatch.setattr(filesystem, "copy_entry_no_follow", failing_restore_copy)
     code, stdout, stderr = invoke(root, ["--json", "check"])
     assert code == 3, stderr
-    retained = set(temporary_root.glob("supernote-v4-source-guard-*")) - guards_before
+    retained = set(temporary_root.glob("supernote-v4-source-guard-*"))
     assert len(retained) == 1
     recovery = retained.pop()
 
@@ -1376,7 +1348,9 @@ def test_frontend_mutation_scope_and_target_follow_changed_path(
     payload = json.loads(stdout)
     issue = payload["issues"][0]
 
-    assert code == 1, stderr
+    assert code == 3, stderr
+    assert payload["status"] == "partial"
+    assert payload["rollback"]["status"] == "partial"
     assert issue["scope"] == expected_scope
     assert issue["path"] == relative
     assert payload["affected_targets"] == [expected_target]
@@ -1384,7 +1358,11 @@ def test_frontend_mutation_scope_and_target_follow_changed_path(
         assert issue["feature_id"]
     else:
         assert "feature_id" not in issue
+    assert source.read_bytes() == before + b"mutated\n"
+    recovery = Path(payload["metadata"]["recovery_path"])
+    assert restore_protected_source_backup(recovery, root) == ()
     assert source.read_bytes() == before
+    remove_entry_no_follow(recovery)
 
 
 def test_partial_restore_classifies_deleted_feature_from_pre_frontend_model(
@@ -1394,8 +1372,7 @@ def test_partial_restore_classifies_deleted_feature_from_pre_frontend_model(
     root = plugin(tmp_path)
     assert invoke(root, ["--json", "update", "--all", "--yes"])[0] == 0
     feature = root / "local_modules/alpha"
-    temporary_root = Path(tempfile.gettempdir())
-    guards_before = set(temporary_root.glob("supernote-v4-source-guard-*"))
+    temporary_root = isolate_source_guard_temp(tmp_path, monkeypatch)
 
     def deleting_frontend(self):
         shutil.rmtree(feature)
@@ -1417,7 +1394,7 @@ def test_partial_restore_classifies_deleted_feature_from_pre_frontend_model(
 
     code, stdout, stderr = invoke(root, ["--json", "check"])
     payload = json.loads(stdout)
-    retained = set(temporary_root.glob("supernote-v4-source-guard-*")) - guards_before
+    retained = set(temporary_root.glob("supernote-v4-source-guard-*"))
 
     assert code == 3, stderr
     feature_issues = [
@@ -1570,6 +1547,120 @@ def test_dependency_edit_after_plan_is_preserved_as_precommit_conflict(
     assert payload["actual_changes"] == []
     assert after["concurrent_user_edit"] == "preserve me"
     assert "alpha" not in after["dependencies"]
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+def test_artifact_edit_after_complete_plan_validation_is_preserved(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(root, ["--json", "update", "--all", "--yes"])[0] == 0
+    source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
+    source.write_text(source.read_text().replace("greet(", "greetAfterValidation("))
+    wrapper = root / ".supernote-module/manifest.json"
+    external = b"// editor save after validation\n"
+    original_validate = GenerationService.validate_preconditions
+    injected = False
+
+    def validate_then_edit(self, plan):
+        nonlocal injected
+        result = original_validate(self, plan)
+        if not injected:
+            injected = True
+            wrapper.write_bytes(external)
+        return result
+
+    monkeypatch.setattr(
+        GenerationService,
+        "validate_preconditions",
+        validate_then_edit,
+    )
+
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "--all", "--yes"]
+    )
+    payload = json.loads(stdout)
+    assert injected
+    assert code == 1, (stderr, payload)
+    assert payload["status"] == "failure"
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["rollback"]["status"] == "completed"
+    assert payload["actual_changes"] == []
+    assert wrapper.read_bytes() == external
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+def test_artifact_edit_at_conditional_publication_boundary_is_preserved(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(root, ["--json", "update", "--all", "--yes"])[0] == 0
+    source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
+    source.write_text(source.read_text().replace("greet(", "greetAtBoundary("))
+    manifest = root / ".supernote-module/manifest.json"
+    external = b"// editor save at the conditional publication boundary\n"
+    original = Transaction.replace_regular_batch_if_matches
+    injected = False
+
+    def edit_then_publish(self, replacements):
+        nonlocal injected
+        if not injected:
+            injected = True
+            manifest.write_bytes(external)
+        return original(self, replacements)
+
+    monkeypatch.setattr(
+        Transaction,
+        "replace_regular_batch_if_matches",
+        edit_then_publish,
+    )
+
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "--all", "--yes"]
+    )
+    payload = json.loads(stdout)
+
+    assert injected
+    assert code == 3, (stderr, payload)
+    assert payload["status"] == "partial"
+    assert payload["error"]["kind"] == "plan_conflict"
+    assert payload["rollback"]["status"] == "partial"
+    assert manifest.read_bytes() == external
+    assert not (root / ".supernote-module-transaction.json").exists()
+    assert not list(root.glob(".supernote-module-transaction-*"))
+
+
+def test_rollback_preserves_editor_save_after_generator_publication(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    assert invoke(root, ["--json", "update", "--all", "--yes"])[0] == 0
+    source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
+    source.write_text(source.read_text().replace("greet(", "greetBeforeFailure("))
+    wrapper = root / ".supernote-module/manifest.json"
+    external = b"// editor save while post-generation validation ran\n"
+    original_execute = GenerationService.execute
+
+    def publish_then_fail(self, plan, transaction, *, commit=True):
+        original_execute(self, plan, transaction, commit=False)
+        wrapper.write_bytes(external)
+        raise RuntimeError("post-publication validation sentinel")
+
+    monkeypatch.setattr(GenerationService, "execute", publish_then_fail)
+
+    code, stdout, stderr = invoke(
+        root, ["--json", "update", "--all", "--yes"]
+    )
+    payload = json.loads(stdout)
+    assert code in {1, 3}, (stderr, payload)
+    assert payload["status"] in {"failure", "partial"}
+    assert payload["rollback"]["status"] in {"completed", "partial"}, payload
+    assert wrapper.read_bytes() == external
     assert not (root / ".supernote-module-transaction.json").exists()
     assert not list(root.glob(".supernote-module-transaction-*"))
 

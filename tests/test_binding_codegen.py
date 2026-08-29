@@ -1247,11 +1247,36 @@ std::int64_t identity(std::int64_t value) { return value; }
             self.assertIn("supernote_copy_uint8_array(runtime", generated)
             self.assertIn('supernote_view_index(runtime, view, "byteOffset")', generated)
             self.assertIn('supernote_view_index(runtime, view, "byteLength")', generated)
-            self.assertIn("std::memcpy(result.data()", generated)
+            self.assertIn("std::memcpy(\n        result.data()", generated)
             self.assertIn("SupernoteOwnedBytesBuffer", generated)
             self.assertIn("BigInt::fromInt64", generated)
             self.assertIn("supernote_throw_type_error", generated)
             self.assertIn("supernote_throw_range_error", generated)
+            self.assertIn(
+                '"LIMIT_EXCEEDED",\n        path,',
+                generated,
+            )
+            self.assertEqual(
+                generated.count(
+                    "auto supernote_snapshot_3 = "
+                    "supernote_snapshot_uint8_array("
+                ),
+                1,
+            )
+            self.assertIn(
+                "supernote_copy_uint8_array(runtime, supernote_snapshot_3)",
+                generated,
+            )
+            snapshot = generated.index("auto supernote_snapshot_3 =")
+            limit = generated.index(
+                "supernote_check_uint8_array_snapshot_limit(", snapshot
+            )
+            copy = generated.index(
+                "supernote_copy_uint8_array(runtime, supernote_snapshot_3)",
+                limit,
+            )
+            self.assertLess(snapshot, limit)
+            self.assertLess(limit, copy)
 
     def test_jsi_hostobject_uses_initial_numeric_and_bytes_conversions(self):
         source = """#include <cstddef>

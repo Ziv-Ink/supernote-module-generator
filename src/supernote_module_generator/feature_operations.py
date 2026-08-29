@@ -6,10 +6,15 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from . import __version__, binding_codegen
-from .errors import ConfigurationError, GeneratorError
+from .errors import ConfigurationError, FilesystemError, GeneratorError
 from .feature_generator import FeatureConfig, stage_feature
 from .feature_identity import FeatureIdentity
-from .filesystem import contained_entry_kind_no_follow, lexists
+from .filesystem import (
+    contained_directory_entries_no_follow,
+    contained_entry_kind_no_follow,
+    lexists,
+    read_regular_bytes_no_follow,
+)
 from .feature_model import (
     FEATURE_MANIFEST_KIND,
     FeatureModelError,
@@ -23,8 +28,11 @@ from .plugin_runtime_codegen import (
     generated_runtime_files,
     stage_plugin_runtime,
 )
-from .plugin_build_integration import set_runtime_wiring, verify_runtime_wiring
-from .plugin_build_integration import integration_mutation_files
+from .plugin_build_integration import (
+    integration_mutation_files,
+    set_runtime_wiring,
+    verify_runtime_wiring,
+)
 from .semantic import SemanticApi
 from .models import ModuleInfo
 from .transaction import Transaction
@@ -125,7 +133,7 @@ class FeatureOperationService:
             journal.checkpoint("after_first_file_replacement")
             journal.activate(staged_runtime, runtime_root)
             set_runtime_wiring(self.root, enabled=True)
-            journal.mark_write()
+            journal.record_snapshot_results(integration_mutation_files(self.root))
             journal.checkpoint("after_wiring")
             verify_runtime_wiring(self.root, enabled=True)
             if owns_journal:
@@ -155,9 +163,10 @@ class FeatureOperationService:
         raise FeatureOperationError(f"feature not found: {npm_name}")
 
     def feature_paths(self) -> list[Path]:
-        if self.features_root.is_symlink():
+        root_kind = contained_entry_kind_no_follow(self.root, self.features_root)
+        if root_kind == "symlink":
             self._reject_escaping_feature_links()
-        if not self.features_root.is_dir():
+        if root_kind != "directory":
             return []
         self._reject_escaping_feature_links()
         result: list[Path] = []
@@ -171,33 +180,47 @@ class FeatureOperationService:
     def _canonical_metadata_candidates(self) -> list[Path]:
         candidates: list[Path] = []
         try:
-            children = sorted(self.features_root.iterdir())
+            children = contained_directory_entries_no_follow(
+                self.root, self.features_root
+            )
         except OSError as exc:
             raise FeatureMetadataError(
                 f"managed feature directory could not be read:\n\n"
                 f"{self.features_root}: {exc}"
             ) from exc
-        for child in children:
-            if child.name.startswith("."):
+        for name, kind in children:
+            child = self.features_root / name
+            if name.startswith("."):
                 continue
-            if child.name.startswith("@"):
-                if not child.is_dir():
+            if name.startswith("@"):
+                if kind != "directory":
                     continue
                 try:
-                    packages = sorted(child.iterdir())
+                    packages = contained_directory_entries_no_follow(
+                        self.root, child
+                    )
                 except OSError as exc:
                     raise FeatureMetadataError(
                         f"managed feature scope could not be read:\n\n{child}: {exc}"
                     ) from exc
-                for package in packages:
-                    if package.name.startswith("."):
+                for package_name, package_kind in packages:
+                    package = child / package_name
+                    if (
+                        package_name.startswith(".")
+                        or package_kind != "directory"
+                    ):
                         continue
                     metadata = package / ".supernote-module.json"
-                    if metadata.is_file():
+                    if (
+                        contained_entry_kind_no_follow(self.root, metadata)
+                        == "file"
+                    ):
                         candidates.append(metadata)
                 continue
             metadata = child / ".supernote-module.json"
-            if metadata.is_file():
+            if kind == "directory" and (
+                contained_entry_kind_no_follow(self.root, metadata) == "file"
+            ):
                 candidates.append(metadata)
         return candidates
 
@@ -207,26 +230,33 @@ class FeatureOperationService:
         candidates = [self.features_root]
         if not self.features_root.is_symlink():
             try:
-                children = sorted(self.features_root.iterdir())
+                children = contained_directory_entries_no_follow(
+                    self.root, self.features_root
+                )
             except OSError as exc:
                 raise FeatureMetadataError(
                     f"managed feature directory could not be read:\n\n"
                     f"{self.features_root}: {exc}"
                 ) from exc
             candidates.extend(
-                child for child in children if not child.name.startswith(".")
+                self.features_root / name
+                for name, _kind in children
+                if not name.startswith(".")
             )
-            for scope in children:
+            for scope_name, scope_kind in children:
+                scope = self.features_root / scope_name
                 if (
-                    scope.name.startswith("@")
-                    and scope.is_dir()
+                    scope_name.startswith("@")
+                    and scope_kind == "directory"
                     and not scope.is_symlink()
                 ):
                     try:
                         candidates.extend(
-                            child
-                            for child in sorted(scope.iterdir())
-                            if not child.name.startswith(".")
+                            scope / name
+                            for name, _kind in contained_directory_entries_no_follow(
+                                self.root, scope
+                            )
+                            if not name.startswith(".")
                         )
                     except OSError as exc:
                         raise FeatureMetadataError(
@@ -396,11 +426,12 @@ def read_feature_record(path: Path) -> FeatureRecord:
 
 def _read_feature_metadata(metadata: Path) -> dict[str, object]:
     try:
-        value = json.loads(metadata.read_text(encoding="utf-8"))
+        payload, _metadata = read_regular_bytes_no_follow(metadata)
+        value = json.loads(payload.decode("utf-8"))
     except json.JSONDecodeError as exc:
         reason = f"invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
         raise _invalid_feature_metadata(metadata, reason) from exc
-    except OSError as exc:
+    except (FilesystemError, OSError, UnicodeDecodeError) as exc:
         raise _invalid_feature_metadata(metadata, f"could not read file: {exc}") from exc
     if not isinstance(value, dict):
         raise _invalid_feature_metadata(metadata, "top-level value must be an object")

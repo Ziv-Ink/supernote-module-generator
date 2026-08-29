@@ -221,6 +221,18 @@ else:
 def _iter_source_tree_no_follow(root: Path):
     """Yield source entries without entering directory symlinks."""
 
+    if __package__:
+        from .filesystem import FilesystemError, entry_kind, iter_tree_no_follow
+
+        if entry_kind(root) != "directory":
+            return
+        try:
+            yield from iter_tree_no_follow(root)
+        except FilesystemError as exc:
+            raise CodegenError(
+                f"could not inspect C/C++ source directory {root}: {exc}"
+            ) from exc
+        return
     if root.is_symlink():
         return
     pending = [root]
@@ -3080,7 +3092,7 @@ def _jsi_argument(parameter: Parameter, number: int) -> str:
     if parameter.cpp_type == "std::string":
         return f"arguments[{number}].asString(runtime).utf8(runtime)"
     if parameter.cpp_type == "std::vector<std::byte>":
-        return f"supernote_copy_uint8_array(runtime, arguments[{number}])"
+        return f"supernote_copy_uint8_array(runtime, supernote_snapshot_{number})"
     raise AssertionError(f"unsupported JSI parameter type {parameter.cpp_type!r}")
 
 
@@ -3161,6 +3173,14 @@ def _jsi_range_validation(
             f"{indent}      runtime, {json.dumps(prefix + 'must fit in a 32-bit float')},",
             f"{indent}      \"OUT_OF_RANGE\", {json.dumps(path)}, \"float32\", \"number\");",
             f"{indent}}}",
+        ]
+    if parameter.cpp_type == "std::vector<std::byte>":
+        snapshot_name = f"supernote_snapshot_{number}"
+        return [
+            f"{indent}auto {snapshot_name} = supernote_snapshot_uint8_array(",
+            f"{indent}    runtime, arguments[{number}]);",
+            f"{indent}supernote_check_uint8_array_snapshot_limit(",
+            f"{indent}    runtime, {snapshot_name}, {json.dumps(path)});",
         ]
     return []
 
@@ -3335,6 +3355,22 @@ bool supernote_is_uint8_array(
   return value.getObject(runtime).instanceOf(runtime, constructor);
 }
 
+bool supernote_array_has_own_index(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Array &array,
+    std::size_t index) {
+  auto object_constructor =
+      runtime.global().getPropertyAsObject(runtime, "Object");
+  auto prototype =
+      object_constructor.getPropertyAsObject(runtime, "prototype");
+  auto has_own =
+      prototype.getPropertyAsFunction(runtime, "hasOwnProperty");
+  auto key = facebook::jsi::String::createFromUtf8(
+      runtime, std::to_string(index));
+  auto result = has_own.callWithThis(runtime, array, std::move(key));
+  return result.isBool() && result.getBool();
+}
+
 std::size_t supernote_view_index(
     facebook::jsi::Runtime &runtime,
     const facebook::jsi::Object &view,
@@ -3353,7 +3389,13 @@ std::size_t supernote_view_index(
   return static_cast<std::size_t>(number);
 }
 
-std::vector<std::byte> supernote_copy_uint8_array(
+struct SupernoteUint8ArraySnapshot {
+  facebook::jsi::ArrayBuffer buffer;
+  std::size_t offset;
+  std::size_t length;
+};
+
+SupernoteUint8ArraySnapshot supernote_snapshot_uint8_array(
     facebook::jsi::Runtime &runtime,
     const facebook::jsi::Value &value) {
   auto view = value.getObject(runtime);
@@ -3372,11 +3414,45 @@ std::vector<std::byte> supernote_copy_uint8_array(
     throw facebook::jsi::JSError(
         runtime, "Uint8Array view exceeds its ArrayBuffer");
   }
-  std::vector<std::byte> result(length);
-  if (length != 0) {
-    std::memcpy(result.data(), buffer.data(runtime) + offset, length);
+  return {std::move(buffer), offset, length};
+}
+
+void supernote_check_uint8_array_snapshot_limit(
+    facebook::jsi::Runtime &runtime,
+    const SupernoteUint8ArraySnapshot &snapshot,
+    const std::string &path) {
+  constexpr std::size_t kMaxByteBufferBytes = 32ULL * 1024ULL * 1024ULL;
+  if (snapshot.length > kMaxByteBufferBytes) {
+    supernote_throw_range_error(
+        runtime,
+        "Uint8Array byteLength exceeds the generated conversion limit",
+        "LIMIT_EXCEEDED",
+        path,
+        "at most 33554432 bytes",
+        std::to_string(snapshot.length) + " bytes");
+  }
+}
+
+std::vector<std::byte> supernote_copy_uint8_array(
+    facebook::jsi::Runtime &runtime,
+    SupernoteUint8ArraySnapshot &snapshot) {
+  supernote_check_uint8_array_snapshot_limit(
+      runtime, snapshot, "Uint8Array.byteLength");
+  std::vector<std::byte> result(snapshot.length);
+  if (snapshot.length != 0) {
+    std::memcpy(
+        result.data(),
+        snapshot.buffer.data(runtime) + snapshot.offset,
+        snapshot.length);
   }
   return result;
+}
+
+std::vector<std::byte> supernote_copy_uint8_array(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Value &value) {
+  auto snapshot = supernote_snapshot_uint8_array(runtime, value);
+  return supernote_copy_uint8_array(runtime, snapshot);
 }
 
 class SupernoteOwnedBytesBuffer final : public facebook::jsi::MutableBuffer {

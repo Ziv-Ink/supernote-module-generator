@@ -619,7 +619,7 @@ def test_doctor_toolchain_discovery_preserves_gradle_configuration_atime(
     assert after.st_mode == before.st_mode
 
 
-def test_doctor_restores_source_written_by_a_tool_probe_and_reports_the_violation(
+def test_doctor_preserves_unattributed_source_written_during_a_tool_probe(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -646,9 +646,10 @@ def test_doctor_restores_source_written_by_a_tool_probe_and_reports_the_violatio
 
     result = DoctorService(root, renderer(), run=run).execute("plugin")
 
-    assert result.exit_code == 1
-    assert result.rollback.status == "completed"
-    assert source.read_bytes() == before
+    assert result.exit_code == 3
+    assert result.status == "partial"
+    assert result.rollback.status == "partial"
+    assert source.read_bytes() == b"val sentinel = 2\n"
     assert result.doctor is not None
     integrity = next(
         check
@@ -656,11 +657,21 @@ def test_doctor_restores_source_written_by_a_tool_probe_and_reports_the_violatio
         if check.id == "doctor_source_integrity"
     )
     assert integrity.status == "failed"
-    assert integrity.metadata["restored"] is True
-    assert result.to_dict()["actual_changes"] == []
+    assert integrity.metadata["restored"] is False
+    assert result.to_dict()["actual_changes"] == [
+        {
+            "path": "android/app/src/main/kotlin/App.kt",
+            "action": "update",
+            "ownership": "user source",
+        }
+    ]
+    recovery = Path(result.metadata["recovery_path"])
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source.read_bytes() == before
+    remove_entry_no_follow(recovery)
 
 
-def test_doctor_interrupt_restores_source_and_reports_completed_cancellation(
+def test_doctor_interrupt_preserves_unattributed_source_and_backup(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -684,25 +695,30 @@ def test_doctor_interrupt_restores_source_and_reports_completed_cancellation(
 
     result = DoctorService(root, renderer(), run=run).execute("plugin")
 
-    assert result.exit_code == 130
-    assert result.status == "cancelled"
-    assert result.rollback.status == "completed"
-    assert source_tree_inventory(root) == before_inventory
-    assert protected_directory_metadata(root) == before_directories
+    assert result.exit_code == 3
+    assert result.status == "partial"
+    assert result.rollback.status == "partial"
+    assert source.read_bytes() == b"val sentinel = 2\n"
     payload = result.to_dict()
     assert payload["cancellation"]["requested"] is True
-    assert payload["cancellation"]["status"] == "completed"
-    assert payload["actual_changes"] == []
+    assert payload["cancellation"]["status"] == "partial"
+    assert payload["actual_changes"] == [
+        {
+            "path": "android/app/src/main/kotlin/App.kt",
+            "action": "update",
+            "ownership": "user source",
+        }
+    ]
+    recovery = Path(result.metadata["recovery_path"])
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source_tree_inventory(root) == before_inventory
+    assert protected_directory_metadata(root) == before_directories
+    remove_entry_no_follow(recovery)
 
 
-@pytest.mark.parametrize(
-    "boundary",
-    ("inventory", "restore", "directory_metadata", "cleanup"),
-)
-def test_doctor_finish_boundary_interrupt_restores_exactly_and_reports_cancellation(
+def test_doctor_finish_inventory_interrupt_retries_without_losing_live_source(
     tmp_path: Path,
     monkeypatch,
-    boundary: str,
 ):
     import supernote_module_generator.filesystem as filesystem
 
@@ -711,60 +727,23 @@ def test_doctor_finish_boundary_interrupt_restores_exactly_and_reports_cancellat
     source.parent.mkdir(parents=True)
     source.write_text("val sentinel = 1\n", encoding="utf-8")
     install_fake_sdk(tmp_path, monkeypatch)
-    before_inventory = source_tree_inventory(root)
-    before_directories = protected_directory_metadata(root)
+    before = source.read_bytes()
     monkeypatch.setattr(
         "supernote_module_generator.doctor.shutil.which",
         lambda name: f"/tools/{name}",
     )
     armed = False
     interrupted = False
-    cleanup_recovery_paths: list[Path] = []
+    original_inventory = filesystem.source_tree_inventory
 
-    def interrupt_once(callable_):
-        def wrapper(*args, **kwargs):
-            nonlocal interrupted
-            if armed and not interrupted:
-                interrupted = True
-                raise KeyboardInterrupt
-            return callable_(*args, **kwargs)
+    def interrupt_once(path):
+        nonlocal interrupted
+        if armed and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_inventory(path)
 
-        return wrapper
-
-    if boundary == "inventory":
-        monkeypatch.setattr(
-            filesystem,
-            "source_tree_inventory",
-            interrupt_once(filesystem.source_tree_inventory),
-        )
-    elif boundary == "restore":
-        monkeypatch.setattr(
-            filesystem.ProtectedSourceGuard,
-            "_restore_entry",
-            interrupt_once(filesystem.ProtectedSourceGuard._restore_entry),
-        )
-    elif boundary == "directory_metadata":
-        monkeypatch.setattr(
-            filesystem,
-            "restore_protected_directory_metadata",
-            interrupt_once(filesystem.restore_protected_directory_metadata),
-        )
-    else:
-        original_remove = filesystem.ProtectedSourceGuard._remove_temporary
-
-        def interrupt_cleanup(self):
-            nonlocal interrupted
-            cleanup_recovery_paths.append(self.recovery_path)
-            if armed and not interrupted:
-                interrupted = True
-                raise KeyboardInterrupt
-            return original_remove(self)
-
-        monkeypatch.setattr(
-            filesystem.ProtectedSourceGuard,
-            "_remove_temporary",
-            interrupt_cleanup,
-        )
+    monkeypatch.setattr(filesystem, "source_tree_inventory", interrupt_once)
 
     def run(command, **kwargs):
         nonlocal armed
@@ -778,19 +757,22 @@ def test_doctor_finish_boundary_interrupt_restores_exactly_and_reports_cancellat
     result = DoctorService(root, renderer(), run=run).execute("plugin")
 
     assert interrupted
-    assert result.status == "cancelled"
-    assert result.exit_code == 130
-    assert result.rollback.status == "completed"
-    assert source_tree_inventory(root) == before_inventory
-    assert protected_directory_metadata(root) == before_directories
+    assert result.status == "partial"
+    assert result.exit_code == 3
+    assert result.rollback.status == "partial"
+    assert source.read_bytes() == b"val sentinel = 2\n"
     assert result.to_dict()["cancellation"] == {
         "requested": True,
-        "status": "completed",
-        "reason": "Doctor was interrupted. Protected source state was restored.",
+        "status": "partial",
+        "reason": (
+            "Doctor was interrupted and exact protected-source restoration "
+            "could not be verified."
+        ),
     }
-    if boundary == "cleanup":
-        assert cleanup_recovery_paths
-        assert not any(lexists(path) for path in cleanup_recovery_paths)
+    recovery = Path(result.metadata["recovery_path"])
+    assert restore_protected_source_backup(recovery, root) == ()
+    assert source.read_bytes() == before
+    remove_entry_no_follow(recovery)
 
 
 def test_doctor_interrupted_finalization_failed_retry_retains_actionable_backup(
@@ -811,23 +793,19 @@ def test_doctor_interrupted_finalization_failed_retry_retains_actionable_backup(
         lambda name: f"/tools/{name}",
     )
     armed = False
-    restore_attempts = 0
+    inventory_attempts = 0
+    original_inventory = filesystem.source_tree_inventory
 
-    def fail_restore(self, destination, backup):
-        nonlocal restore_attempts
+    def fail_inventory(path):
+        nonlocal inventory_attempts
         if not armed:
-            return original_restore(self, destination, backup)
-        restore_attempts += 1
-        if restore_attempts == 1:
+            return original_inventory(path)
+        inventory_attempts += 1
+        if inventory_attempts == 1:
             raise KeyboardInterrupt
-        raise OSError("forced retry restoration failure")
+        raise OSError("forced retry inventory failure")
 
-    original_restore = filesystem.ProtectedSourceGuard._restore_entry
-    monkeypatch.setattr(
-        filesystem.ProtectedSourceGuard,
-        "_restore_entry",
-        fail_restore,
-    )
+    monkeypatch.setattr(filesystem, "source_tree_inventory", fail_inventory)
 
     def run(command, **kwargs):
         nonlocal armed
@@ -840,27 +818,16 @@ def test_doctor_interrupted_finalization_failed_retry_retains_actionable_backup(
 
     result = DoctorService(root, renderer(), run=run).execute("plugin")
 
-    assert restore_attempts == 2
+    assert inventory_attempts >= 2
     assert result.status == "partial"
     assert result.exit_code == 3
     assert result.rollback.status == "partial"
     payload = result.to_dict()
-    assert payload["cancellation"] == {
-        "requested": True,
-        "status": "partial",
-        "reason": (
-            "Doctor was interrupted and exact protected-source restoration "
-            "could not be verified."
-        ),
-    }
-    expected_residue = "android/app/src/main/kotlin/App.kt"
-    assert payload["actual_changes"] == [
-        {
-            "path": expected_residue,
-            "action": "update",
-            "ownership": "user source",
-        }
-    ]
+    assert payload["cancellation"]["requested"] is True
+    assert payload["cancellation"]["status"] == "partial"
+    assert "unverified" in payload["cancellation"]["reason"]
+    assert payload["actual_changes"] == []
+    assert payload["metadata"]["residue_verified"] is False
     recovery_path = Path(result.metadata["recovery_path"])
     assert lexists(recovery_path / "recovery-manifest.json")
     assert restore_protected_source_backup(recovery_path, root) == ()
@@ -891,49 +858,17 @@ def test_doctor_distinguishes_uninventoried_residue_from_verified_empty(
     armed = False
     finish_calls = 0
     recovery_paths: list[Path] = []
-    original_finish = filesystem.ProtectedSourceGuard.finish
-
-    if source_state == "live":
-        original_restore = filesystem.ProtectedSourceGuard._restore_entry
-        restore_interrupted = False
-
-        def interrupt_before_restore(self, destination, backup):
-            nonlocal restore_interrupted
-            if armed and not restore_interrupted:
-                restore_interrupted = True
-                recovery_paths.append(self.recovery_path)
-                raise KeyboardInterrupt
-            return original_restore(self, destination, backup)
-
-        monkeypatch.setattr(
-            filesystem.ProtectedSourceGuard,
-            "_restore_entry",
-            interrupt_before_restore,
-        )
-    else:
-        original_remove = filesystem.ProtectedSourceGuard._remove_temporary
-        cleanup_interrupted = False
-
-        def interrupt_after_restore(self):
-            nonlocal cleanup_interrupted
-            if armed and not cleanup_interrupted:
-                cleanup_interrupted = True
-                recovery_paths.append(self.recovery_path)
-                raise KeyboardInterrupt
-            return original_remove(self)
-
-        monkeypatch.setattr(
-            filesystem.ProtectedSourceGuard,
-            "_remove_temporary",
-            interrupt_after_restore,
-        )
-
     def interrupt_then_fail(self):
         nonlocal finish_calls
         finish_calls += 1
+        if finish_calls == 1:
+            recovery_paths.append(self.recovery_path)
+            if source_state == "restored":
+                assert restore_protected_source_backup(self.recovery_path, root) == ()
+            raise KeyboardInterrupt
         if finish_calls == 2:
             raise RuntimeError("guard retry sentinel")
-        return original_finish(self)
+        raise AssertionError("unexpected guard finish call")
 
     def inventory_unavailable(self):
         raise OSError("inventory unavailable")
@@ -971,14 +906,10 @@ def test_doctor_distinguishes_uninventoried_residue_from_verified_empty(
         "finalization_failed:guard retry sentinel",
         "inventory_failed:inventory unavailable",
     ]
-    integrity = next(
-        check
+    assert not any(
+        check["id"] == "doctor_source_integrity"
         for check in payload["doctor"]["checks"]
-        if check["id"] == "doctor_source_integrity"
     )
-    assert integrity["metadata"]["mutations"] == [
-        "modified:android/app/src/main/kotlin/App.kt"
-    ]
     assert (source_tree_inventory(root) == before_inventory) is (
         source_state == "restored"
     )
@@ -1032,7 +963,6 @@ def test_doctor_verified_empty_cleanup_failure_has_no_project_residue(
         if not armed and any(
             Path(part).name in {"gradlew", "gradlew.bat"} for part in command
         ):
-            source.write_text("val sentinel = 2\n", encoding="utf-8")
             armed = True
         return successful_run(command, **kwargs)
 
@@ -1048,14 +978,10 @@ def test_doctor_verified_empty_cleanup_failure_has_no_project_residue(
         "finalization_failed:guard retry sentinel"
     ]
     assert source_tree_inventory(root) == before_inventory
-    integrity = next(
-        check
+    assert not any(
+        check["id"] == "doctor_source_integrity"
         for check in payload["doctor"]["checks"]
-        if check["id"] == "doctor_source_integrity"
     )
-    assert integrity["metadata"]["mutations"] == [
-        "modified:android/app/src/main/kotlin/App.kt"
-    ]
     recovery_path = Path(payload["metadata"]["recovery_path"])
     assert recovery_paths and recovery_path == recovery_paths[0]
     assert lexists(recovery_path)

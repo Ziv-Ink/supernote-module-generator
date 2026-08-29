@@ -232,8 +232,20 @@ public:
   // @SupernotePluginExport
   std::int64_t revision;
 };
+
 }
 """,
+    )
+    functions = root / "android/src/main/cpp/functions.cpp"
+    functions.write_text(
+        functions.read_text(encoding="utf-8")
+        + """
+// @SupernotePluginExport
+std::vector<std::byte> echoBytes(std::vector<std::byte> value) {
+  return value;
+}
+""",
+        encoding="utf-8",
     )
 
     source = binding_codegen.render_v4_feature_jsi(
@@ -252,6 +264,44 @@ public:
     assert "bigint.isInt64(runtime)" in source
     assert "BigInt::fromInt64" in source
     assert "supernote_copy_uint8_array" in source
+    assert "supernote_array_has_own_index" in source
+    own_index = source.index("if (!supernote_array_has_own_index")
+    item_read = source.index("array.getValueAtIndex", own_index)
+    assert own_index < item_read
+    assert source.count('supernote_view_index(runtime, view, "byteOffset")') == 1
+    assert source.count('supernote_view_index(runtime, view, "byteLength")') == 1
+    first_budget = source.index("budget.check_byte_buffer(path, snapshot.length)")
+    allocation = source.index(
+        "return supernote_copy_uint8_array(runtime, snapshot)", first_budget
+    )
+    snapshot = source.rfind(
+        "auto snapshot = supernote_snapshot_uint8_array", 0, allocation
+    )
+    budget = source.index(
+        "budget.check_byte_buffer(path, snapshot.length)", snapshot, allocation
+    )
+    assert snapshot < budget < allocation
+    assert source.count("budget.check_byte_buffer(path, snapshot.length)") >= 2
+    validator = source.index("budget.check_byte_buffer(path, snapshot.length)")
+    validator_snapshot = source.rfind(
+        "auto snapshot = supernote_snapshot_uint8_array(runtime, value);",
+        0,
+        validator,
+    )
+    assert validator_snapshot != -1
+    assert "supernote_copy_uint8_array" not in source[validator_snapshot:validator]
+    accepts_start = source.index('"echoBytes.accepts"')
+    check_start = source.index('"echoBytes.checkArguments"')
+    accepts_end = source.index("\n        })", accepts_start)
+    check_end = source.index("\n        })", check_start)
+    for preflight in (
+        source[accepts_start:accepts_end],
+        source[check_start:check_end],
+    ):
+        assert preflight.count("supernote_validate_js_") == 1
+        assert "supernote_copy_uint8_array" not in preflight
+        assert "std::vector<std::byte> result" not in preflight
+    assert 'range ? "LIMIT_EXCEEDED" : "TYPE_MISMATCH"' in source
     assert "supernote_make_uint8_array" in source
     assert "supernote_v4_throw_conversion_failure" in source
     assert "supernote_validate_js_" in source

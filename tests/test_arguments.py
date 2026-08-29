@@ -58,6 +58,10 @@ def test_conflicting_single_value_option_is_rejected():
     ("arguments", "message"),
     [
         (["add", "local-math", "--description"], "--description requires a value"),
+        (
+            ["add", "local-math", "--description", "--yes"],
+            "--description requires a value",
+        ),
         (["add", "local-math", "--starter=rust"], 'invalid starter family "rust"'),
         (
             ["update", "local-math", "--package-manager=pnpm"],

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -62,14 +63,18 @@ def test_inventory_records_hash_mode_type_link_target_and_generator_owner(
     generated = inventory["local_modules/@scope/drawing/index.js"]
     assert generated.kind == "file"
     assert generated.sha256 == hashlib.sha256(
-        b"export const value = 42;\n"
+        (root / "local_modules/@scope/drawing/index.js").read_bytes()
     ).hexdigest()
     assert generated.generator_owner == "feature:@scope/drawing"
     assert inventory["local_modules/@scope/drawing/source.cpp"].generator_owner is None
     assert inventory["android/.supernote-module/v4-runtime/runtime.cpp"].generator_owner == (
         "shared-runtime"
     )
-    assert inventory["scripts/build.sh"].mode == 0o751
+    assert inventory["scripts/build.sh"].mode == stat.S_IMODE(
+        executable.lstat().st_mode
+    )
+    if os.name != "nt":
+        assert inventory["scripts/build.sh"].mode == 0o751
     assert inventory["runtime-link"].kind == "symlink"
     assert inventory["runtime-link"].symlink_target == (
         "android/.supernote-module/v4-runtime"
@@ -89,7 +94,10 @@ def test_inventory_is_stable_and_exposes_byte_level_project_changes(tmp_path: Pa
     generated = root / "local_modules/@scope/drawing/index.js"
     original_mode = generated.stat().st_mode
     generated.write_text("export const value = 43;\n", encoding="utf-8")
-    os.chmod(generated, original_mode ^ 0o100)
+    os.chmod(
+        generated,
+        stat.S_IREAD if os.name == "nt" else original_mode ^ stat.S_IXUSR,
+    )
 
     after = inventory_project(root)
     assert before != after

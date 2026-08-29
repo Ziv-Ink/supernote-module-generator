@@ -9,7 +9,12 @@ import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, Iterable, Mapping, Tuple
 
-from .filesystem import entry_kind, hash_entry_no_follow, lexists
+from .filesystem import (
+    entry_kind,
+    hash_entry_no_follow,
+    lexists,
+    read_contained_regular_bytes_no_follow,
+)
 
 
 class GenerationPlanError(ValueError):
@@ -164,6 +169,8 @@ class PlanPrecondition:
     path: str
     kind: str | None
     sha256: str | None
+    mode: int | None = None
+    content_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -596,13 +603,27 @@ def _capture_preconditions(
         _validate_managed_destination(root, relative)
         destination = root.joinpath(*PurePosixPath(relative).parts)
         baseline = baseline_by_path.get(relative)
+        live_kind = entry_kind(destination)
+        mode = (
+            stat.S_IMODE(destination.lstat().st_mode)
+            if live_kind is not None
+            else None
+        )
+        content_sha256 = None
+        if live_kind == "file":
+            content, _metadata = read_contained_regular_bytes_no_follow(
+                root, destination
+            )
+            content_sha256 = hashlib.sha256(content).hexdigest()
         rows.append(
             PlanPrecondition(
                 relative,
-                baseline[0] if baseline is not None else entry_kind(destination),
+                baseline[0] if baseline is not None else live_kind,
                 baseline[1]
                 if baseline is not None
                 else hash_entry_no_follow(destination),
+                mode,
+                content_sha256,
             )
         )
     return tuple(rows)

@@ -268,7 +268,12 @@ class FeatureCliOperationService:
             with self.progress.phase("Generating feature", "Generated feature"):
                 created = self.features.add(config, transaction=transaction)
                 add_dependency(self.root, decisions.package_name)
-                transaction.mark_write()
+                transaction.record_snapshot_results(
+                    [
+                        self.root / "package.json",
+                        *integration_mutation_files(self.root),
+                    ]
+                )
                 transaction.checkpoint("after_dependency_edit")
                 jvm_manifests = V4CliOperationService(
                     self.root
@@ -1557,6 +1562,27 @@ class FeatureCliOperationService:
         *,
         reconcile: bool = False,
     ) -> tuple[RollbackResult, list[Change]]:
+        if baseline is not None:
+            try:
+                transaction.preserve_rollback_external_changes(baseline)
+            except BaseException:
+                try:
+                    transaction.retain_conflict()
+                except BaseException:
+                    pass
+                remaining = source_tree_changes(
+                    baseline, source_tree_inventory(self.root)
+                )
+                residue = [
+                    Change(
+                        str(self.root / item.partition(":")[2]),
+                        "update",
+                        "rollback_residue",
+                    )
+                    for item in remaining
+                    if item.partition(":")[1]
+                ]
+                return RollbackResult(True, "partial", []), residue
         rollback = transaction.rollback(
             reconcile=self._reconcile if reconcile else None
         )

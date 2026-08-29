@@ -2496,7 +2496,7 @@ def _argument_lines(parameters, offset: int) -> list[str]:
         elif item.type is SemanticType.BYTES:
             lines.append(
                 f"            const auto argument_{index} = "
-                f"supernote_copy_uint8_array(runtime, arguments[{index}]);"
+                f"supernote_copy_uint8_array(runtime, supernote_snapshot_{index});"
             )
             value = f"write_byte_array(env, argument_{index}.data(), argument_{index}.size())"
         else:

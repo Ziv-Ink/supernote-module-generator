@@ -1358,6 +1358,58 @@ def test_common_codegen_builds_readme_from_ksp_jvm_manifest(tmp_path: Path):
         / f"generated/jni/jvm_feature_{suffix}.cpp"
     ).is_file()
 
+    kotlin = feature_root / feature.roots.jvm / "FeatureApi.kt"
+    kotlin.write_text(
+        "package com.example.jvm_files\n\n"
+        "fun unexportedHelper(page: Int): Int = page\n",
+        encoding="utf-8",
+    )
+    empty_manifest = JvmSourceManifest(feature.feature_id, "4.0.0-dev.0", ())
+    empty_plan = generator.plan(
+        operation="update",
+        requested_targets=("@local/jvm-files",),
+        jvm_manifests={feature.feature_id: empty_manifest},
+    )
+    generator.execute(
+        empty_plan,
+        Transaction(tmp_path, "update", ("@local/jvm-files",)),
+    )
+
+    assert "loadPage" not in (feature_root / "index.d.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "loadPage" not in (feature_root / "README.md").read_text(
+        encoding="utf-8"
+    )
+    semantic = json.loads(
+        (
+            tmp_path
+            / RUNTIME_RELATIVE_ROOT
+            / f"generated/semantics/{suffix}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert semantic["functions"] == []
+    assert semantic["classes"] == []
+    assert semantic["types"] == []
+    assert not (
+        tmp_path
+        / RUNTIME_RELATIVE_ROOT
+        / f"generated/jni/jvm_feature_{suffix}.cpp"
+    ).exists()
+    plugin_bindings = (
+        tmp_path / RUNTIME_RELATIVE_ROOT / "generated/jni/plugin_bindings.cpp"
+    ).read_text(encoding="utf-8")
+    assert f"jvm_feature_{suffix}" not in plugin_bindings
+    ownership = json.loads(
+        (tmp_path / RUNTIME_RELATIVE_ROOT / "ownership.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        f"generated/jni/jvm_feature_{suffix}.cpp"
+        not in ownership["generated_files"]
+    )
+
 
 def test_common_codegen_emits_hidden_cpp_internal_facade(tmp_path: Path):
     (tmp_path / "android/app").mkdir(parents=True)

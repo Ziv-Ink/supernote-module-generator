@@ -14,7 +14,11 @@ from supernote_module_generator.errors import SubprocessFailure, SymlinkPreserva
 from supernote_module_generator.feature_cli_operations import FeatureCliOperationService
 from supernote_module_generator.feature_generator import FeatureConfig, stage_feature
 from supernote_module_generator.feature_model import StarterFamily
-from supernote_module_generator.filesystem import entry_kind, source_tree_inventory
+from supernote_module_generator.filesystem import (
+    entry_kind,
+    source_tree_changes,
+    source_tree_inventory,
+)
 from supernote_module_generator.feature_workflows import FeatureDecisionCollector
 from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.platform_tools import gradle_wrapper_path
@@ -174,7 +178,7 @@ def test_add_and_update_render_semantic_api_without_gradle_source_writes(
     assert (root / ".supernote-module/manifest.json").is_file()
 
 
-def test_failed_api_documentation_refresh_restores_the_previous_readme(
+def test_failed_api_documentation_refresh_preserves_a_concurrent_readme_save(
     tmp_path: Path, monkeypatch
 ):
     root = plugin(tmp_path)
@@ -190,7 +194,6 @@ def test_failed_api_documentation_refresh_restores_the_previous_readme(
     readme = feature / "README.md"
     before = readme.read_bytes()
     other_readme = root / "local_modules/other/README.md"
-    other_before = other_readme.read_bytes()
     source = feature / "android/src/main/cpp/feature.cpp"
     source.write_text(
         source.read_text(encoding="utf-8")
@@ -212,10 +215,10 @@ def test_failed_api_documentation_refresh_restores_the_previous_readme(
         root, ["update", "document", "--skip-install", "--yes"]
     )
 
-    assert code == 1
+    assert code == 3
     assert "forced semantic failure" in stderr
     assert readme.read_bytes() == before
-    assert other_readme.read_bytes() == other_before
+    assert other_readme.read_bytes() == b"partially regenerated\n"
     assert "double total" in source.read_text(encoding="utf-8")
 
 
@@ -470,7 +473,7 @@ def test_targeted_update_never_snapshots_ignored_feature_build_cache(tmp_path: P
 
 
 @pytest.mark.parametrize("mutation_target", ["other_feature", "application"])
-def test_update_build_mutation_rolls_back_every_protected_source(
+def test_update_build_mutation_preserves_unattributed_live_source(
     tmp_path: Path,
     monkeypatch,
     mutation_target: str,
@@ -507,15 +510,18 @@ def test_update_build_mutation_rolls_back_every_protected_source(
     )
     payload = json.loads(stdout)
 
-    assert code == 1, (stderr, payload)
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
+    assert code == 3, (stderr, payload)
+    assert payload["rollback"]["status"] == "partial"
     assert payload["error"]["kind"] == "build_failed"
     assert payload["issues"][0]["code"] == "SNV4_BUILD_MUTATED_SOURCE"
     assert payload["requested_targets"] == ["alpha"]
     assert payload["affected_targets"]
     assert payload["diagnostics"]
-    assert source_tree_inventory(root) == before
+    after = source_tree_inventory(root)
+    assert source_tree_changes(before, after) == (
+        f"modified:{target.relative_to(root).as_posix()}",
+    )
+    assert target.read_text().endswith("// build mutation\n")
 
 
 def test_update_build_failure_preserves_structured_plan_and_diagnostics(
@@ -555,7 +561,7 @@ def test_update_build_failure_preserves_structured_plan_and_diagnostics(
     assert payload["next_action"]
 
 
-def test_add_build_mutation_restores_unrelated_application_source(
+def test_add_build_mutation_preserves_unattributed_application_source(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -586,13 +592,16 @@ def test_add_build_mutation_restores_unrelated_application_source(
     )
     payload = json.loads(stdout)
 
-    assert code == 1, stderr
-    assert payload["rollback"]["status"] == "completed"
-    assert payload["actual_changes"] == []
+    assert code == 3, stderr
+    assert payload["rollback"]["status"] == "partial"
     assert payload["error"]["kind"] == "build_failed"
     assert payload["requested_targets"] == ["alpha"]
     assert payload["diagnostics"]
-    assert source_tree_inventory(root) == before
+    after = source_tree_inventory(root)
+    assert source_tree_changes(before, after) == (
+        f"modified:{application.relative_to(root).as_posix()}",
+    )
+    assert application.read_text().endswith("// build mutation\n")
 
 
 def test_unsupported_platform_symlink_capability_fails_before_transaction(

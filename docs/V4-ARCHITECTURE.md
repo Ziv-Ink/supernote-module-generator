@@ -146,16 +146,20 @@ tests, and regression history remain useful only when they satisfy V4 decisions.
 ## Static contract boundaries
 
 The checked-in Ruff gate applies Python correctness checks to all active source
-and tests. The gradual mypy boundary covers the public CLI grammar and canonical
-V4 identity, semantic IR, artifact plan, integrity manifest, template
-capability, transaction, and command-result models. Those lower-level contracts must not import terminal
-rendering, Doctor, or operation orchestration. CI runs both gates on every
-supported Python version.
+and tests. The gradual mypy boundary covers the public CLI grammar, canonical V4
+identity, semantic IR, artifact plan, integrity manifest, descriptor-bound
+filesystem observation, recovery-registry schema, transaction engine, template
+capability, generation execution, and command-result models. Low-level
+contracts must not import terminal rendering, Doctor, or operation
+orchestration. Generation execution consumes those contracts without reversing
+that dependency. CI runs both gates on every supported Python version.
 
 Artifact planning is split into independently typed phases for artifact
 identity, dependency edits, wiring edits, tree-removal authority, stale-file
-comparison, and execution preconditions. A dedicated CI complexity check keeps
-that decision module below the checked-in McCabe ceiling.
+comparison, and execution preconditions. Generation execution separately
+exposes staging, detach, conditional activation, and completion-checkpoint
+phases. Dedicated CI complexity checks keep both orchestration entry points
+below the checked-in McCabe ceiling.
 
 The public command grammar is likewise separated into command discovery, token
 collection, positional policy, output-mode policy, and value validation. Its
@@ -331,7 +335,8 @@ closed.
 
 A release is an exact-commit product, not a version string attached to an
 unrelated green run. The reusable quality workflow verifies the checked-out
-`github.sha`, runs the supported-Python test/static/coverage matrix, and checks
+`github.sha`, runs the supported-Python test/static matrix, combines complete
+Linux branch coverage with native macOS/Windows platform coverage, and checks
 native path, lock, symlink-capability, spaces, Unicode, long-path, Bash, and
 PowerShell boundaries on
 Ubuntu, macOS, and Windows. It builds and installs the wheel and source
@@ -343,6 +348,24 @@ bundles, so a fresh runner never depends on an unpublished local object. Every
 root-README and Wiki CLI example is source-inventoried, grammar-checked, and
 classified; placeholders and environment/device/build commands retain an
 explicit non-runnable reason and are covered by their corresponding fixture.
+
+Filesystem observation is identity-bound on every qualified host. POSIX tree
+enumeration and metadata restoration use retained no-follow descriptors.
+Windows uses retained native handles, enumerates directories from those
+handles, rejects every reparse-point component (including junctions), and sets
+supported timestamps and read-only state through the same handle. Symlink text
+is read from the retained link descriptor/handle rather than its pathname.
+Read-induced atime cleanup updates only atime, so it cannot replay a sampled
+mtime over a concurrent owner update. Copied-file metadata is applied through
+the retained destination identity and publication is re-observed before
+success. A pathname metadata fallback is never used after validation. The
+filesystem complexity ratchet permits only five named pre-existing debt items;
+the formerly monolithic descriptor-bound inventory is split into retained
+symlink, regular-file, directory, and traversal decisions. Recovery registry
+identity and pointer-schema decisions live below the transaction engine in an
+independently typed module. A second ratchet records the remaining transaction
+debt exactly and requires both the registry module and generation orchestration
+to introduce no new complexity findings.
 The root-README and pinned-Wiki
 fixtures must be true no-ops on their second update, pass JavaScript and
 TypeScript checks, compile Gradle/KSP/Kotlin/CMake/JNI/JSI through the read-only

@@ -271,6 +271,7 @@ class V4CliOperationService:
                 result,
                 build=build,
                 rollback=rollback,
+                project=classification_project,
             )
             return self._validation_restore_failure_result(
                 authoritative,
@@ -285,6 +286,7 @@ class V4CliOperationService:
                 result,
                 build=build,
                 rollback=RollbackResult(True, "completed", []),
+                project=classification_project,
             )
             return self._validation_finalization_cancelled_result(
                 authoritative,
@@ -299,6 +301,7 @@ class V4CliOperationService:
                 result,
                 build=build,
                 rollback=RollbackResult(True, "completed", []),
+                project=classification_project,
             )
             return self._validation_restored_mutation_result(
                 authoritative,
@@ -312,6 +315,7 @@ class V4CliOperationService:
             result,
             build=build,
             rollback=rollback,
+            project=classification_project,
         )
 
     @staticmethod
@@ -448,6 +452,7 @@ class V4CliOperationService:
         *,
         build: bool,
         rollback: RollbackResult,
+        project: ProjectModel | None = None,
     ) -> CommandResult:
         issues = [issue.manifest() for issue in result.issues]
         structural_failed = any(
@@ -468,7 +473,7 @@ class V4CliOperationService:
             build=result.build,
             issues=issues,
         )
-        affected_targets = self._affected_targets(result.issues)
+        affected_targets = self._affected_targets(result.issues, project=project)
         only_dependency_issues = bool(result.issues) and all(
             issue.code.startswith("SNV4_DEPENDENCY")
             for issue in result.issues
@@ -1261,6 +1266,20 @@ class V4CliOperationService:
                 )
             if not isinstance(exc, Exception):
                 raise
+            if isinstance(exc, PlanConflictError):
+                return CommandResult(
+                    command,
+                    status="failure" if rollback.status == "completed" else "partial",
+                    exit_code=1 if rollback.status == "completed" else 3,
+                    changes=[*changes, *residue],
+                    rollback=rollback,
+                    error=ErrorInfo("plan_conflict", "precommit", str(exc)),
+                    next_action=(
+                        "The project changed during publication. Preserve the external "
+                        "edit, complete any retained recovery action, and rerun the command."
+                    ),
+                    metadata=metadata,
+                )
             return CommandResult(
                 command,
                 status="failure" if rollback.status == "completed" else "partial",
@@ -1369,13 +1388,19 @@ class V4CliOperationService:
         )
         return load_jvm_frontend_manifests(project, manifest_root)
 
-    def _affected_targets(self, issues) -> list[str]:
-        try:
-            project = ProjectModel.discover(self.root)
-        except Exception:
-            return sorted(
-                {issue.feature_id for issue in issues if issue.feature_id is not None}
-            )
+    def _affected_targets(
+        self,
+        issues,
+        *,
+        project: ProjectModel | None = None,
+    ) -> list[str]:
+        if project is None:
+            try:
+                project = ProjectModel.discover(self.root)
+            except Exception:
+                return sorted(
+                    {issue.feature_id for issue in issues if issue.feature_id is not None}
+                )
         names = {
             feature.identity.feature_id: feature.identity.npm_name
             for feature in project.features
@@ -1790,6 +1815,20 @@ class V4CliOperationService:
         baseline,
         directory_metadata=None,
     ) -> tuple[RollbackResult, list[Change]]:
+        try:
+            transaction.preserve_rollback_external_changes(baseline)
+        except BaseException:
+            try:
+                transaction.retain_conflict()
+            except BaseException:
+                pass
+            remaining = source_tree_changes(
+                baseline, source_tree_inventory(self.root)
+            )
+            return (
+                RollbackResult(True, "partial", []),
+                self._changes_from_mutations(remaining),
+            )
         rollback = transaction.rollback()
         try:
             remaining = source_tree_changes(

@@ -35,14 +35,19 @@ files = [
     "src/supernote_module_generator/cpp_source_routing.py",
     "src/supernote_module_generator/cpp_type_syntax.py",
     "src/supernote_module_generator/feature_identity.py",
+    "src/supernote_module_generator/filesystem.py",
+    "src/supernote_module_generator/filesystem_inventory.py",
     "src/supernote_module_generator/semantic_ir.py",
     "src/supernote_module_generator/generation_plan.py",
+    "src/supernote_module_generator/generation_execution.py",
+    "src/supernote_module_generator/generation_service.py",
     "src/supernote_module_generator/integrity_manifest.py",
     "src/supernote_module_generator/jsi_binding_decisions.py",
     "src/supernote_module_generator/models.py",
     "src/supernote_module_generator/semantic_types.py",
     "src/supernote_module_generator/template_contract.py",
     "src/supernote_module_generator/transaction.py",
+    "src/supernote_module_generator/transaction_registry.py",
 ]
 check_untyped_defs = true
 disallow_any_generics = true

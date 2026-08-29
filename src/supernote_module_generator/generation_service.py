@@ -3,10 +3,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-import os
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
-import shutil
 import tempfile
 from typing import Iterable, Mapping
 import hashlib
@@ -14,12 +12,12 @@ import stat
 
 from . import __version__
 from . import binding_codegen
-from .errors import ConfigurationError
+from .errors import ConfigurationError, FilesystemError
 from .conversion import plan_api_conversion
 from .cross_family_codegen import build_cross_family_renderer
 from .feature_generator import FeatureConfig, stage_feature
 from .feature_model import FeatureRegistryEntry, PluginRuntimeRegistry, StarterFamily
-from .feature_operations import FeatureOperationService
+from .feature_operations import FeatureOperationService, FeatureRecord
 from .frontend_discovery import discover_semantic_ir
 from .internal_codegen import internal_header_path, render_cpp_internal_facade
 from .jvm_codegen import render_jvm_feature_jsi
@@ -33,7 +31,9 @@ from .generation_plan import (
     PlanConflictError,
     WiringAction,
 )
+from .generation_execution import GenerationPlanExecutor
 from .filesystem import (
+    contained_directory_entries_no_follow,
     contained_entry_kind_no_follow,
     entry_kind,
     hash_entry_no_follow,
@@ -59,7 +59,7 @@ from .project_model import ProjectModel
 from .project import dependency_value, read_parent_package
 from .readme_codegen import render_feature_readme
 from .semantic import SemanticApi
-from .semantic_ir import SemanticIR
+from .semantic_ir import FeatureSemanticIR, SemanticIR
 from .transaction import Transaction
 from .typescript_codegen import render_typescript
 
@@ -71,6 +71,16 @@ FEATURE_GENERATED_FILES = (
     "package.json",
     "README.md",
 )
+
+
+def _present_jvm_manifest(
+    manifest: JvmSourceManifest | None,
+) -> JvmSourceManifest | None:
+    """Return only manifests that describe a live JVM declaration owner."""
+
+    if manifest is None or manifest.owners:
+        return manifest
+    return None
 
 
 class GenerationService:
@@ -395,101 +405,11 @@ class GenerationService:
     ) -> None:
         """Stage, verify, and commit all file-level plan changes once."""
 
-        staging = Path(
-            tempfile.mkdtemp(prefix=".v4-plan-", dir=self.root)
-        )
-        transaction.track_created(staging)
-        try:
-            rendered = {artifact.path: artifact for artifact in plan.artifacts}
-            for artifact in plan.artifacts:
-                target = staging.joinpath(*PurePosixPath(artifact.path).parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(artifact.content)
-                if artifact.expected_mode is not None:
-                    target.chmod(artifact.expected_mode)
-                if target.read_bytes() != artifact.content:
-                    raise RuntimeError(f"staged artifact verification failed: {artifact.path}")
-            for action in plan.dependency_actions:
-                target = staging.joinpath(*PurePosixPath(action.path).parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(action.content)
-                target.chmod(action.previous_mode)
-                if target.read_bytes() != action.content:
-                    raise RuntimeError(
-                        f"staged dependency verification failed: {action.path}"
-                    )
-            for action in plan.wiring_actions:
-                target = staging.joinpath(*PurePosixPath(action.path).parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(action.content)
-                target.chmod(action.previous_mode)
-                if target.read_bytes() != action.content:
-                    raise RuntimeError(
-                        f"staged wiring verification failed: {action.path}"
-                    )
-            transaction.checkpoint("after_staging")
-            self.validate_preconditions(plan)
-            manifest_path = INTEGRITY_MANIFEST_PATH
-            ordered = sorted(
-                plan.changes,
-                key=lambda change: (change.path == manifest_path, change.path),
-            )
-            replaced = False
-            manifest_change = next(
-                (change for change in ordered if change.path == manifest_path),
-                None,
-            )
-            for change in ordered:
-                if change.path == manifest_path:
-                    continue
-                if change.action.value == "delete":
-                    transaction.detach(
-                        self.root.joinpath(*PurePosixPath(change.path).parts)
-                    )
-                    continue
-                artifact = rendered[change.path]
-                transaction.replace(
-                    staging.joinpath(*PurePosixPath(change.path).parts),
-                    self.root.joinpath(*PurePosixPath(change.path).parts),
-                )
-                if not replaced:
-                    replaced = True
-                    transaction.checkpoint("after_first_file_replacement")
-            for action in plan.dependency_actions:
-                transaction.replace(
-                    staging.joinpath(*PurePosixPath(action.path).parts),
-                    self.root.joinpath(*PurePosixPath(action.path).parts),
-                )
-                transaction.checkpoint("after_dependency_edit")
-            for action in plan.tree_removals:
-                transaction.detach(
-                    self.root.joinpath(*PurePosixPath(action.path).parts)
-                )
-                if not replaced:
-                    replaced = True
-                    transaction.checkpoint("after_first_file_replacement")
-            for action in plan.wiring_actions:
-                transaction.replace(
-                    staging.joinpath(*PurePosixPath(action.path).parts),
-                    self.root.joinpath(*PurePosixPath(action.path).parts),
-                )
-                transaction.checkpoint("after_wiring")
-            if manifest_change is not None:
-                transaction.checkpoint("before_manifest_write")
-                transaction.replace(
-                    staging.joinpath(*PurePosixPath(manifest_path).parts),
-                    self.root.joinpath(*PurePosixPath(manifest_path).parts),
-                )
-                if not replaced:
-                    transaction.checkpoint("after_first_file_replacement")
-                # The integrity manifest is the final visible write belonging
-                # to the complete semantic generation.
-                transaction.checkpoint("after_manifest_write")
-            shutil.rmtree(staging)
-            if commit:
-                transaction.commit()
-        except BaseException:
-            raise
+        GenerationPlanExecutor(
+            self.root,
+            validate_preconditions=self.validate_preconditions,
+            validate_path_precondition=self._validate_path_precondition,
+        ).execute(plan, transaction, commit=commit)
 
     def validate_preconditions(self, plan: GenerationPlan) -> None:
         """Reject plan-to-execution races before the first visible write."""
@@ -504,45 +424,55 @@ class GenerationService:
                 ),
             )
         for precondition in plan.preconditions:
-            destination = self.root.joinpath(*PurePosixPath(precondition.path).parts)
-            live_kind = entry_kind(destination)
-            live_hash = hash_entry_no_follow(destination)
-            if (
-                live_kind != precondition.kind
-                or live_hash != precondition.sha256
-            ):
-                raise PlanConflictError(
-                    f"project state changed after planning: {precondition.path}"
-                )
-        for action in plan.dependency_actions:
+            self._validate_path_precondition(plan, precondition.path)
+        self._validate_edit_preconditions(
+            "dependency",
+            plan.dependency_actions,
+        )
+        self._validate_edit_preconditions("wiring", plan.wiring_actions)
+
+    def _validate_edit_preconditions(
+        self,
+        label: str,
+        actions: Iterable[DependencyAction | WiringAction],
+    ) -> None:
+        for action in actions:
             destination = self.root.joinpath(*PurePosixPath(action.path).parts)
             if entry_kind(destination) != "file":
                 raise PlanConflictError(
-                    f"dependency destination changed after planning: {action.path}"
+                    f"{label} destination changed after planning: {action.path}"
                 )
             if destination.read_bytes() != action.previous:
                 raise PlanConflictError(
-                    f"dependency file changed after planning: {action.path}"
+                    f"{label} file changed after planning: {action.path}"
                 )
             if stat.S_IMODE(destination.stat().st_mode) != action.previous_mode:
                 raise PlanConflictError(
-                    f"dependency file mode changed after planning: {action.path}"
+                    f"{label} file mode changed after planning: {action.path}"
                 )
 
-        for action in plan.wiring_actions:
-            destination = self.root.joinpath(*PurePosixPath(action.path).parts)
-            if entry_kind(destination) != "file":
-                raise PlanConflictError(
-                    f"wiring destination changed after planning: {action.path}"
-                )
-            if destination.read_bytes() != action.previous:
-                raise PlanConflictError(
-                    f"wiring file changed after planning: {action.path}"
-                )
-            if stat.S_IMODE(destination.stat().st_mode) != action.previous_mode:
-                raise PlanConflictError(
-                    f"wiring file mode changed after planning: {action.path}"
-                )
+    def _validate_path_precondition(
+        self,
+        plan: GenerationPlan,
+        relative: str,
+    ) -> None:
+        """Revalidate one immutable plan authority at its mutation boundary."""
+
+        precondition = next(
+            (item for item in plan.preconditions if item.path == relative),
+            None,
+        )
+        if precondition is None:
+            raise PlanConflictError(
+                f"project plan lacks mutation authority: {relative}"
+            )
+        destination = self.root.joinpath(*PurePosixPath(relative).parts)
+        live_kind = entry_kind(destination)
+        live_hash = hash_entry_no_follow(destination)
+        if live_kind != precondition.kind or live_hash != precondition.sha256:
+            raise PlanConflictError(
+                f"project state changed after planning: {relative}"
+            )
 
     def _dependency_actions(
         self,
@@ -598,7 +528,9 @@ class GenerationService:
         artifacts: list[OwnedArtifact] = []
         registry_entries = []
         manifest_features = []
-        runtime_semantics: list[tuple[object, object]] = []
+        runtime_semantics: list[
+            tuple[FeatureRecord, FeatureSemanticIR, JvmSourceManifest | None]
+        ] = []
         for project_feature in project.features:
             record = service.find_record(project_feature.identity.npm_name)
             semantic = by_id[project_feature.identity.feature_id]
@@ -694,6 +626,10 @@ class GenerationService:
         for raw_record, raw_semantic, source_manifest in runtime_semantics:
             record = raw_record
             semantic = raw_semantic
+            # KSP deliberately emits an authoritative empty manifest when a
+            # feature has no remaining JVM declarations.  It must clear stale
+            # JVM semantics without creating an otherwise empty JNI route.
+            source_manifest = _present_jvm_manifest(source_manifest)
             feature_id = record.manifest.feature_id
             feature_ids.append(feature_id)
             suffix = feature_id.removeprefix("supernote:feature:")
@@ -781,13 +717,13 @@ class GenerationService:
             json.dumps(ownership, indent=2, sort_keys=True) + "\n"
         )
         runtime_root = RUNTIME_RELATIVE_ROOT.as_posix()
-        for relative, content in sorted(runtime_files.items()):
+        for relative, runtime_content in sorted(runtime_files.items()):
             artifacts.append(
                 OwnedArtifact(
                     f"{runtime_root}/{relative}",
                     "shared-runtime",
                     _runtime_kind(relative),
-                    content.encode("utf-8"),
+                    runtime_content.encode("utf-8"),
                     semantic_ir.generation_id,
                     expected_mode=(0o755 if relative == "common_codegen.py" else None),
                 )
@@ -850,17 +786,15 @@ def _feature_discovery_frontier(root: Path) -> tuple[str, ...]:
     if root_kind != "directory":
         return tuple(rows)
 
-    def children(directory: Path) -> list[os.DirEntry[str]]:
+    def children(directory: Path) -> list[tuple[str, str]]:
         try:
-            with os.scandir(directory) as stream:
-                return sorted(stream, key=lambda entry: entry.name)
-        except OSError as exc:
+            return list(contained_directory_entries_no_follow(root, directory))
+        except (FilesystemError, OSError) as exc:
             raise GenerationPlanError(
                 f"cannot inspect feature discovery frontier {directory}: {exc}"
             ) from exc
 
-    def record_candidate(path: Path, relative: str) -> None:
-        kind = entry_kind(path)
+    def record_candidate(path: Path, relative: str, kind: str) -> None:
         rows.append(f"{relative}|{kind or 'missing'}")
         if kind != "directory":
             return
@@ -871,21 +805,21 @@ def _feature_discovery_frontier(root: Path) -> tuple[str, ...]:
             f"{hash_entry_no_follow(manifest) or '-'}"
         )
 
-    for entry in children(local_modules):
-        path = Path(entry.path)
-        relative = f"local_modules/{entry.name}"
-        kind = entry_kind(path)
-        if entry.name.startswith("@"):
+    for name, kind in children(local_modules):
+        path = local_modules / name
+        relative = f"local_modules/{name}"
+        if name.startswith("@"):
             rows.append(f"{relative}|{kind or 'missing'}")
             if kind == "directory":
-                for package_entry in children(path):
-                    package_path = Path(package_entry.path)
+                for package_name, package_kind in children(path):
+                    package_path = path / package_name
                     record_candidate(
                         package_path,
-                        f"{relative}/{package_entry.name}",
+                        f"{relative}/{package_name}",
+                        package_kind,
                     )
             continue
-        record_candidate(path, relative)
+        record_candidate(path, relative, kind)
     return tuple(rows)
 
 

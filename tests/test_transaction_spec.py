@@ -6,11 +6,12 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 
 import pytest
 
 from supernote_module_generator.cli import main
-from supernote_module_generator.errors import FilesystemError
+from supernote_module_generator.errors import ConcurrentSourceMutation, FilesystemError
 import supernote_module_generator.transaction as transaction_module
 import supernote_module_generator.filesystem as filesystem_module
 from supernote_module_generator.errors import ConfigurationError
@@ -23,6 +24,7 @@ from supernote_module_generator.filesystem import (
     protected_directory_metadata,
     restore_protected_directory_metadata,
     retain_directory_metadata_recovery,
+    validate_transaction_metadata_recovery,
     hash_entry_no_follow,
     source_tree_inventory,
 )
@@ -288,6 +290,25 @@ def test_transaction_snapshot_and_rollback_preserve_direct_symlink_entries(
     assert (target_directory / "sentinel").read_text(encoding="utf-8") == (
         "untouched\n"
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink metadata contract")
+def test_direct_symlink_copy_preserves_exact_metadata_after_target_observation(
+    tmp_path: Path,
+):
+    source = tmp_path / "source-link"
+    destination = tmp_path / "destination-link"
+    source.symlink_to("relative-target")
+    expected_times = (11_000_000_000, 12_000_000_000)
+    os.utime(source, ns=expected_times, follow_symlinks=False)
+    expected = source.lstat()
+
+    copy_entry_no_follow(source, destination)
+
+    copied = destination.lstat()
+    assert os.readlink(destination) == "relative-target"
+    assert stat.S_IMODE(copied.st_mode) == stat.S_IMODE(expected.st_mode)
+    assert (copied.st_atime_ns, copied.st_mtime_ns) == expected_times
 
 
 def test_snapshot_deduplicates_repeated_lexical_paths_in_one_call(tmp_path: Path):
@@ -817,6 +838,312 @@ def test_recovery_pointer_is_bound_to_transaction_metadata_bundle_before_mutatio
     assert recovery.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
+def test_recovery_registry_rejects_a_forged_shared_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    identity = str(os.getuid())
+    registry = tmp_path / f"supernote-module-v4-recovery-v2-{identity}"
+    registry.mkdir(mode=0o777)
+    registry.chmod(0o777)
+    sentinel = registry / "sentinel"
+    sentinel.write_bytes(b"untrusted\n")
+    before = sentinel.lstat()
+    monkeypatch.setattr(transaction_module.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    with pytest.raises(FilesystemError, match="not private"):
+        transaction_module._recovery_registry()
+
+    after = sentinel.lstat()
+    assert sentinel.read_bytes() == b"untrusted\n"
+    assert stat.S_IMODE(registry.lstat().st_mode) == 0o777
+    assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+        before.st_mode,
+        before.st_atime_ns,
+        before.st_mtime_ns,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
+def test_metadata_recovery_rejects_a_world_accessible_bundle(
+    tmp_path: Path,
+):
+    metadata = protected_directory_metadata(tmp_path)
+    transaction_id = "1" * 32
+    recovery, bundle_id, digest = retain_directory_metadata_recovery(
+        tmp_path,
+        metadata,
+        transaction_id=transaction_id,
+        outcome="rollback",
+    )
+    recovery.chmod(0o777)
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"preserve\n")
+    before = sentinel.lstat()
+
+    with pytest.raises(FilesystemError, match="ancestry is unsafe"):
+        validate_transaction_metadata_recovery(
+            recovery,
+            tmp_path,
+            transaction_id=transaction_id,
+            outcome="rollback",
+            bundle_id=bundle_id,
+            manifest_sha256=digest,
+        )
+
+    after = sentinel.lstat()
+    assert sentinel.read_bytes() == b"preserve\n"
+    assert (after.st_mode, after.st_atime_ns, after.st_mtime_ns) == (
+        before.st_mode,
+        before.st_atime_ns,
+        before.st_mtime_ns,
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda _manifest: b"not-json\n", "manifest is invalid"),
+        (lambda _manifest: b"[]\n", "binding is invalid"),
+        (
+            lambda manifest: {
+                **manifest,
+                "schema_version": 3,
+            },
+            "binding is invalid",
+        ),
+        (
+            lambda manifest: {
+                **manifest,
+                "entries": [{"destination": "source.cpp"}],
+            },
+            "binding is invalid",
+        ),
+        (
+            lambda manifest: {
+                **manifest,
+                "directories": [{"destination": ".", "mode": 0o700}],
+            },
+            "entry is invalid",
+        ),
+        (
+            lambda manifest: {
+                **manifest,
+                "directories": [
+                    {
+                        "destination": ".",
+                        "mode": True,
+                        "atime_ns": 1,
+                        "mtime_ns": 2,
+                    }
+                ],
+            },
+            "entry is invalid",
+        ),
+        (
+            lambda manifest: {
+                **manifest,
+                "directories": [
+                    manifest["directories"][0],
+                    manifest["directories"][0],
+                ],
+            },
+            "entries are duplicated",
+        ),
+    ],
+)
+def test_metadata_recovery_rejects_invalid_manifest_shapes_without_mutation(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"preserve\n")
+    sentinel_before = sentinel.lstat()
+    transaction_id = "2" * 32
+    recovery, bundle_id, _digest = retain_directory_metadata_recovery(
+        tmp_path,
+        protected_directory_metadata(tmp_path),
+        transaction_id=transaction_id,
+        outcome="rollback",
+    )
+    manifest_path = recovery / "recovery-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    changed = mutation(manifest)
+    if isinstance(changed, bytes):
+        payload = changed
+    else:
+        payload = (json.dumps(changed, indent=2, sort_keys=True) + "\n").encode()
+    manifest_path.write_bytes(payload)
+    manifest_path.chmod(0o600)
+
+    with pytest.raises(FilesystemError, match=message):
+        validate_transaction_metadata_recovery(
+            recovery,
+            tmp_path,
+            transaction_id=transaction_id,
+            outcome="rollback",
+            bundle_id=bundle_id,
+            manifest_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    sentinel_after = sentinel.lstat()
+    assert sentinel.read_bytes() == b"preserve\n"
+    assert (
+        sentinel_after.st_mode,
+        sentinel_after.st_atime_ns,
+        sentinel_after.st_mtime_ns,
+    ) == (
+        sentinel_before.st_mode,
+        sentinel_before.st_atime_ns,
+        sentinel_before.st_mtime_ns,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX private-file mode contract")
+def test_metadata_recovery_rejects_a_nonprivate_manifest(tmp_path: Path) -> None:
+    transaction_id = "3" * 32
+    recovery, bundle_id, digest = retain_directory_metadata_recovery(
+        tmp_path,
+        protected_directory_metadata(tmp_path),
+        transaction_id=transaction_id,
+        outcome="commit",
+    )
+    (recovery / "recovery-manifest.json").chmod(0o644)
+
+    with pytest.raises(FilesystemError, match="manifest is not private"):
+        validate_transaction_metadata_recovery(
+            recovery,
+            tmp_path,
+            transaction_id=transaction_id,
+            outcome="commit",
+            bundle_id=bundle_id,
+            manifest_sha256=digest,
+        )
+
+
+def test_metadata_recovery_rejects_an_unavailable_manifest_after_path_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    transaction_id = "4" * 32
+    recovery, bundle_id, digest = retain_directory_metadata_recovery(
+        tmp_path,
+        protected_directory_metadata(tmp_path),
+        transaction_id=transaction_id,
+        outcome="abandon",
+    )
+    manifest_path = recovery / "recovery-manifest.json"
+    original_open = filesystem_module.os.open
+
+    def unavailable_open(path, flags, *args, **kwargs):
+        if Path(path) == manifest_path:
+            raise OSError("manifest unavailable")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(filesystem_module.os, "open", unavailable_open)
+
+    with pytest.raises(FilesystemError, match="manifest is unavailable"):
+        validate_transaction_metadata_recovery(
+            recovery,
+            tmp_path,
+            transaction_id=transaction_id,
+            outcome="abandon",
+            bundle_id=bundle_id,
+            manifest_sha256=digest,
+        )
+
+
+def test_metadata_recovery_directory_parser_rejects_nonlist_input() -> None:
+    with pytest.raises(FilesystemError, match="binding is invalid"):
+        filesystem_module._metadata_recovery_directories({})
+
+
+def test_metadata_recovery_rejects_a_missing_recovery_directory(
+    tmp_path: Path,
+) -> None:
+    missing = Path(filesystem_module.tempfile.gettempdir()) / (
+        "supernote-v4-metadata-recovery-missing"
+    )
+    assert not missing.exists()
+
+    with pytest.raises(FilesystemError, match="ancestry is unsafe"):
+        validate_transaction_metadata_recovery(
+            missing,
+            tmp_path,
+            transaction_id="5" * 32,
+            outcome="rollback",
+            bundle_id="6" * 32,
+            manifest_sha256="7" * 64,
+        )
+
+
+def test_metadata_recovery_containment_decision_is_explicit(tmp_path: Path) -> None:
+    nested = tmp_path / "nested/value"
+    outside = tmp_path.parent / "outside"
+
+    assert filesystem_module._path_is_within(nested, tmp_path)
+    assert not filesystem_module._path_is_within(outside, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("transaction_id", "outcome"),
+    [
+        ("short", "rollback"),
+        ("G" * 32, "rollback"),
+        ("8" * 32, "unknown"),
+    ],
+)
+def test_metadata_recovery_rejects_noncanonical_creation_binding(
+    tmp_path: Path,
+    transaction_id: str,
+    outcome: str,
+) -> None:
+    with pytest.raises(FilesystemError, match="binding is invalid"):
+        retain_directory_metadata_recovery(
+            tmp_path,
+            protected_directory_metadata(tmp_path),
+            transaction_id=transaction_id,
+            outcome=outcome,
+        )
+
+
+def test_atomic_backup_restoration_mismatch_preserves_displaced_live_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "recovery-source"
+    destination = tmp_path / "destination"
+    source.write_bytes(b"old baseline\n")
+    destination.write_bytes(b"external current\n")
+    destination.chmod(0o640)
+    os.utime(destination, ns=(1_700_000_111_000_000_000, 1_700_000_222_000_000_000))
+    before = destination.lstat()
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "hash_entry_no_follow",
+        lambda path: "published" if path == destination else "baseline",
+    )
+
+    with pytest.raises(FilesystemError, match="activation mismatch"):
+        filesystem_module._restore_backup_entry_atomic(source, destination)
+
+    after = destination.lstat()
+    assert destination.read_bytes() == b"external current\n"
+    assert (
+        stat.S_IMODE(after.st_mode),
+        after.st_atime_ns,
+        after.st_mtime_ns,
+    ) == (
+        stat.S_IMODE(before.st_mode),
+        before.st_atime_ns,
+        before.st_mtime_ns,
+    )
+    assert not tuple(tmp_path.glob(".destination.supernote-v4-*"))
+
+
 def test_hash_inventory_snapshot_and_guard_preserve_directory_atimes(tmp_path: Path):
     nested = tmp_path / "local_modules/alpha/src/deep"
     nested.mkdir(parents=True)
@@ -859,36 +1186,24 @@ def test_directory_observation_never_restores_over_concurrent_metadata_or_entry(
     observed = tmp_path / "observed"
     observed.mkdir()
     (observed / "source.cpp").write_text("int value = 1;\n")
-    original_scandir = filesystem_module.os.scandir
+    original_listdir = filesystem_module.os.listdir
     injected = False
 
-    class RacingScandir:
-        def __init__(self, wrapped):
-            self.wrapped = wrapped
+    def racing_listdir(path):
+        nonlocal injected
+        if isinstance(path, int) and not injected:
+            injected = True
+            if concurrent_change == "mode_mtime":
+                observed.chmod(0o711)
+                os.utime(observed, ns=(41_000_000_000, 42_000_000_000))
+            else:
+                displaced = tmp_path / "observed-before"
+                os.replace(observed, displaced)
+                observed.mkdir(mode=0o700)
+                (observed / "concurrent").write_text("replacement remains\n")
+        return original_listdir(path)
 
-        def __enter__(self):
-            return self.wrapped.__enter__()
-
-        def __exit__(self, exc_type, exc, traceback):
-            nonlocal injected
-            result = self.wrapped.__exit__(exc_type, exc, traceback)
-            if not injected:
-                injected = True
-                if concurrent_change == "mode_mtime":
-                    observed.chmod(0o711)
-                    os.utime(observed, ns=(41_000_000_000, 42_000_000_000))
-                else:
-                    displaced = tmp_path / "observed-before"
-                    os.replace(observed, displaced)
-                    observed.mkdir(mode=0o700)
-                    (observed / "concurrent").write_text("replacement remains\n")
-            return result
-
-    def racing_scandir(path):
-        wrapped = original_scandir(path)
-        return RacingScandir(wrapped) if Path(path) == observed else wrapped
-
-    monkeypatch.setattr(filesystem_module.os, "scandir", racing_scandir)
+    monkeypatch.setattr(filesystem_module.os, "listdir", racing_listdir)
     with pytest.raises(FilesystemError, match="changed while"):
         list(filesystem_module.iter_tree_no_follow(observed))
 
@@ -898,6 +1213,486 @@ def test_directory_observation_never_restores_over_concurrent_metadata_or_entry(
         assert current.st_mtime_ns == 42_000_000_000
     else:
         assert (observed / "concurrent").read_text() == "replacement remains\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
+def test_directory_observation_never_enumerates_a_substituted_symlink_target(
+    tmp_path: Path,
+    monkeypatch,
+):
+    observed = tmp_path / "observed"
+    observed.mkdir()
+    (observed / "inside.txt").write_text("inside\n", encoding="utf-8")
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    os.utime(external, ns=(51_000_000_000, 52_000_000_000))
+    os.utime(sentinel, ns=(53_000_000_000, 54_000_000_000))
+    expected_directory = external.lstat()
+    expected_sentinel = sentinel.lstat()
+    original_listdir = filesystem_module.os.listdir
+    injected = False
+
+    def substitute_before_enumeration(path):
+        nonlocal injected
+        if isinstance(path, int) and not injected:
+            injected = True
+            os.replace(observed, tmp_path / "observed-before")
+            observed.symlink_to(external, target_is_directory=True)
+        return original_listdir(path)
+
+    monkeypatch.setattr(
+        filesystem_module.os,
+        "listdir",
+        substitute_before_enumeration,
+    )
+    with pytest.raises(FilesystemError, match="changed while"):
+        list(filesystem_module.iter_tree_no_follow(observed))
+
+    observed_directory = external.lstat()
+    observed_sentinel = sentinel.lstat()
+    assert (
+        observed_directory.st_atime_ns,
+        observed_directory.st_mtime_ns,
+    ) == (expected_directory.st_atime_ns, expected_directory.st_mtime_ns)
+    assert (
+        observed_sentinel.st_atime_ns,
+        observed_sentinel.st_mtime_ns,
+    ) == (expected_sentinel.st_atime_ns, expected_sentinel.st_mtime_ns)
+    assert sentinel.read_bytes() == b"outside\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
+def test_source_inventory_never_enumerates_a_replaced_directory_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "plugin"
+    nested = root / "local_modules/alpha"
+    nested.mkdir(parents=True)
+    (nested / "inside.txt").write_text("inside\n", encoding="utf-8")
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    os.utime(external, ns=(51_000_000_000, 52_000_000_000))
+    os.utime(sentinel, ns=(53_000_000_000, 54_000_000_000))
+    expected_directory = external.lstat()
+    expected_sentinel = sentinel.lstat()
+    original_open = filesystem_module.os.open
+    substituted = False
+
+    def substitute_after_open(path, flags, *args, **kwargs):
+        nonlocal substituted
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if path == "alpha" and kwargs.get("dir_fd") is not None and not substituted:
+            substituted = True
+            os.replace(nested, root / "local_modules/alpha-before")
+            nested.symlink_to(external, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(filesystem_module.os, "open", substitute_after_open)
+
+    with pytest.raises(ConcurrentSourceMutation, match="changed while"):
+        source_tree_inventory(root)
+
+    observed_directory = external.lstat()
+    observed_sentinel = sentinel.lstat()
+    assert substituted
+    assert sentinel.read_bytes() == b"outside\n"
+    assert (
+        observed_directory.st_atime_ns,
+        observed_directory.st_mtime_ns,
+    ) == (expected_directory.st_atime_ns, expected_directory.st_mtime_ns)
+    assert (
+        observed_sentinel.st_atime_ns,
+        observed_sentinel.st_mtime_ns,
+    ) == (expected_sentinel.st_atime_ns, expected_sentinel.st_mtime_ns)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link inventory fixture")
+def test_source_inventory_reads_symlink_target_from_retained_identity_during_aba(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "plugin"
+    root.mkdir()
+    owned = root / "source-link"
+    owned.symlink_to("owned-target")
+    external = tmp_path / "external-link"
+    external.symlink_to("external-target")
+    os.utime(external, ns=(2_000_000_021_000_000_000, 2_000_000_022_000_000_000), follow_symlinks=False)
+    external_before = external.lstat()
+    root_before = root.lstat()
+    displaced = tmp_path / "owned-displaced"
+    original_read = filesystem_module._read_symlink_authority_target
+    injected = False
+
+    def swap_out_and_back(authority):
+        nonlocal injected
+        if not injected:
+            injected = True
+            os.replace(owned, displaced)
+            os.replace(external, owned)
+            try:
+                target = original_read(authority)
+            finally:
+                os.replace(owned, external)
+                os.replace(displaced, owned)
+                os.utime(
+                    root,
+                    ns=(root_before.st_atime_ns, root_before.st_mtime_ns),
+                )
+            return target
+        return original_read(authority)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_read_symlink_authority_target",
+        swap_out_and_back,
+    )
+
+    inventory = source_tree_inventory(root)
+    external_after = external.lstat()
+
+    assert injected
+    assert inventory["source-link"][3] == "owned-target"
+    assert os.readlink(owned) == "owned-target"
+    assert os.readlink(external) == "external-target"
+    assert (
+        stat.S_IMODE(external_after.st_mode),
+        external_after.st_atime_ns,
+        external_after.st_mtime_ns,
+    ) == (
+        stat.S_IMODE(external_before.st_mode),
+        external_before.st_atime_ns,
+        external_before.st_mtime_ns,
+    )
+
+
+def test_failed_file_copy_preserves_a_concurrent_destination_replacement(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    replacement = tmp_path / "editor-save.txt"
+    source.write_bytes(b"generator source\n")
+    replacement.write_bytes(b"concurrent editor save\n")
+    replacement.chmod(0o604)
+    replacement_times = (2_000_000_001_000_000_000, 2_000_000_002_000_000_000)
+    os.utime(replacement, ns=replacement_times)
+    original_finish = filesystem_module._finish_observed_atime
+    injected = False
+
+    def replace_before_failed_copy_cleanup(path, descriptor, before):
+        nonlocal injected
+        if path == source and not injected:
+            injected = True
+            os.replace(replacement, destination)
+            return False
+        return original_finish(path, descriptor, before)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_finish_observed_atime",
+        replace_before_failed_copy_cleanup,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation, match="changed while it was copied"):
+        copy_entry_no_follow(source, destination)
+
+    live = destination.lstat()
+    assert injected
+    assert destination.read_bytes() == b"concurrent editor save\n"
+    assert stat.S_IMODE(live.st_mode) == 0o604
+    assert (live.st_atime_ns, live.st_mtime_ns) == replacement_times
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link regression")
+def test_recovery_symlink_copy_preserves_a_concurrent_destination_replacement(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source-link"
+    destination = tmp_path / "recovery-link"
+    detached = tmp_path / "detached-generated-link"
+    source.symlink_to("generator-target")
+    replacement_times = (2_000_000_011_000_000_000, 2_000_000_012_000_000_000)
+    original_apply = filesystem_module._apply_symlink_authority_metadata
+    injected = False
+    expected_metadata = None
+
+    def replace_before_retained_metadata_apply(authority, metadata, *, atime_only=False):
+        nonlocal injected, expected_metadata
+        # Coverage instrumentation can make the source-link observation itself
+        # require atime neutralization.  Inject only after the copy has created
+        # the destination whose retained-authority boundary this test targets.
+        if not injected and filesystem_module.lexists(destination):
+            injected = True
+            os.replace(destination, detached)
+            destination.symlink_to("external-editor-target")
+            os.utime(destination, ns=replacement_times, follow_symlinks=False)
+            expected_metadata = destination.lstat()
+        return original_apply(authority, metadata, atime_only=atime_only)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_apply_symlink_authority_metadata",
+        replace_before_retained_metadata_apply,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation, match="Destination symbolic link"):
+        transaction_module._copy_verified_entry(source, destination, attempts=1)
+
+    assert injected
+    assert expected_metadata is not None
+    live = destination.lstat()
+    assert stat.S_ISLNK(live.st_mode)
+    assert os.readlink(destination) == "external-editor-target"
+    assert stat.S_IMODE(live.st_mode) == stat.S_IMODE(expected_metadata.st_mode)
+    assert (live.st_atime_ns, live.st_mtime_ns) == replacement_times
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link descriptor regression")
+def test_symlink_atime_restore_never_writes_a_concurrent_replacement(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source-link"
+    source.symlink_to("first-target")
+    os.utime(
+        source,
+        ns=(1_000_000_000, 2_000_000_000),
+        follow_symlinks=False,
+    )
+    original_readlink = os.readlink
+    original_authority_read = filesystem_module._read_symlink_authority_target
+    original_apply = filesystem_module._apply_symlink_authority_metadata
+    replaced = False
+
+    def atime_changing_readlink(authority):
+        target = original_authority_read(authority)
+        os.utime(
+            source,
+            ns=(3_000_000_000, 2_000_000_000),
+            follow_symlinks=False,
+        )
+        return target
+
+    def replace_before_restore(authority, metadata, *, atime_only=False):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            displaced = tmp_path / "source-link-before"
+            os.replace(source, displaced)
+            source.symlink_to("external-target")
+            os.utime(
+                source,
+                ns=(11_000_000_000, 12_000_000_000),
+                follow_symlinks=False,
+            )
+        original_apply(authority, metadata, atime_only=atime_only)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_read_symlink_authority_target",
+        atime_changing_readlink,
+    )
+    monkeypatch.setattr(
+        filesystem_module,
+        "_apply_symlink_authority_metadata",
+        replace_before_restore,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation, match="changed while"):
+        filesystem_module.hash_entry_no_follow(source)
+
+    current = source.lstat()
+    assert current.st_atime_ns == 11_000_000_000
+    assert current.st_mtime_ns == 12_000_000_000
+    assert original_readlink(source) == "external-target"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link descriptor regression")
+def test_symlink_target_read_is_bound_across_aba_path_substitution(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source-link"
+    source.symlink_to("owned-target")
+    baseline = hash_entry_no_follow(source)
+    external = tmp_path / "external-link"
+    external.symlink_to("external-target")
+    external_before = external.lstat()
+    original_read = filesystem_module._read_symlink_authority_target
+    injected = False
+
+    def aba_read(authority):
+        nonlocal injected
+        displaced = tmp_path / "owned-displaced"
+        external_displaced = tmp_path / "external-displaced"
+        os.replace(source, displaced)
+        os.replace(external, source)
+        try:
+            injected = True
+            return original_read(authority)
+        finally:
+            os.replace(source, external_displaced)
+            os.replace(displaced, source)
+            os.replace(external_displaced, external)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_read_symlink_authority_target",
+        aba_read,
+    )
+
+    assert hash_entry_no_follow(source) == baseline
+    assert injected
+    assert os.readlink(source) == "owned-target"
+    assert os.readlink(external) == "external-target"
+    external_after = external.lstat()
+    assert (
+        external_after.st_mode,
+        external_after.st_atime_ns,
+        external_after.st_mtime_ns,
+    ) == (
+        external_before.st_mode,
+        external_before.st_atime_ns,
+        external_before.st_mtime_ns,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link descriptor regression")
+def test_retained_symlink_target_reader_grows_and_rejects_unknown_authority(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "long-link"
+    target = "segment/" * 50
+    source.symlink_to(target)
+
+    assert filesystem_module._read_symlink_identity_bound(
+        source,
+        operation="read",
+    )[0] == target
+    with pytest.raises(OSError, match="Unknown symlink metadata authority"):
+        filesystem_module._read_symlink_authority_target(("unknown", 0))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link descriptor regression")
+def test_symlink_atime_restore_preserves_concurrent_same_inode_mtime(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source-link"
+    source.symlink_to("target")
+    os.utime(source, ns=(1_000_000_000, 2_000_000_000), follow_symlinks=False)
+    original_read = filesystem_module._read_symlink_authority_target
+    original_apply = filesystem_module._apply_symlink_authority_metadata
+    external_mtime = 12_000_000_000
+
+    def advance_atime(authority):
+        target = original_read(authority)
+        os.utime(source, ns=(3_000_000_000, 2_000_000_000), follow_symlinks=False)
+        return target
+
+    def change_mtime_then_restore(authority, metadata, *, atime_only=False):
+        current = source.lstat()
+        os.utime(
+            source,
+            ns=(current.st_atime_ns, external_mtime),
+            follow_symlinks=False,
+        )
+        original_apply(authority, metadata, atime_only=atime_only)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_read_symlink_authority_target",
+        advance_atime,
+    )
+    monkeypatch.setattr(
+        filesystem_module,
+        "_apply_symlink_authority_metadata",
+        change_mtime_then_restore,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation, match="changed while"):
+        hash_entry_no_follow(source)
+
+    assert source.lstat().st_mtime_ns == external_mtime
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-atime regression")
+def test_observation_atime_restore_preserves_concurrent_mtime_update(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source.cpp"
+    source.write_text("int value = 1;\n", encoding="utf-8")
+    created = source.lstat()
+    os.utime(source, ns=(1_000_000_000, created.st_mtime_ns))
+    original_apply = filesystem_module._apply_descriptor_atime_only
+    external_mtime = source.lstat().st_mtime_ns + 9_000_000_000
+    injected = False
+
+    def change_mtime_then_restore(descriptor, atime_ns):
+        nonlocal injected
+        injected = True
+        current = source.lstat()
+        os.utime(source, ns=(current.st_atime_ns, external_mtime))
+        original_apply(descriptor, atime_ns)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_apply_descriptor_atime_only",
+        change_mtime_then_restore,
+    )
+
+    with pytest.raises(FilesystemError, match="changed while"):
+        filesystem_module.read_regular_bytes_no_follow(source)
+
+    assert injected
+    assert source.lstat().st_mtime_ns == external_mtime
+
+
+def test_regular_copy_metadata_uses_retained_destination_identity(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source = tmp_path / "source.txt"
+    source.write_text("generated\n", encoding="utf-8")
+    destination = tmp_path / "destination.txt"
+    detached = tmp_path / "detached-generated.txt"
+    original_apply = filesystem_module._apply_descriptor_metadata
+    external_times = (31_000_000_000, 32_000_000_000)
+    injected = False
+
+    def substitute_then_apply(descriptor, metadata):
+        nonlocal injected
+        injected = True
+        os.replace(destination, detached)
+        destination.write_text("external\n", encoding="utf-8")
+        destination.chmod(0o640)
+        os.utime(destination, ns=external_times)
+        original_apply(descriptor, metadata)
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_apply_descriptor_metadata",
+        substitute_then_apply,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation, match="Destination file changed"):
+        copy_entry_no_follow(source, destination)
+
+    external = destination.lstat()
+    assert injected
+    assert destination.read_bytes() == b"external\n"
+    assert stat.S_IMODE(external.st_mode) == 0o640
+    assert (external.st_atime_ns, external.st_mtime_ns) == external_times
+    assert detached.read_bytes() == b"generated\n"
 
 
 @pytest.mark.parametrize("reader", ["hash", "package"])
@@ -1074,9 +1869,11 @@ def test_fresh_process_discovers_durable_cleanup_after_internal_authority_remova
     outcome = recover_pending(tmp_path)
 
     assert outcome.rollback.status in {"not_needed", "completed"}
+    # Observe exact metadata before globbing the root: directory enumeration is
+    # itself allowed to advance atime on Linux filesystems using relatime.
+    assert _directory_metadata_matches(tmp_path, baseline_metadata)
     assert not (tmp_path / JOURNAL_NAME).exists()
     assert not list(tmp_path.glob(".supernote-module-transaction-*"))
-    assert _directory_metadata_matches(tmp_path, baseline_metadata)
 
 
 def test_rollback_metadata_failure_is_discoverable_and_retryable_in_a_new_process(

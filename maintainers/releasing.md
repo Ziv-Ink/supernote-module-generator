@@ -25,6 +25,8 @@ links and version markers are correct.
 
 ```bash
 python3 -m ruff check src tests ci
+python3 ci/check_filesystem_complexity.py
+python3 ci/check_transaction_complexity.py
 python3 -m mypy
 python3 -m compileall -q src tests ci
 python3 -m coverage run -m pytest -q

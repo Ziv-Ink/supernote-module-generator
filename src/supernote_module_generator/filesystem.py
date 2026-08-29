@@ -4,12 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 import stat
+import sys
 import tempfile
 import uuid
-from typing import Dict, Iterable, Iterator, Optional, Protocol, Tuple
+from typing import Any, Dict, Iterable, Iterator, Optional, Protocol, Tuple
 
 from .errors import (
     ConcurrentSourceMutation,
@@ -37,9 +39,109 @@ def _detect_descriptor_relative_io_support() -> bool:
 _DESCRIPTOR_RELATIVE_IO_SUPPORTED = _detect_descriptor_relative_io_support()
 
 
+def _windows_host() -> bool:
+    return os.name == "nt"
+
+
+def _windows_kernel32() -> Any:
+    import ctypes
+
+    loader = getattr(ctypes, "WinDLL")
+    return loader("kernel32", use_last_error=True)
+
+
+def _windows_last_error() -> int:
+    import ctypes
+
+    return int(getattr(ctypes, "get_last_error")())
+
+
+def _windows_error(error: int | None = None) -> OSError:
+    import ctypes
+
+    factory = getattr(ctypes, "WinError")
+    return factory(_windows_last_error() if error is None else error)
+
+
+def _windows_handle_to_descriptor(handle: int, flags: int) -> int:
+    import msvcrt
+
+    opener = getattr(msvcrt, "open_osfhandle")
+    return int(opener(handle, flags))
+
+
+def _windows_descriptor_handle(descriptor: int) -> int:
+    import msvcrt
+
+    getter = getattr(msvcrt, "get_osfhandle")
+    return int(getter(descriptor))
+
+
 class _Digest(Protocol):
     def update(self, data: bytes) -> None:
         ...
+
+
+class _EntryStat(Protocol):
+    @property
+    def st_mode(self) -> int: ...
+
+    @property
+    def st_ino(self) -> int: ...
+
+    @property
+    def st_dev(self) -> int: ...
+
+    @property
+    def st_size(self) -> int: ...
+
+    @property
+    def st_atime_ns(self) -> int: ...
+
+    @property
+    def st_mtime_ns(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class _WindowsDirectoryMetadata:
+    st_mode: int
+    st_ino: int
+    st_dev: int
+    st_size: int
+    st_atime_ns: int
+    st_mtime_ns: int
+    st_file_attributes: int
+
+
+@dataclass(frozen=True)
+class _ObservedDirectoryEntry:
+    """Immutable metadata captured through one retained directory authority."""
+
+    name: str
+    path: str
+    metadata: _EntryStat
+
+    @property
+    def kind(self) -> str:
+        return _kind_from_metadata(self.metadata)
+
+    def stat(self, *, follow_symlinks: bool = True) -> _EntryStat:
+        if follow_symlinks:
+            raise ValueError("Observed directory entries never follow links")
+        return self.metadata
+
+    def is_symlink(self) -> bool:
+        return self.kind == "symlink"
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        if follow_symlinks:
+            raise ValueError("Observed directory entries never follow links")
+        return stat.S_ISDIR(self.metadata.st_mode) and not self.is_symlink()
+
+    def is_file(self, *, follow_symlinks: bool = True) -> bool:
+        if follow_symlinks:
+            raise ValueError("Observed directory entries never follow links")
+        return stat.S_ISREG(self.metadata.st_mode) and not self.is_symlink()
 
 
 class ProtectedSourceRestoreError(FilesystemError):
@@ -75,10 +177,11 @@ def entry_kind(path: Path) -> Optional[str]:
     """Classify an entry without dereferencing it, or return ``None`` if absent."""
 
     try:
-        mode = path.lstat().st_mode
+        metadata = path.lstat()
     except FileNotFoundError:
         return None
-    if stat.S_ISLNK(mode):
+    mode = metadata.st_mode
+    if _metadata_is_redirecting_reparse_point(metadata):
         return "symlink"
     if stat.S_ISREG(mode):
         return "file"
@@ -87,7 +190,501 @@ def entry_kind(path: Path) -> Optional[str]:
     return "other"
 
 
+def _metadata_is_redirecting_reparse_point(metadata: _EntryStat) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(
+        os.name == "nt"
+        and getattr(metadata, "st_file_attributes", 0) & reparse_attribute
+    )
+
+
+def _windows_metadata_is_directory_entry(metadata: _EntryStat) -> bool:
+    directory_attribute = getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0x10)
+    return bool(
+        stat.S_ISDIR(metadata.st_mode)
+        or getattr(metadata, "st_file_attributes", 0) & directory_attribute
+    )
+
+
+def _windows_path_key(path: Path) -> str:
+    value = os.fspath(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    value = os.path.abspath(value)
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _windows_api_path(path: Path) -> str:
+    value = os.path.abspath(os.fspath(path))
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
+def _windows_open_no_follow_handle(
+    path: Path,
+    *,
+    directory: bool,
+    write_metadata: bool = False,
+    allow_reparse_leaf: bool = False,
+) -> int:
+    """Open a non-replaceable Windows entry and reject redirected ancestors."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    ancestor_handles = _windows_retain_non_reparse_ancestors(path)
+    desired_access = 0x80000000 | 0x80  # GENERIC_READ | FILE_READ_ATTRIBUTES
+    if directory:
+        desired_access |= 0x1  # FILE_LIST_DIRECTORY
+    if write_metadata:
+        desired_access |= 0x100  # FILE_WRITE_ATTRIBUTES
+    try:
+        raw_handle = _windows_create_raw_handle(path, desired_access)
+    except BaseException:
+        _windows_close_handles(ancestor_handles)
+        raise
+    try:
+        if _windows_handle_attributes(raw_handle) & 0x400 and not allow_reparse_leaf:
+            raise OSError(f"Source entry is a Windows reparse point: {path}")
+        if not allow_reparse_leaf:
+            final_path = _windows_handle_final_path(raw_handle)
+            if _windows_path_key(final_path) != _windows_path_key(path):
+                raise OSError(f"Source path contains a Windows reparse point: {path}")
+        _windows_close_handles(ancestor_handles)
+        return raw_handle
+    except BaseException:
+        _windows_close_raw_handle(raw_handle)
+        _windows_close_handles(ancestor_handles)
+        raise
+
+
+def _windows_create_raw_handle(path: Path, desired_access: int) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = _windows_kernel32().CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        _windows_api_path(path),
+        desired_access,
+        0x1 | 0x2,
+        None,
+        3,
+        0x00200000 | 0x02000000,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise _windows_error()
+    return int(handle)
+
+
+def _windows_handle_attributes(handle: int) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = (
+            ("FileAttributes", wintypes.DWORD),
+            ("ReparseTag", wintypes.DWORD),
+        )
+
+    get_info = _windows_kernel32().GetFileInformationByHandleEx
+    get_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    get_info.restype = wintypes.BOOL
+    info = FileAttributeTagInfo()
+    if not get_info(
+        wintypes.HANDLE(handle),
+        9,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise _windows_error()
+    return int(info.FileAttributes)
+
+
+def _windows_handle_final_path(handle: int) -> Path:
+    import ctypes
+    from ctypes import wintypes
+
+    get_final_path = _windows_kernel32().GetFinalPathNameByHandleW
+    get_final_path.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    get_final_path.restype = wintypes.DWORD
+    size = get_final_path(wintypes.HANDLE(handle), None, 0, 0)
+    if not size:
+        raise _windows_error()
+    buffer = ctypes.create_unicode_buffer(size + 1)
+    if not get_final_path(wintypes.HANDLE(handle), buffer, len(buffer), 0):
+        raise _windows_error()
+    return Path(buffer.value)
+
+
+def _windows_close_handles(handles: Iterable[int]) -> None:
+    for handle in reversed(tuple(handles)):
+        _windows_close_raw_handle(handle)
+
+
+def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_kernel32()
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = (
+            ("FileAttributes", wintypes.DWORD),
+            ("ReparseTag", wintypes.DWORD),
+        )
+
+    get_info = kernel32.GetFileInformationByHandleEx
+    get_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    get_info.restype = wintypes.BOOL
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    retained: list[int] = []
+    try:
+        for part in absolute.parts[1:-1]:
+            current /= part
+            handle = create_file(
+                _windows_api_path(current),
+                0x80,  # FILE_READ_ATTRIBUTES
+                0x1 | 0x2,
+                None,
+                3,
+                0x00200000 | 0x02000000,
+                None,
+            )
+            invalid_handle = ctypes.c_void_p(-1).value
+            if handle == invalid_handle:
+                raise _windows_error()
+            raw_handle = int(handle)
+            tag_info = FileAttributeTagInfo()
+            if not get_info(
+                handle,
+                9,
+                ctypes.byref(tag_info),
+                ctypes.sizeof(tag_info),
+            ):
+                _windows_close_raw_handle(raw_handle)
+                raise _windows_error()
+            if tag_info.FileAttributes & 0x400:
+                _windows_close_raw_handle(raw_handle)
+                raise OSError(f"Source path contains a Windows reparse point: {path}")
+            retained.append(raw_handle)
+        return retained
+    except BaseException:
+        for handle in reversed(retained):
+            _windows_close_raw_handle(handle)
+        raise
+
+
+def _windows_close_raw_handle(handle: int) -> None:
+    if not _windows_host():
+        return
+    from ctypes import wintypes
+
+    close_handle = _windows_kernel32().CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(wintypes.HANDLE(handle)):
+        raise _windows_error()
+
+
+def _windows_close_handle(handle: int) -> None:
+    _windows_close_raw_handle(handle)
+
+
+def _windows_handle_entry_kind(handle: int) -> str:
+    """Classify one retained Windows entry without reopening its pathname."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    attributes = _windows_handle_attributes(handle)
+    if attributes & 0x400:
+        return "symlink"
+    if attributes & 0x10:
+        return "directory"
+    return "file"
+
+
+def _windows_apply_handle_metadata(
+    handle: int,
+    metadata: os.stat_result,
+) -> None:
+    """Set exact supported metadata through the already-authoritative handle."""
+
+    _windows_apply_handle_metadata_values(
+        handle,
+        mode=stat.S_IMODE(metadata.st_mode),
+        regular=stat.S_ISREG(metadata.st_mode),
+        atime_ns=metadata.st_atime_ns,
+        mtime_ns=metadata.st_mtime_ns,
+    )
+
+
+def _windows_apply_handle_metadata_values(
+    handle: int,
+    *,
+    mode: int | None,
+    regular: bool,
+    atime_ns: int | None,
+    mtime_ns: int | None,
+) -> None:
+    """Set the Windows metadata fields represented by the public contract."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = (
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        )
+
+    kernel32 = _windows_kernel32()
+    get_info = kernel32.GetFileInformationByHandleEx
+    get_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    get_info.restype = wintypes.BOOL
+    set_info = kernel32.SetFileInformationByHandle
+    set_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_info.restype = wintypes.BOOL
+    basic = FileBasicInfo()
+    native = wintypes.HANDLE(handle)
+    if not get_info(native, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+        raise _windows_error()
+    unix_epoch = 116444736000000000
+    basic.CreationTime = 0
+    # Zero leaves that FILE_BASIC_INFO timestamp unchanged. Observation
+    # cleanup must never replay a sampled write time over a concurrent owner.
+    basic.LastAccessTime = 0 if atime_ns is None else unix_epoch + atime_ns // 100
+    basic.LastWriteTime = 0 if mtime_ns is None else unix_epoch + mtime_ns // 100
+    basic.ChangeTime = 0
+    readonly = 0x1
+    if mode is None:
+        # FILE_BASIC_INFO defines zero as "leave all file attributes unchanged".
+        # An observational atime repair must not replay attributes sampled by
+        # GetFileInformationByHandleEx over a concurrent owner update.
+        basic.FileAttributes = 0
+    elif regular:
+        if mode & stat.S_IWRITE:
+            basic.FileAttributes &= ~readonly
+        else:
+            basic.FileAttributes |= readonly
+    if not set_info(native, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+        raise _windows_error()
+
+
+def _windows_list_directory_entries(
+    handle: int,
+    path: Path,
+    parent_metadata: os.stat_result,
+) -> tuple[_ObservedDirectoryEntry, ...]:
+    """Enumerate a retained Windows directory handle without reopening its path."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class FileIdBothDirectoryInfo(ctypes.Structure):
+        _fields_ = (
+            ("NextEntryOffset", wintypes.DWORD),
+            ("FileIndex", wintypes.DWORD),
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("EndOfFile", ctypes.c_longlong),
+            ("AllocationSize", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+            ("FileNameLength", wintypes.DWORD),
+            ("EaSize", wintypes.DWORD),
+            ("ShortNameLength", ctypes.c_ubyte),
+            ("ShortName", wintypes.WCHAR * 12),
+            ("FileId", ctypes.c_longlong),
+            ("FileName", wintypes.WCHAR * 1),
+        )
+
+    get_info = _windows_kernel32().GetFileInformationByHandleEx
+    get_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    get_info.restype = wintypes.BOOL
+    buffer = ctypes.create_string_buffer(64 * 1024)
+    entries: list[_ObservedDirectoryEntry] = []
+    info_class = 11  # FileIdBothDirectoryRestartInfo
+    while True:
+        if not get_info(
+            wintypes.HANDLE(handle),
+            info_class,
+            buffer,
+            len(buffer),
+        ):
+            error = _windows_last_error()
+            if error == 18:  # ERROR_NO_MORE_FILES
+                break
+            raise _windows_error(error)
+        info_class = 10  # FileIdBothDirectoryInfo continues the retained scan.
+        entries.extend(
+            _windows_parse_directory_page(
+                buffer,
+                FileIdBothDirectoryInfo,
+                path,
+                parent_metadata,
+            )
+        )
+    return tuple(entries)
+
+
+def _windows_parse_directory_page(
+    buffer: Any,
+    row_type: Any,
+    path: Path,
+    parent_metadata: os.stat_result,
+) -> tuple[_ObservedDirectoryEntry, ...]:
+    import ctypes
+
+    entries: list[_ObservedDirectoryEntry] = []
+    offset = 0
+    while True:
+        row = row_type.from_buffer(buffer, offset)
+        name_bytes = ctypes.string_at(
+            ctypes.addressof(buffer) + offset + row_type.FileName.offset,
+            row.FileNameLength,
+        )
+        name = name_bytes.decode("utf-16-le")
+        if name not in {".", ".."}:
+            entries.append(
+                _windows_observed_directory_entry(name, row, path, parent_metadata)
+            )
+        if row.NextEntryOffset == 0:
+            return tuple(entries)
+        offset += row.NextEntryOffset
+
+
+def _windows_observed_directory_entry(
+    name: str,
+    row: Any,
+    path: Path,
+    parent_metadata: os.stat_result,
+) -> _ObservedDirectoryEntry:
+    attributes = int(row.FileAttributes)
+    entry_type = _windows_entry_type(attributes)
+    permissions = 0o444 if attributes & 0x1 else 0o666
+    if entry_type == stat.S_IFDIR:
+        permissions |= 0o111
+    metadata = _WindowsDirectoryMetadata(
+        st_mode=entry_type | permissions,
+        st_ino=int(row.FileId) & ((1 << 64) - 1),
+        st_dev=parent_metadata.st_dev,
+        st_size=int(row.EndOfFile),
+        st_atime_ns=(int(row.LastAccessTime) - 116444736000000000) * 100,
+        st_mtime_ns=(int(row.LastWriteTime) - 116444736000000000) * 100,
+        st_file_attributes=attributes,
+    )
+    return _ObservedDirectoryEntry(name, str(path / name), metadata)
+
+
+def _windows_entry_type(attributes: int) -> int:
+    if attributes & 0x400:
+        return stat.S_IFLNK
+    if attributes & 0x10:
+        return stat.S_IFDIR
+    return stat.S_IFREG
+
+
 def _open_observed(path: Path, *, directory: bool = False) -> tuple[int, os.stat_result]:
+    if _windows_host():
+        if directory:
+            raise OSError(f"Source directory cannot be opened safely: {path}")
+        handle = _windows_open_no_follow_handle(path, directory=False)
+        before = path.lstat()
+        if _metadata_is_redirecting_reparse_point(before):
+            _windows_close_handle(handle)
+            raise OSError(f"Source entry is a Windows reparse point: {path}")
+        try:
+            descriptor = _windows_handle_to_descriptor(
+                handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+        opened = os.fstat(descriptor)
+        try:
+            live = path.lstat()
+        except BaseException:
+            os.close(descriptor)
+            raise
+        if not _same_observed_entry(before, opened) or not _same_observed_entry(
+            opened, live
+        ):
+            os.close(descriptor)
+            raise ConcurrentSourceMutation(
+                f"Source entry changed while it was opened: {path}"
+            )
+        return descriptor, before
+
     flags = os.O_RDONLY
     if directory and hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
@@ -95,6 +692,77 @@ def _open_observed(path: Path, *, directory: bool = False) -> tuple[int, os.stat
         flags |= os.O_NOFOLLOW
     descriptor = os.open(path, flags)
     return descriptor, os.fstat(descriptor)
+
+
+def _observed_directory_entries(
+    path: Path,
+) -> tuple[list[_ObservedDirectoryEntry], os.stat_result]:
+    """List one stable directory without following a final symlink.
+
+    POSIX hosts enumerate a no-follow descriptor. Windows hosts enumerate a
+    native directory handle and retain no-delete authority while inspecting
+    each child, including reparse-point children.
+    """
+
+    if not _windows_host():
+        descriptor, before = _open_observed(path, directory=True)
+        try:
+            children = [
+                _ObservedDirectoryEntry(
+                    name,
+                    str(path / name),
+                    os.stat(name, dir_fd=descriptor, follow_symlinks=False),
+                )
+                for name in os.listdir(descriptor)
+            ]
+            if not _finish_observed_atime(path, descriptor, before):
+                raise ConcurrentSourceMutation(
+                    f"Source directory changed while it was inspected: {path}"
+                )
+            return children, before
+        finally:
+            os.close(descriptor)
+
+    handle = _windows_open_no_follow_handle(
+        path,
+        directory=True,
+        write_metadata=True,
+    )
+    try:
+        before = path.lstat()
+        if not stat.S_ISDIR(before.st_mode) or _metadata_is_redirecting_reparse_point(
+            before
+        ):
+            raise OSError(f"Source directory is not a no-follow directory: {path}")
+        opened = path.lstat()
+        if not _same_observed_entry(before, opened):
+            raise ConcurrentSourceMutation(
+                f"Source directory changed while it was opened: {path}"
+            )
+        children = list(_windows_list_directory_entries(handle, path, before))
+        after = path.lstat()
+        if not _same_observed_entry(before, after):
+            raise ConcurrentSourceMutation(
+                f"Source directory changed while it was inspected: {path}"
+            )
+        if after.st_atime_ns != before.st_atime_ns:
+            _windows_apply_handle_metadata_values(
+                handle,
+                mode=None,
+                regular=False,
+                atime_ns=before.st_atime_ns,
+                mtime_ns=None,
+            )
+            restored = path.lstat()
+            if not _same_observed_entry(before, restored) or (
+                restored.st_atime_ns != before.st_atime_ns
+            ):
+                raise ConcurrentSourceMutation(
+                    f"Source directory changed while it was inspected: {path}"
+                )
+        return children, before
+    finally:
+        _windows_close_handle(handle)
 
 
 def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
@@ -105,6 +773,14 @@ def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
         and stat.S_IMODE(before.st_mode) == stat.S_IMODE(after.st_mode)
         and before.st_mtime_ns == after.st_mtime_ns
         and before.st_size == after.st_size
+    )
+
+
+def _same_entry_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        before.st_dev == after.st_dev
+        and before.st_ino == after.st_ino
+        and stat.S_IFMT(before.st_mode) == stat.S_IFMT(after.st_mode)
     )
 
 
@@ -123,7 +799,26 @@ def _finish_observed_atime(
     if not _same_observed_entry(before, after) or not _same_observed_entry(after, live):
         return False
     if after.st_atime_ns != before.st_atime_ns:
-        os.utime(descriptor, ns=(before.st_atime_ns, after.st_mtime_ns))
+        if _windows_host():
+            _windows_apply_handle_metadata_values(
+                _windows_descriptor_handle(descriptor),
+                mode=None,
+                regular=stat.S_ISREG(after.st_mode),
+                atime_ns=before.st_atime_ns,
+                mtime_ns=None,
+            )
+        else:
+            _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        restored = os.fstat(descriptor)
+        try:
+            restored_live = path.lstat()
+        except OSError:
+            return False
+        return (
+            _same_observed_entry(after, restored)
+            and _same_observed_entry(restored, restored_live)
+            and restored.st_atime_ns == before.st_atime_ns
+        )
     return True
 
 
@@ -149,11 +844,75 @@ def _finish_contained_directory_atime(
     if not _same_observed_entry(after, live):
         return False
     if after.st_atime_ns != before.st_atime_ns:
-        os.utime(descriptor, ns=(before.st_atime_ns, after.st_mtime_ns))
+        _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        restored = os.fstat(descriptor)
+        return (
+            _same_observed_entry(after, restored)
+            and restored.st_atime_ns == before.st_atime_ns
+        )
     return True
 
 
+def _apply_descriptor_atime_only(descriptor: int, atime_ns: int) -> None:
+    """Restore one descriptor's atime without writing any sampled mtime."""
+
+    if _windows_host():
+        metadata = os.fstat(descriptor)
+        _windows_apply_handle_metadata_values(
+            _windows_descriptor_handle(descriptor),
+            mode=None,
+            regular=stat.S_ISREG(metadata.st_mode),
+            atime_ns=atime_ns,
+            mtime_ns=None,
+        )
+        return
+    import ctypes
+
+    class Timespec(ctypes.Structure):
+        _fields_ = (("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long))
+
+    seconds, nanoseconds = divmod(atime_ns, 1_000_000_000)
+    times = (Timespec * 2)(
+        Timespec(seconds, nanoseconds),
+        Timespec(0, -2 if sys.platform == "darwin" else (1 << 30) - 2),
+    )
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.futimens(descriptor, ctypes.byref(times))
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
 def _restore_observed_path_atime(path: Path, before: os.stat_result) -> bool:
+    if _windows_host() and stat.S_ISDIR(before.st_mode):
+        try:
+            handle = _windows_open_no_follow_handle(
+                path,
+                directory=True,
+                write_metadata=True,
+            )
+        except OSError:
+            return False
+        try:
+            current = path.lstat()
+            if not _same_observed_entry(before, current):
+                return False
+            if current.st_atime_ns != before.st_atime_ns:
+                _windows_apply_handle_metadata_values(
+                    handle,
+                    mode=None,
+                    regular=False,
+                    atime_ns=before.st_atime_ns,
+                    mtime_ns=None,
+                )
+            restored = path.lstat()
+            return _same_observed_entry(before, restored) and (
+                restored.st_atime_ns == before.st_atime_ns
+            )
+        except OSError:
+            return False
+        finally:
+            _windows_close_handle(handle)
     try:
         descriptor, _current = _open_observed(
             path, directory=stat.S_ISDIR(before.st_mode)
@@ -222,6 +981,8 @@ def contained_entry_kind_no_follow(root: Path, path: Path) -> Optional[str]:
     except ValueError as exc:
         raise FilesystemError(f"Project path is outside the plugin root: {path}") from exc
     parsed = validate_persisted_relative_path(relative)
+    if _windows_host():
+        return _windows_contained_entry_kind(canonical_root, parsed)
     if _descriptor_relative_io_supported():
         try:
             parent_descriptor, leaf = _open_contained_parent_descriptor(
@@ -245,6 +1006,16 @@ def contained_entry_kind_no_follow(root: Path, path: Path) -> Optional[str]:
             return _kind_from_mode(metadata.st_mode)
         finally:
             os.close(parent_descriptor)
+    return _contained_entry_kind_path_fallback(canonical_root, parsed, relative)
+
+
+def _contained_entry_kind_path_fallback(
+    canonical_root: Path,
+    parsed: PurePosixPath,
+    relative: str,
+) -> Optional[str]:
+    """Classify only on hosts where mutation paths already fail before use."""
+
     current = canonical_root
     for index, part in enumerate(parsed.parts):
         current = current / part
@@ -265,6 +1036,33 @@ def contained_entry_kind_no_follow(root: Path, path: Path) -> Optional[str]:
     return entry_kind(canonical_root)
 
 
+def _windows_contained_entry_kind(
+    canonical_root: Path,
+    relative: PurePosixPath,
+) -> Optional[str]:
+    """Classify a Windows child while retaining every non-reparse ancestor."""
+
+    candidate = canonical_root.joinpath(*relative.parts)
+    try:
+        handle = _windows_open_no_follow_handle(
+            candidate,
+            directory=False,
+            allow_reparse_leaf=True,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if getattr(exc, "winerror", None) in {2, 3}:
+            return None
+        raise FilesystemError(
+            f"Cannot inspect contained project path {relative.as_posix()!r}: {exc}"
+        ) from exc
+    try:
+        return _windows_handle_entry_kind(handle)
+    finally:
+        _windows_close_handle(handle)
+
+
 def contained_directory_entries_no_follow(
     root: Path,
     path: Path,
@@ -277,29 +1075,18 @@ def contained_directory_entries_no_follow(
             path,
             allowed_final_kinds={"directory"},
         )
-        before = directory.lstat()
-        observation_error: BaseException | None = None
-        rows: Tuple[Tuple[str, str], ...] = ()
         try:
-            rows = tuple(
+            children, _before = _observed_directory_entries(directory)
+            return tuple(
                 sorted(
-                    (child.name, entry_kind(child) or "missing")
-                    for child in directory.iterdir()
+                    (child.name, child.kind)
+                    for child in children
                 )
             )
-        except BaseException as exc:
-            observation_error = exc
-        if not _restore_observed_path_atime(directory, before):
-            raise ConcurrentSourceMutation(
-                f"Contained project directory changed while inspected: {path}"
-            ) from observation_error
-        if isinstance(observation_error, OSError):
+        except OSError as exc:
             raise FilesystemError(
-                f"Cannot list contained project directory {path}: {observation_error}"
-            ) from observation_error
-        if observation_error is not None:
-            raise observation_error
-        return rows
+                f"Cannot list contained project directory {path}: {exc}"
+            ) from exc
     relative = path.relative_to(root.resolve(strict=True)).as_posix()
     descriptor = _open_contained_directory_descriptor(root, relative)
     try:
@@ -374,15 +1161,16 @@ def contained_tree_entries_no_follow(
                     walk(child_descriptor, child_path)
                 finally:
                     os.close(child_descriptor)
-            after = os.fstat(current_descriptor)
-            if not _same_observed_entry(before, after):
+            if not _finish_contained_directory_atime(
+                root,
+                current_path.relative_to(root).as_posix()
+                if current_path != root
+                else ".",
+                current_descriptor,
+                before,
+            ):
                 raise ConcurrentSourceMutation(
                     f"Contained project directory changed while inspected: {current_path}"
-                )
-            if after.st_atime_ns != before.st_atime_ns:
-                os.utime(
-                    current_descriptor,
-                    ns=(before.st_atime_ns, after.st_mtime_ns),
                 )
         except OSError as exc:
             raise FilesystemError(
@@ -404,6 +1192,12 @@ def _kind_from_mode(mode: int) -> str:
     if stat.S_ISDIR(mode):
         return "directory"
     return "other"
+
+
+def _kind_from_metadata(metadata: _EntryStat) -> str:
+    if _metadata_is_redirecting_reparse_point(metadata):
+        return "symlink"
+    return _kind_from_mode(metadata.st_mode)
 
 
 def read_contained_regular_bytes_no_follow(
@@ -440,15 +1234,28 @@ def read_contained_regular_bytes_no_follow(
             raise ConcurrentSourceMutation(
                 f"Source entry changed while it was read: {path}"
             ) from exc
-        stable = _same_observed_entry(before, after) and _same_observed_entry(
+        if not _same_observed_entry(before, after) or not _same_observed_entry(
             after, live
-        )
-        if after.st_atime_ns != before.st_atime_ns:
-            os.utime(descriptor, ns=(before.st_atime_ns, after.st_mtime_ns))
-        if not stable:
+        ):
             raise ConcurrentSourceMutation(
                 f"Source entry changed while it was read: {path}"
             )
+        if after.st_atime_ns != before.st_atime_ns:
+            _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+            restored = os.fstat(descriptor)
+            restored_live = os.stat(
+                leaf,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not _same_observed_entry(after, restored)
+                or not _same_observed_entry(restored, restored_live)
+                or restored.st_atime_ns != before.st_atime_ns
+            ):
+                raise ConcurrentSourceMutation(
+                    f"Source entry changed while it was read: {path}"
+                )
         return b"".join(chunks), before
     except OSError as exc:
         raise FilesystemError(f"Cannot read contained regular entry {path}: {exc}") from exc
@@ -520,16 +1327,11 @@ def iter_tree_no_follow(root: Path) -> Iterator[Path]:
     while pending:
         directory = pending.pop()
         try:
-            descriptor, before = _open_observed(directory, directory=True)
-            try:
-                with os.scandir(directory) as stream:
-                    children = sorted(stream, key=lambda child: child.name, reverse=True)
-                if not _finish_observed_atime(directory, descriptor, before):
-                    raise ConcurrentSourceMutation(
-                        f"Source directory changed while it was inspected: {directory}"
-                    )
-            finally:
-                os.close(descriptor)
+            children = sorted(
+                _observed_directory_entries(directory)[0],
+                key=lambda child: child.name,
+                reverse=True,
+            )
         except OSError as exc:
             raise FilesystemError(f"Cannot inspect source directory {directory}: {exc}") from exc
         for child in children:
@@ -551,16 +1353,7 @@ def _capture_directory_tree_metadata(root: Path) -> Dict[Path, os.stat_result]:
     try:
         while pending:
             directory = pending.pop()
-            descriptor, before = _open_observed(directory, directory=True)
-            try:
-                with os.scandir(directory) as stream:
-                    children = list(stream)
-                if not _finish_observed_atime(directory, descriptor, before):
-                    raise ConcurrentSourceMutation(
-                        f"Source directory changed while it was inspected: {directory}"
-                    )
-            finally:
-                os.close(descriptor)
+            children, before = _observed_directory_entries(directory)
             captured[directory] = before
             for child in children:
                 if child.is_dir(follow_symlinks=False):
@@ -573,12 +1366,72 @@ def _capture_directory_tree_metadata(root: Path) -> Dict[Path, os.stat_result]:
 def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
     """Apply the supported exact mode and timestamps without following links."""
 
-    os.chmod(path, stat.S_IMODE(metadata.st_mode), follow_symlinks=False)
-    os.utime(
-        path,
-        ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
-        follow_symlinks=False,
-    )
+    desired_mode = stat.S_IMODE(metadata.st_mode)
+    directory = stat.S_ISDIR(metadata.st_mode)
+    if _windows_host():
+        try:
+            handle = _windows_open_no_follow_handle(
+                path,
+                directory=directory,
+                write_metadata=True,
+            )
+        except OSError as exc:
+            raise FilesystemError(
+                f"Cannot safely preserve entry metadata {path}: {exc}"
+            ) from exc
+        try:
+            current = path.lstat()
+            if (
+                _metadata_is_redirecting_reparse_point(current)
+                or stat.S_IFMT(current.st_mode) != stat.S_IFMT(metadata.st_mode)
+            ):
+                raise FilesystemError(f"Cannot safely preserve entry metadata: {path}")
+            opened = path.lstat()
+            if not _same_observed_entry(current, opened):
+                raise ConcurrentSourceMutation(
+                    f"Entry changed while preserving metadata: {path}"
+                )
+            _windows_apply_handle_metadata(handle, metadata)
+            restored = path.lstat()
+        finally:
+            _windows_close_handle(handle)
+        if (
+            stat.S_IFMT(restored.st_mode) != stat.S_IFMT(metadata.st_mode)
+            or stat.S_IMODE(restored.st_mode) != desired_mode
+            or restored.st_atime_ns != metadata.st_atime_ns
+            or restored.st_mtime_ns != metadata.st_mtime_ns
+        ):
+            raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
+        return
+
+    descriptor: int | None = None
+    try:
+        descriptor, _before = _open_observed(path, directory=directory)
+    except OSError:
+        raise
+
+    if descriptor is not None:
+        try:
+            current = os.fstat(descriptor)
+            if stat.S_IMODE(current.st_mode) != desired_mode:
+                os.fchmod(descriptor, desired_mode)
+            os.utime(
+                descriptor,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
+            )
+            restored = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    else:
+        raise AssertionError("POSIX metadata descriptor was not opened")
+
+    if (
+        stat.S_IFMT(restored.st_mode) != stat.S_IFMT(metadata.st_mode)
+        or stat.S_IMODE(restored.st_mode) != desired_mode
+        or restored.st_atime_ns != metadata.st_atime_ns
+        or restored.st_mtime_ns != metadata.st_mtime_ns
+    ):
+        raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
 
 
 def copy_entry_no_follow(source: Path, destination: Path) -> None:
@@ -838,21 +1691,18 @@ def source_tree_inventory(root: Path) -> SourceTreeInventory:
     """
 
     root = root.resolve(strict=True)
+    if _descriptor_relative_io_supported() and not _windows_host():
+        return _source_tree_inventory_descriptor_bound(root)
     inventory: SourceTreeInventory = {}
     pending = [root]
     while pending:
         directory = pending.pop()
         try:
-            descriptor, before = _open_observed(directory, directory=True)
-            try:
-                with os.scandir(directory) as stream:
-                    children = sorted(stream, key=lambda child: child.name, reverse=True)
-                if not _finish_observed_atime(directory, descriptor, before):
-                    raise FilesystemError(
-                        f"Source directory changed while it was inventoried: {directory}"
-                    )
-            finally:
-                os.close(descriptor)
+            children = sorted(
+                _observed_directory_entries(directory)[0],
+                key=lambda child: child.name,
+                reverse=True,
+            )
         except OSError as exc:
             raise FilesystemError(f"Cannot inventory source directory {directory}: {exc}") from exc
         for child in children:
@@ -865,11 +1715,15 @@ def source_tree_inventory(root: Path) -> SourceTreeInventory:
                 mode = stat.S_IMODE(metadata.st_mode)
                 modified_ns = metadata.st_mtime_ns
                 if child.is_symlink():
+                    target, _link_metadata = _read_symlink_identity_bound(
+                        path,
+                        operation="inventoried",
+                    )
                     inventory[relative] = (
                         "symlink",
                         mode,
                         modified_ns,
-                        os.readlink(path),
+                        target,
                     )
                 elif child.is_dir(follow_symlinks=False):
                     inventory[relative] = ("directory", mode, 0, None)
@@ -886,6 +1740,31 @@ def source_tree_inventory(root: Path) -> SourceTreeInventory:
             except OSError as exc:
                 raise FilesystemError(f"Cannot inventory source entry {path}: {exc}") from exc
     return dict(sorted(inventory.items()))
+
+
+def _source_tree_inventory_descriptor_bound(root: Path) -> SourceTreeInventory:
+    """Inventory one POSIX tree without reopening queued directory paths."""
+
+    from .filesystem_inventory import InventoryOperations, inventory_posix_tree
+
+    return inventory_posix_tree(
+        root,
+        InventoryOperations(
+            same_entry=_same_observed_entry,
+            is_excluded=_is_build_or_cache_path,
+            kind_from_mode=_kind_from_mode,
+            apply_descriptor_atime_only=_apply_descriptor_atime_only,
+            read_symlink_target=_read_symlink_authority_target,
+            apply_symlink_atime=lambda authority, metadata: (
+                _apply_symlink_authority_metadata(
+                    authority,
+                    metadata,
+                    atime_only=True,
+                )
+            ),
+            close_symlink_authority=_close_symlink_metadata_authority,
+        ),
+    )
 
 
 def source_tree_changes(
@@ -920,16 +1799,10 @@ def protected_source_snapshot_roots(root: Path) -> Tuple[Path, ...]:
 
     def collect(directory: Path) -> None:
         try:
-            descriptor, before = _open_observed(directory, directory=True)
-            try:
-                with os.scandir(directory) as stream:
-                    children = sorted(stream, key=lambda child: child.name)
-                if not _finish_observed_atime(directory, descriptor, before):
-                    raise FilesystemError(
-                        f"Protected source directory changed while it was inspected: {directory}"
-                    )
-            finally:
-                os.close(descriptor)
+            children = sorted(
+                _observed_directory_entries(directory)[0],
+                key=lambda child: child.name,
+            )
         except OSError as exc:
             raise FilesystemError(
                 f"Cannot inspect protected source directory {directory}: {exc}"
@@ -1054,6 +1927,38 @@ def _apply_contained_directory_metadata(
     validate_contained_path_no_follow(
         root, directory, allowed_final_kinds={"directory"}
     )
+    if _windows_host():
+        before = directory.lstat()
+        handle = _windows_open_no_follow_handle(
+            directory,
+            directory=True,
+            write_metadata=True,
+        )
+        try:
+            opened = directory.lstat()
+            if not _same_observed_entry(before, opened):
+                raise ConcurrentSourceMutation(
+                    f"Protected directory changed while restoring metadata: {directory}"
+                )
+            _windows_apply_handle_metadata_values(
+                handle,
+                mode=mode,
+                regular=False,
+                atime_ns=atime_ns,
+                mtime_ns=mtime_ns,
+            )
+            restored = directory.lstat()
+        finally:
+            _windows_close_handle(handle)
+        if (
+            stat.S_IMODE(restored.st_mode) != mode
+            or restored.st_atime_ns != atime_ns
+            or restored.st_mtime_ns != mtime_ns
+        ):
+            raise FilesystemError(
+                f"Could not restore exact protected directory metadata: {directory}"
+            )
+        return
     os.chmod(directory, mode, follow_symlinks=False)
     os.utime(directory, ns=(atime_ns, mtime_ns), follow_symlinks=False)
 
@@ -1071,7 +1976,13 @@ def _stat_contained_directory(root: Path, relative: str) -> os.stat_result:
     validate_contained_path_no_follow(
         root, directory, allowed_final_kinds={"directory"}
     )
-    return directory.lstat()
+    if os.name != "nt":
+        return directory.lstat()
+    handle = _windows_open_no_follow_handle(directory, directory=True)
+    try:
+        return directory.lstat()
+    finally:
+        _windows_close_handle(handle)
 
 
 class ProtectedSourceGuard:
@@ -1112,7 +2023,13 @@ class ProtectedSourceGuard:
             raise
 
     def finish(self) -> Tuple[str, ...]:
-        """Return mutations and restore the exact protected baseline if needed."""
+        """Finish a read-only observation without overwriting unexpected edits.
+
+        A guard cannot prove whether changed live bytes came from the guarded
+        frontend or from a developer save made while that frontend ran.  The
+        live checkout therefore wins; the independent pre-command bundle is
+        retained as explicit recovery authority instead of being replayed.
+        """
 
         changes = source_tree_changes(self.before, source_tree_inventory(self.root))
         if changes:
@@ -1133,65 +2050,15 @@ class ProtectedSourceGuard:
                 )
             self._remove_temporary()
             return self._observed_mutations
-        recovery_remaining: Tuple[str, ...] = ()
-        try:
-            for destination, backup in self._entries:
-                self._restore_entry(destination, backup)
-            # Remove new top-level or split-boundary entries that were not
-            # contained by an existing protected snapshot root.
-            for item in changes:
-                action, separator, relative = item.partition(":")
-                if not separator or action != "created":
-                    continue
-                destination = self.root.joinpath(*PurePosixPath(relative).parts)
-                if any(
-                    _path_is_within(destination, protected)
-                    for protected, _ in self._entries
-                ):
-                    continue
-                if lexists(destination):
-                    remove_entry_no_follow(destination)
-            remaining = source_tree_changes(
-                self.before, source_tree_inventory(self.root)
-            )
-            if remaining:
-                raise FilesystemError(
-                    "Could not restore frontend source mutation: "
-                    + ", ".join(remaining[:8])
-                )
-            directory_failures = restore_protected_directory_metadata(
-                self.root, self.directory_metadata
-            )
-            if directory_failures:
-                recovery_remaining = directory_failures
-                raise FilesystemError(
-                    "Could not restore protected directory metadata: "
-                    + ", ".join(directory_failures[:8])
-                )
-        except BaseException as exc:
-            diagnostics: Tuple[str, ...] = ()
-            remaining_verified = True
-            try:
-                remaining = source_tree_changes(
-                    self.before, source_tree_inventory(self.root)
-                )
-            except BaseException as inventory_exc:
-                remaining = ()
-                diagnostics = (f"inventory_failed:{inventory_exc}",)
-                remaining_verified = False
-            remaining = tuple(dict.fromkeys((*remaining, *recovery_remaining)))
-            raise ProtectedSourceRestoreError(
-                "Could not restore frontend source mutation; the protected "
-                f"backup was retained at {self._temporary}: {exc}",
-                mutations=self._observed_mutations,
-                remaining=remaining,
-                recovery_path=self._temporary,
-                interrupted=isinstance(exc, KeyboardInterrupt),
-                diagnostics=diagnostics,
-                remaining_verified=remaining_verified,
-            ) from exc
-        self._remove_temporary()
-        return self._observed_mutations
+        raise ProtectedSourceRestoreError(
+            "Protected source changed during a read-only stage. The live state "
+            "was preserved and the pre-command backup was retained at "
+            f"{self._temporary}",
+            mutations=self._observed_mutations,
+            remaining=changes,
+            recovery_path=self._temporary,
+            remaining_verified=True,
+        )
 
     @property
     def recovery_path(self) -> Path:
@@ -1598,16 +2465,50 @@ def validate_transaction_metadata_recovery(
     """Validate a transaction-owned metadata-only recovery bundle without mutation."""
 
     root = plugin_root.resolve(strict=True)
-    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
     path = Path(recovery_path)
+    _validate_metadata_recovery_directory(path)
+    payload = _read_private_metadata_recovery_manifest(path)
+    if hashlib.sha256(payload).hexdigest() != manifest_sha256:
+        raise FilesystemError("Transaction metadata recovery manifest was modified")
+    manifest = _parse_metadata_recovery_manifest(payload)
+    _validate_metadata_recovery_binding(
+        manifest,
+        root=root,
+        transaction_id=transaction_id,
+        outcome=outcome,
+        bundle_id=bundle_id,
+    )
+    metadata = _metadata_recovery_directories(manifest["directories"])
+    return validate_protected_directory_metadata(root, metadata, allow_missing=True)
+
+
+def _validate_metadata_recovery_directory(path: Path) -> None:
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    try:
+        recovery_metadata = path.lstat()
+    except OSError as exc:
+        raise FilesystemError(
+            "Transaction metadata recovery ancestry is unsafe"
+        ) from exc
     if (
         not path.is_absolute()
         or path.parent != temporary_root
         or not path.name.startswith("supernote-v4-metadata-recovery-")
         or entry_kind(path) != "directory"
         or path.resolve(strict=True) != path
+        or (
+            hasattr(os, "geteuid")
+            and getattr(recovery_metadata, "st_uid", -1) != os.geteuid()
+        )
+        or (
+            os.name != "nt"
+            and stat.S_IMODE(recovery_metadata.st_mode) & 0o077
+        )
     ):
         raise FilesystemError("Transaction metadata recovery ancestry is unsafe")
+
+
+def _read_private_metadata_recovery_manifest(path: Path) -> bytes:
     manifest_path = _validate_no_follow_path(
         path,
         "recovery-manifest.json",
@@ -1626,16 +2527,41 @@ def validate_transaction_metadata_recovery(
             raise FilesystemError(
                 "Transaction metadata recovery manifest is not a regular file"
             )
+        if (
+            (
+                hasattr(os, "geteuid")
+                and getattr(value, "st_uid", -1) != os.geteuid()
+            )
+            or (os.name != "nt" and stat.S_IMODE(value.st_mode) & 0o077)
+        ):
+            raise FilesystemError(
+                "Transaction metadata recovery manifest is not private"
+            )
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             payload = handle.read()
     finally:
         os.close(descriptor)
-    if hashlib.sha256(payload).hexdigest() != manifest_sha256:
-        raise FilesystemError("Transaction metadata recovery manifest was modified")
+    return payload
+
+
+def _parse_metadata_recovery_manifest(payload: bytes) -> dict[str, object]:
     try:
         manifest = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise FilesystemError("Transaction metadata recovery manifest is invalid") from exc
+    if not isinstance(manifest, dict):
+        raise FilesystemError("Transaction metadata recovery binding is invalid")
+    return manifest
+
+
+def _validate_metadata_recovery_binding(
+    manifest: dict[str, object],
+    *,
+    root: Path,
+    transaction_id: str,
+    outcome: str,
+    bundle_id: str,
+) -> None:
     expected_fields = {
         "schema_version",
         "recovery_kind",
@@ -1647,8 +2573,7 @@ def validate_transaction_metadata_recovery(
         "directories",
     }
     if (
-        not isinstance(manifest, dict)
-        or set(manifest) != expected_fields
+        set(manifest) != expected_fields
         or manifest.get("schema_version") != 2
         or manifest.get("recovery_kind") != "transaction-directory-metadata"
         or manifest.get("plugin_root") != str(root)
@@ -1659,8 +2584,13 @@ def validate_transaction_metadata_recovery(
         or not isinstance(manifest.get("directories"), list)
     ):
         raise FilesystemError("Transaction metadata recovery binding is invalid")
+
+
+def _metadata_recovery_directories(raw_directories: object) -> ProtectedDirectoryMetadata:
+    if not isinstance(raw_directories, list):
+        raise FilesystemError("Transaction metadata recovery binding is invalid")
     metadata: ProtectedDirectoryMetadata = {}
-    for raw in manifest["directories"]:
+    for raw in raw_directories:
         if not isinstance(raw, dict) or set(raw) != {
             "destination",
             "mode",
@@ -1681,7 +2611,7 @@ def validate_transaction_metadata_recovery(
         assert isinstance(atime_ns, int)
         assert isinstance(mtime_ns, int)
         metadata[relative] = (mode, atime_ns, mtime_ns)
-    return validate_protected_directory_metadata(root, metadata, allow_missing=True)
+    return metadata
 
 
 def _path_is_within(path: Path, root: Path) -> bool:
@@ -1725,27 +2655,298 @@ def _source_symlinks(roots: Iterable[Path]) -> Iterator[Path]:
                 yield path
 
 
+def _open_symlink_metadata_authority(
+    path: Path,
+    expected: os.stat_result,
+) -> tuple[str, int] | None:
+    """Retain one symlink identity for observation and metadata restoration."""
+
+    if _windows_host():
+        handle = _windows_open_no_follow_handle(
+            path,
+            directory=_windows_metadata_is_directory_entry(expected),
+            write_metadata=True,
+            allow_reparse_leaf=True,
+        )
+        live = path.lstat()
+        if not _same_observed_entry(expected, live):
+            _windows_close_handle(handle)
+            raise ConcurrentSourceMutation(
+                f"Source symbolic link changed while it was opened: {path}"
+            )
+        return ("windows", handle)
+    if sys.platform == "darwin":
+        # Darwin's O_SYMLINK is intentionally not exposed by every supported
+        # Python, but it opens the link object itself rather than its target.
+        descriptor = os.open(path, os.O_RDONLY | 0x00200000)
+        opened = os.fstat(descriptor)
+        if not _same_observed_entry(expected, opened):
+            os.close(descriptor)
+            raise ConcurrentSourceMutation(
+                f"Source symbolic link changed while it was opened: {path}"
+            )
+        return ("darwin", descriptor)
+    if hasattr(os, "O_PATH") and hasattr(os, "O_NOFOLLOW"):
+        descriptor = os.open(
+            path,
+            getattr(os, "O_PATH") | getattr(os, "O_NOFOLLOW"),
+        )
+        opened = os.fstat(descriptor)
+        if not _same_observed_entry(expected, opened):
+            os.close(descriptor)
+            raise ConcurrentSourceMutation(
+                f"Source symbolic link changed while it was opened: {path}"
+            )
+        return ("linux", descriptor)
+    return None
+
+
+def _close_symlink_metadata_authority(authority: tuple[str, int]) -> None:
+    kind, value = authority
+    if kind == "windows":
+        _windows_close_handle(value)
+    else:
+        os.close(value)
+
+
+def _apply_symlink_authority_metadata(
+    authority: tuple[str, int],
+    metadata: os.stat_result,
+    *,
+    atime_only: bool = False,
+) -> None:
+    kind, value = authority
+    if kind == "windows":
+        _windows_apply_handle_metadata_values(
+            value,
+            mode=None if atime_only else stat.S_IMODE(metadata.st_mode),
+            regular=False,
+            atime_ns=metadata.st_atime_ns,
+            mtime_ns=None if atime_only else metadata.st_mtime_ns,
+        )
+        return
+    if kind == "darwin":
+        if atime_only:
+            _apply_descriptor_atime_only(value, metadata.st_atime_ns)
+        else:
+            os.utime(value, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        return
+    if kind == "linux":
+        import ctypes
+
+        class Timespec(ctypes.Structure):
+            _fields_ = (("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long))
+
+        mtime = (
+            Timespec(0, -2 if sys.platform == "darwin" else (1 << 30) - 2)
+            if atime_only
+            else Timespec(*divmod(metadata.st_mtime_ns, 1_000_000_000))
+        )
+        times = (Timespec * 2)(
+            Timespec(*divmod(metadata.st_atime_ns, 1_000_000_000)),
+            mtime,
+        )
+        libc = ctypes.CDLL(None, use_errno=True)
+        result = libc.utimensat(
+            value,
+            ctypes.c_char_p(b""),
+            ctypes.byref(times),
+            0x1000,  # AT_EMPTY_PATH; the O_PATH descriptor names the link.
+        )
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return
+    raise OSError(f"Unknown symlink metadata authority: {kind}")
+
+
+def _read_symlink_authority_target(authority: tuple[str, int]) -> str:
+    """Read link text through the already-retained link identity."""
+
+    kind, value = authority
+    if kind == "windows":
+        return _windows_read_symlink_target(value)
+    import ctypes
+
+    buffer_size = 256
+    libc = ctypes.CDLL(None, use_errno=True)
+    while True:
+        buffer = ctypes.create_string_buffer(buffer_size)
+        if kind == "darwin":
+            count = libc.freadlink(value, buffer, buffer_size)
+        elif kind == "linux":
+            count = libc.readlinkat(value, ctypes.c_char_p(b""), buffer, buffer_size)
+        else:
+            raise OSError(f"Unknown symlink metadata authority: {kind}")
+        if count < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        if count < buffer_size:
+            return os.fsdecode(buffer.raw[:count])
+        buffer_size *= 2
+
+
+def _windows_read_symlink_target(handle: int) -> str:
+    """Read a symbolic-link reparse payload through its retained Windows handle."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    device_io = _windows_kernel32().DeviceIoControl
+    device_io.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    device_io.restype = wintypes.BOOL
+    buffer = ctypes.create_string_buffer(16 * 1024)
+    returned = wintypes.DWORD()
+    if not device_io(
+        wintypes.HANDLE(handle),
+        0x000900A8,  # FSCTL_GET_REPARSE_POINT
+        None,
+        0,
+        buffer,
+        len(buffer),
+        ctypes.byref(returned),
+        None,
+    ):
+        raise _windows_error()
+    raw = buffer.raw[: returned.value]
+    if int.from_bytes(raw[:4], "little") != 0xA000000C:
+        raise OSError("Retained Windows reparse point is not a symbolic link")
+    substitute_offset = int.from_bytes(raw[8:10], "little")
+    substitute_length = int.from_bytes(raw[10:12], "little")
+    print_offset = int.from_bytes(raw[12:14], "little")
+    print_length = int.from_bytes(raw[14:16], "little")
+    offset = print_offset if print_length else substitute_offset
+    length = print_length if print_length else substitute_length
+    target = raw[20 + offset : 20 + offset + length].decode("utf-16-le")
+    return target[4:] if target.startswith("\\??\\") else target
+
+
+def _read_symlink_identity_bound(
+    path: Path,
+    *,
+    operation: str,
+) -> tuple[str, os.stat_result]:
+    before, authority = _open_read_symlink_authority(path, operation)
+    try:
+        target = _read_symlink_authority_target(authority)
+        after = path.lstat()
+        if not _same_observed_entry(before, after):
+            raise ConcurrentSourceMutation(
+                f"Source symbolic link changed while it was {operation}: {path}"
+            )
+        _restore_symlink_observation_atime(
+            path,
+            operation,
+            authority,
+            before,
+            after,
+        )
+        return target, before
+    finally:
+        _close_symlink_metadata_authority(authority)
+
+
+def _open_read_symlink_authority(
+    path: Path,
+    operation: str,
+) -> tuple[os.stat_result, tuple[str, int]]:
+    authority: tuple[str, int] | None = None
+    if _windows_host():
+        handle = _windows_open_no_follow_handle(
+            path,
+            directory=False,
+            write_metadata=True,
+            allow_reparse_leaf=True,
+        )
+        authority = ("windows", handle)
+    before = path.lstat()
+    if not stat.S_ISLNK(before.st_mode):
+        if authority is not None:
+            _close_symlink_metadata_authority(authority)
+        raise ConcurrentSourceMutation(
+            f"Source symbolic link changed while it was {operation}: {path}"
+        )
+    if authority is None:
+        authority = _open_symlink_metadata_authority(path, before)
+    if authority is None:
+        raise ConcurrentSourceMutation(f"Source symbolic link cannot be read safely: {path}")
+    return before, authority
+
+
+def _restore_symlink_observation_atime(
+    path: Path,
+    operation: str,
+    authority: tuple[str, int],
+    before: os.stat_result,
+    after: os.stat_result,
+) -> None:
+    if after.st_atime_ns == before.st_atime_ns:
+        return
+    _apply_symlink_authority_metadata(authority, before, atime_only=True)
+    restored = path.lstat()
+    if not _same_observed_entry(before, restored) or (
+        restored.st_atime_ns != before.st_atime_ns
+    ):
+        raise ConcurrentSourceMutation(
+            f"Source symbolic link changed while it was {operation}: {path}"
+        )
+
+
 def _copy_symlink(source: Path, destination: Path) -> None:
-    target = os.readlink(source)
-    source_metadata = source.lstat()
+    target, source_metadata = _read_symlink_identity_bound(
+        source,
+        operation="read",
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.symlink(
             target,
             destination,
-            target_is_directory=_symlink_is_directory(source),
+            target_is_directory=_symlink_is_directory(source, source_metadata),
         )
-        try:
-            os.utime(
-                destination,
-                ns=(source_metadata.st_atime_ns, source_metadata.st_mtime_ns),
-                follow_symlinks=False,
-            )
-        except (NotImplementedError, OSError):
-            # Exact target text and link identity are mandatory everywhere.
-            # Link timestamps are preserved on platforms that expose the
-            # no-follow operation.
-            pass
+        destination_metadata = destination.lstat()
+        authority = _open_symlink_metadata_authority(
+            destination,
+            destination_metadata,
+        )
+        if authority is not None:
+            try:
+                _apply_symlink_authority_metadata(authority, source_metadata)
+                retained_target = _read_symlink_authority_target(authority)
+                # Reading the retained link text can itself advance the link's
+                # access time on Linux.  Restore only that field through the
+                # same retained link identity before publishing success.
+                _apply_symlink_authority_metadata(
+                    authority,
+                    source_metadata,
+                    atime_only=True,
+                )
+                live = destination.lstat()
+                if (
+                    retained_target != target
+                    or not _same_entry_identity(destination_metadata, live)
+                    or stat.S_IMODE(live.st_mode)
+                    != stat.S_IMODE(source_metadata.st_mode)
+                    or live.st_atime_ns != source_metadata.st_atime_ns
+                    or live.st_mtime_ns != source_metadata.st_mtime_ns
+                ):
+                    raise ConcurrentSourceMutation(
+                        "Destination symbolic link changed while it was copied: "
+                        f"{destination}"
+                    )
+            finally:
+                _close_symlink_metadata_authority(authority)
     except OSError as exc:
         raise SymlinkPreservationError(
             f"Could not preserve symbolic link {source} -> {target!r}. "
@@ -1761,32 +2962,26 @@ def _copy_file_preserve_stat(source: Path, destination: Path) -> None:
     source_descriptor, metadata = _open_observed(source)
     destination_descriptor: int | None = None
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        destination_descriptor = os.open(
-            destination, flags, stat.S_IMODE(metadata.st_mode)
-        )
-        while True:
-            chunk = os.read(source_descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            view = memoryview(chunk)
-            while view:
-                written = os.write(destination_descriptor, view)
-                view = view[written:]
+        destination_descriptor = _open_copy_destination(destination, metadata)
+        _copy_descriptor_bytes(source_descriptor, destination_descriptor)
         os.fsync(destination_descriptor)
         if not _finish_observed_atime(source, source_descriptor, metadata):
             raise ConcurrentSourceMutation(
                 f"Source file changed while it was copied: {source}"
             )
-        _apply_entry_stat(destination, metadata)
+        _apply_descriptor_metadata(destination_descriptor, metadata)
+        retained = os.fstat(destination_descriptor)
+        published = destination.lstat()
+        if not _same_observed_entry(retained, published):
+            raise ConcurrentSourceMutation(
+                f"Destination file changed while it was copied: {destination}"
+            )
     except BaseException:
-        if destination_descriptor is not None:
-            os.close(destination_descriptor)
-            destination_descriptor = None
-        if lexists(destination):
-            remove_entry_no_follow(destination)
+        _cleanup_failed_file_copy(
+            destination,
+            destination_descriptor,
+        )
+        destination_descriptor = None
         raise
     finally:
         if destination_descriptor is not None:
@@ -1794,21 +2989,71 @@ def _copy_file_preserve_stat(source: Path, destination: Path) -> None:
         os.close(source_descriptor)
 
 
-def _symlink_is_directory(path: Path) -> bool:
-    if os.name != "nt":
+def _open_copy_destination(
+    destination: Path,
+    metadata: os.stat_result,
+) -> int:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(destination, flags, stat.S_IMODE(metadata.st_mode))
+
+
+def _copy_descriptor_bytes(source: int, destination: int) -> None:
+    while True:
+        chunk = os.read(source, 1024 * 1024)
+        if not chunk:
+            return
+        view = memoryview(chunk)
+        while view:
+            written = os.write(destination, view)
+            view = view[written:]
+
+
+def _cleanup_failed_file_copy(
+    destination: Path,
+    descriptor: int | None,
+) -> None:
+    """Release copy authority without deleting a possibly replaced pathname.
+
+    POSIX and Windows do not provide a portable conditional-unlink primitive for
+    a retained regular-file descriptor.  Once copying fails, the destination
+    name may already belong to a concurrent editor save.  Leaving the named
+    entry for the enclosing transaction/recovery layer is therefore safer than
+    a pathname identity check followed by an unlink with an unavoidable race.
+    """
+
+    if descriptor is None:
+        return None
+    os.close(descriptor)
+    return None
+
+
+def _apply_descriptor_metadata(
+    descriptor: int,
+    metadata: os.stat_result,
+) -> None:
+    """Apply copied file metadata through the retained destination identity."""
+
+    if _windows_host():
+        _windows_apply_handle_metadata(_windows_descriptor_handle(descriptor), metadata)
+        return
+    os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
+    os.utime(descriptor, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+
+def _symlink_is_directory(path: Path, metadata: os.stat_result | None = None) -> bool:
+    if not _windows_host():
         return False
-    metadata = path.lstat()
+    if metadata is None:
+        metadata = path.lstat()
     directory_attribute = getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0)
     if directory_attribute and hasattr(metadata, "st_file_attributes"):
         return bool(getattr(metadata, "st_file_attributes") & directory_attribute)
-    if path.is_dir():
-        return True
-    if not path.exists():
-        raise SymlinkPreservationError(
-            f"Windows could not determine whether broken symlink {path} targets a "
-            "file or directory. The link was not dereferenced."
-        )
-    return False
+    raise SymlinkPreservationError(
+        f"Windows could not determine whether symlink {path} targets a file or "
+        "directory without dereferencing it."
+    )
 
 
 def _update_entry_hash(digest: _Digest, path: Path, relative: Path) -> None:
@@ -1821,7 +3066,8 @@ def _update_entry_hash(digest: _Digest, path: Path, relative: Path) -> None:
     digest.update(f"{stat.S_IMODE(metadata.st_mode):o}".encode("ascii"))
     digest.update(b"\0")
     if kind == "symlink":
-        digest.update(os.fsencode(os.readlink(path)))
+        target, _before = _read_symlink_identity_bound(path, operation="hashed")
+        digest.update(os.fsencode(target))
     elif kind == "file":
         _update_digest_from_file(digest, path)
 
