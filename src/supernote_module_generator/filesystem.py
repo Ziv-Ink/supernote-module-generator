@@ -521,9 +521,12 @@ def _windows_attempt_close_raw_handle(handle: int) -> _WindowsRawCloseOutcome:
         returned = True
         if closed:
             return _WindowsRawCloseOutcome(_WindowsRawCloseState.CLOSED)
+        err = _windows_error()
+        if isinstance(err, OSError) and getattr(err, "winerror", None) == 6:
+            return _WindowsRawCloseOutcome(_WindowsRawCloseState.CLOSED)
         return _WindowsRawCloseOutcome(
             _WindowsRawCloseState.RETRYABLE,
-            _windows_error(),
+            err,
         )
     except BaseException as exc:
         if returned:
