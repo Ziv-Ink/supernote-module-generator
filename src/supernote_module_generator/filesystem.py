@@ -1903,7 +1903,12 @@ def source_tree_inventory(root: Path) -> SourceTreeInventory:
                 continue
             try:
                 metadata = child.stat(follow_symlinks=False)
-                mode = stat.S_IMODE(metadata.st_mode)
+                mode = (
+                    (stat.S_IWRITE if metadata.st_mode & stat.S_IWRITE else 0)
+                    | stat.S_IREAD
+                    if _windows_host()
+                    else stat.S_IMODE(metadata.st_mode)
+                )
                 modified_ns = (
                     (metadata.st_mtime_ns // 100) * 100
                     if _windows_host()
@@ -2076,7 +2081,11 @@ def restore_protected_directory_metadata(
                 failures.append(marker)
             continue
         if (
-            stat.S_IMODE(value.st_mode) != mode
+            (
+                (value.st_mode & stat.S_IWRITE != mode & stat.S_IWRITE)
+                if _windows_host()
+                else stat.S_IMODE(value.st_mode) != mode
+            )
             or (
                 (value.st_atime_ns // 100 != atime_ns // 100)
                 if _windows_host()
@@ -2154,7 +2163,11 @@ def _apply_contained_directory_metadata(
         finally:
             _windows_close_handle(handle)
         if (
-            stat.S_IMODE(restored.st_mode) != mode
+            (
+                (restored.st_mode & stat.S_IWRITE != mode & stat.S_IWRITE)
+                if _windows_host()
+                else stat.S_IMODE(restored.st_mode) != mode
+            )
             or (
                 (restored.st_atime_ns // 100 != atime_ns // 100)
                 if _windows_host()
@@ -3277,7 +3290,12 @@ def _update_entry_hash(digest: _Digest, path: Path, relative: Path) -> None:
     digest.update(b"\0")
     digest.update(str(kind).encode("ascii"))
     digest.update(b"\0")
-    digest.update(f"{stat.S_IMODE(metadata.st_mode):o}".encode("ascii"))
+    mode = (
+        (stat.S_IWRITE if metadata.st_mode & stat.S_IWRITE else 0) | stat.S_IREAD
+        if _windows_host()
+        else stat.S_IMODE(metadata.st_mode)
+    )
+    digest.update(f"{mode:o}".encode("ascii"))
     digest.update(b"\0")
     if kind == "symlink":
         target, _before = _read_symlink_identity_bound(path, operation="hashed")

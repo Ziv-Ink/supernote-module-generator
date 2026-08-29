@@ -1368,10 +1368,25 @@ def _conditional_conflict_is_resolved(
         )
         if (
             live_content != restore_content
-            or stat.S_IMODE(live_metadata.st_mode)
-            != stat.S_IMODE(restore_metadata.st_mode)
-            or live_metadata.st_atime_ns != restore_metadata.st_atime_ns
-            or live_metadata.st_mtime_ns != restore_metadata.st_mtime_ns
+            or (
+                (
+                    live_metadata.st_mode & stat.S_IWRITE
+                    != restore_metadata.st_mode & stat.S_IWRITE
+                )
+                if _windows_host()
+                else stat.S_IMODE(live_metadata.st_mode)
+                != stat.S_IMODE(restore_metadata.st_mode)
+            )
+            or (
+                (live_metadata.st_atime_ns // 100 != restore_metadata.st_atime_ns // 100)
+                if _windows_host()
+                else live_metadata.st_atime_ns != restore_metadata.st_atime_ns
+            )
+            or (
+                (live_metadata.st_mtime_ns // 100 != restore_metadata.st_mtime_ns // 100)
+                if _windows_host()
+                else live_metadata.st_mtime_ns != restore_metadata.st_mtime_ns
+            )
         ):
             return False
     return True
@@ -1945,9 +1960,24 @@ class Transaction:
             copied_content, copied_metadata = read_regular_bytes_no_follow(candidate)
             if (
                 copied_content != content
-                or stat.S_IMODE(copied_metadata.st_mode) != mode
-                or copied_metadata.st_atime_ns != atime_ns
-                or copied_metadata.st_mtime_ns != mtime_ns
+                or (
+                    (
+                        copied_metadata.st_mode & stat.S_IWRITE
+                        != mode & stat.S_IWRITE
+                    )
+                    if _windows_host()
+                    else stat.S_IMODE(copied_metadata.st_mode) != mode
+                )
+                or (
+                    (copied_metadata.st_atime_ns // 100 != atime_ns // 100)
+                    if _windows_host()
+                    else copied_metadata.st_atime_ns != atime_ns
+                )
+                or (
+                    (copied_metadata.st_mtime_ns // 100 != mtime_ns // 100)
+                    if _windows_host()
+                    else copied_metadata.st_mtime_ns != mtime_ns
+                )
             ):
                 raise FilesystemError(
                     f"Merged snapshot baseline could not be verified: {managed}"
