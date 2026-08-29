@@ -686,7 +686,14 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
         if (
             before.st_dev != after.st_dev
             or before.st_ino != after.st_ino
-            or before.st_mode != after.st_mode
+            or (
+                (
+                    stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+                    or before.st_mode & stat.S_IWRITE != after.st_mode & stat.S_IWRITE
+                )
+                if os.name == "nt"
+                else before.st_mode != after.st_mode
+            )
             or (
                 (before.st_mtime_ns // 100 != after.st_mtime_ns // 100)
                 if os.name == "nt"
@@ -697,6 +704,11 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
             raise ConcurrentSourceMutation(
                 f"Source entry changed while it was captured: {current}"
             )
+        mode = (
+            (stat.S_IWRITE if after.st_mode & stat.S_IWRITE else 0) | stat.S_IREAD
+            if os.name == "nt"
+            else stat.S_IMODE(after.st_mode)
+        )
         mtime_ns = (
             (after.st_mtime_ns // 100) * 100
             if os.name == "nt"
@@ -706,7 +718,7 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
             (
                 relative,
                 current_kind,
-                stat.S_IMODE(after.st_mode),
+                mode,
                 mtime_ns,
                 after.st_size,
                 digest,

@@ -914,7 +914,11 @@ def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
         before.st_dev == after.st_dev
         and before.st_ino == after.st_ino
         and stat.S_IFMT(before.st_mode) == stat.S_IFMT(after.st_mode)
-        and stat.S_IMODE(before.st_mode) == stat.S_IMODE(after.st_mode)
+        and (
+            (before.st_mode & stat.S_IWRITE == after.st_mode & stat.S_IWRITE)
+            if _windows_host()
+            else stat.S_IMODE(before.st_mode) == stat.S_IMODE(after.st_mode)
+        )
         and (
             (before.st_mtime_ns // 100 == after.st_mtime_ns // 100)
             if _windows_host()
@@ -1572,7 +1576,11 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
             _windows_close_handle(handle)
         if (
             stat.S_IFMT(restored.st_mode) != stat.S_IFMT(metadata.st_mode)
-            or stat.S_IMODE(restored.st_mode) != desired_mode
+            or (
+                (restored.st_mode & stat.S_IWRITE != metadata.st_mode & stat.S_IWRITE)
+                if _windows_host()
+                else stat.S_IMODE(restored.st_mode) != desired_mode
+            )
             or (
                 (restored.st_atime_ns // 100 != metadata.st_atime_ns // 100)
                 if _windows_host()
