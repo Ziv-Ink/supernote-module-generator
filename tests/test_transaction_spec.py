@@ -1525,6 +1525,10 @@ def test_symlink_target_read_is_bound_across_aba_path_substitution(
     baseline = hash_entry_no_follow(source)
     external = tmp_path / "external-link"
     external.symlink_to("external-target")
+    # ``readlink`` itself is allowed to advance a symlink atime on Linux.
+    # Establish the baseline after asserting the external target so the ABA
+    # check observes only the retained-descriptor read under test.
+    assert os.readlink(external) == "external-target"
     external_before = external.lstat()
     original_read = filesystem_module._read_symlink_authority_target
     injected = False
@@ -1551,8 +1555,6 @@ def test_symlink_target_read_is_bound_across_aba_path_substitution(
 
     assert hash_entry_no_follow(source) == baseline
     assert injected
-    assert os.readlink(source) == "owned-target"
-    assert os.readlink(external) == "external-target"
     external_after = external.lstat()
     assert (
         external_after.st_mode,
@@ -1563,6 +1565,8 @@ def test_symlink_target_read_is_bound_across_aba_path_substitution(
         external_before.st_atime_ns,
         external_before.st_mtime_ns,
     )
+    assert os.readlink(source) == "owned-target"
+    assert os.readlink(external) == "external-target"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX retained-link descriptor regression")

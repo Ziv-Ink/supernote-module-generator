@@ -171,6 +171,7 @@ def test_devconfig_read_preserves_atime_and_refuses_a_symlink_without_following(
         config.symlink_to(external)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"file symlinks are unavailable on this host: {exc}")
+    expected_link_target = os.readlink(config)
     monkeypatch.setenv("JAVA_HOME", "/existing/jdk")
 
     with configured_developer_environment(root) as application:
@@ -178,7 +179,7 @@ def test_devconfig_read_preserves_atime_and_refuses_a_symlink_without_following(
         assert len(application.issues) == 1
         assert "Cannot read regular source entry" in application.issues[0]
         assert os.environ["JAVA_HOME"] == "/existing/jdk"
-    assert os.readlink(config) == str(external)
+    assert os.readlink(config) == expected_link_target
     assert external.read_bytes() == before
 
 

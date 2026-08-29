@@ -32,6 +32,7 @@ TYPED_V4_BOUNDARIES = {
     "src/supernote_module_generator/feature_identity.py",
     "src/supernote_module_generator/filesystem.py",
     "src/supernote_module_generator/filesystem_inventory.py",
+    "src/supernote_module_generator/windows_authority.py",
     "src/supernote_module_generator/semantic_ir.py",
     "src/supernote_module_generator/generation_plan.py",
     "src/supernote_module_generator/generation_execution.py",
@@ -60,6 +61,7 @@ LOW_LEVEL_CONTRACT_MODULES = {
     "feature_identity.py",
     "filesystem.py",
     "filesystem_inventory.py",
+    "windows_authority.py",
     "semantic_ir.py",
     "generation_plan.py",
     "generation_execution.py",
@@ -120,6 +122,7 @@ def test_static_correctness_and_gradual_typing_baselines_are_checked_in():
     assert config["tool"]["ruff"]["lint"]["mccabe"]["max-complexity"] == 10
     assert set(config["tool"]["mypy"]["files"]) == TYPED_V4_BOUNDARIES
     assert config["tool"]["mypy"]["disallow_untyped_defs"] is True
+    assert config["tool"]["mypy"]["follow_imports"] == "silent"
     assert config["tool"]["mypy"]["incremental"] is False
     assert config["tool"]["mypy"]["warn_unused_ignores"] is True
 

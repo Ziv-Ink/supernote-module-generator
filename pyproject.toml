@@ -37,6 +37,7 @@ files = [
     "src/supernote_module_generator/feature_identity.py",
     "src/supernote_module_generator/filesystem.py",
     "src/supernote_module_generator/filesystem_inventory.py",
+    "src/supernote_module_generator/windows_authority.py",
     "src/supernote_module_generator/semantic_ir.py",
     "src/supernote_module_generator/generation_plan.py",
     "src/supernote_module_generator/generation_execution.py",
@@ -53,6 +54,7 @@ check_untyped_defs = true
 disallow_any_generics = true
 disallow_incomplete_defs = true
 disallow_untyped_defs = true
+follow_imports = "silent"
 incremental = false
 no_implicit_optional = true
 show_error_codes = true

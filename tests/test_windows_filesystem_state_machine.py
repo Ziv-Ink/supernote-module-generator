@@ -10,6 +10,46 @@ from types import SimpleNamespace
 import pytest
 
 import supernote_module_generator.filesystem as filesystem
+from supernote_module_generator.windows_authority import (
+    _GenerationTransition,
+    GenerationAuthority,
+    RawCloseOutcome,
+    RawCloseState,
+    RawGenerationReference,
+)
+
+
+def _authority(
+    ancestors: tuple[int, ...] = (),
+) -> GenerationAuthority:
+    return GenerationAuthority(_references(ancestors))
+
+
+def _references(
+    handles: tuple[int, ...],
+) -> tuple[RawGenerationReference, ...]:
+    return tuple(
+        RawGenerationReference(
+            handle,
+            GenerationAuthority(()),
+        )
+        for handle in handles
+    )
+
+
+def _reference_handles(
+    references: tuple[RawGenerationReference, ...],
+) -> tuple[int, ...]:
+    return tuple(reference.handle for reference in references)
+
+
+def _retired_handles(
+    retired: dict[
+        object,
+        tuple[RawGenerationReference, ...],
+    ],
+) -> tuple[tuple[int, ...], ...]:
+    return tuple(_reference_handles(references) for references in retired.values())
 
 
 class _Function:
@@ -26,6 +66,7 @@ class _Kernel32:
     def __init__(self) -> None:
         self.next_handle = 100
         self.paths: dict[int, str] = {}
+        self.create_calls: list[tuple[str, int, int]] = []
         self.attributes: dict[str, int] = {}
         self.closed: list[int] = []
         self.basic_updates: list[SimpleNamespace] = []
@@ -49,7 +90,10 @@ class _Kernel32:
     def _number(value) -> int:
         return int(value.value if hasattr(value, "value") else value)
 
-    def _create_file(self, path, *_args):
+    def _create_file(self, path, desired_access, share_mode, *_args):
+        self.create_calls.append(
+            (str(path), self._number(desired_access), self._number(share_mode))
+        )
         handle = self.next_handle
         self.next_handle += 1
         self.paths[handle] = str(path)
@@ -165,6 +209,1568 @@ def test_windows_open_retains_ancestors_and_classifies_leaf(
 
     assert len(windows_api.closed) >= 4
     assert len(windows_api.closed) == len(set(windows_api.closed))
+    assert not set(windows_api.closed).intersection(
+        filesystem._WINDOWS_AUTHORITY.handles
+    )
+    ancestor_calls = windows_api.create_calls[:-1]
+    assert ancestor_calls
+    assert windows_api.create_calls[-1][1] & 0x100
+    assert all(access & 0x1 for _path, access, _share in ancestor_calls)
+    assert all(share == 0x1 for _path, _access, share in ancestor_calls)
+
+
+def test_windows_descriptor_owns_retained_ancestors_until_close(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "root/child/value.txt"
+    for parent in (tmp_path, tmp_path / "root", tmp_path / "root/child"):
+        windows_api.attributes[str(parent)] = 0x10
+    windows_api.attributes[str(target)] = 0
+    descriptor = 73
+    closed_descriptors: list[int] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+    )
+    monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+    handle = filesystem._windows_open_no_follow_handle(target, directory=False)
+    retained = filesystem._WINDOWS_AUTHORITY.handles[handle]
+    transferred = filesystem._windows_handle_to_descriptor(handle, os.O_RDONLY)
+
+    assert transferred == descriptor
+    assert handle not in filesystem._WINDOWS_AUTHORITY.handles
+    descriptor_generation = (
+        filesystem._WINDOWS_AUTHORITY.descriptors[descriptor]
+    )
+    assert descriptor_generation is not retained
+    assert descriptor_generation.ancestors == retained.ancestors
+    assert not set(retained.ancestors).intersection(windows_api.closed)
+
+    filesystem._close_descriptor(descriptor)
+
+    assert closed_descriptors == [descriptor]
+    assert set(retained.ancestors).issubset(windows_api.closed)
+    assert descriptor not in filesystem._WINDOWS_AUTHORITY.descriptors
+
+
+def test_windows_unregistered_raw_handle_transfers_empty_descriptor_authority(
+    monkeypatch,
+) -> None:
+    descriptor = 73
+    raw_authority: dict[int, GenerationAuthority] = {}
+    descriptor_authority: dict[int, GenerationAuthority] = {}
+    closed_descriptors: list[int] = []
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "descriptors",
+        descriptor_authority,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+    )
+    monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+    assert filesystem._windows_handle_to_descriptor(91, os.O_RDONLY) == descriptor
+    assert raw_authority == {}
+    assert descriptor_authority[descriptor].ancestors == ()
+
+    filesystem._close_descriptor(descriptor)
+
+    assert closed_descriptors == [descriptor]
+    assert descriptor_authority == {}
+
+
+def test_windows_handle_registration_interruption_closes_authority_once(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "value.txt"
+    leaf_handle = 91
+    ancestors = (81, 82)
+
+    class InterruptAfterRegistration(
+        dict[int, GenerationAuthority]
+    ):
+        def __setitem__(
+            self,
+            key: int,
+            value: GenerationAuthority,
+        ) -> None:
+            super().__setitem__(key, value)
+            raise KeyboardInterrupt("after handle registration")
+
+    authority = InterruptAfterRegistration()
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        authority,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_retain_non_reparse_ancestors",
+        lambda _path: list(ancestors),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_create_raw_handle",
+        lambda _path, _access: leaf_handle,
+    )
+    monkeypatch.setattr(filesystem, "_windows_handle_attributes", lambda _handle: 0)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_final_path",
+        lambda _handle: target,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="after handle registration"):
+        filesystem._windows_open_no_follow_handle(target, directory=False)
+
+    assert windows_api.closed == [leaf_handle, *reversed(ancestors)]
+    assert authority == {}
+
+
+def test_windows_descriptor_transfer_interruption_closes_descriptor_once(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    leaf_handle = 91
+    descriptor = 73
+    ancestors = (81, 82)
+    raw_generation = _authority(ancestors)
+    raw_authority = {leaf_handle: raw_generation}
+
+    class InterruptAfterTransfer(
+        dict[int, GenerationAuthority]
+    ):
+        armed = True
+
+        def get(
+            self,
+            key: int,
+            default: GenerationAuthority | None = None,
+        ) -> GenerationAuthority | None:
+            if self.armed:
+                self.armed = False
+                raise KeyboardInterrupt("after descriptor transfer")
+            return super().get(key, default)
+
+    descriptor_authority = InterruptAfterTransfer()
+    transferred: list[tuple[int, int]] = []
+    closed_descriptors: list[int] = []
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "descriptors",
+        descriptor_authority,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda handle, flags: (
+                transferred.append((handle, flags)),
+                descriptor,
+            )[1]
+        ),
+    )
+    monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+    with pytest.raises(KeyboardInterrupt, match="after descriptor transfer"):
+        filesystem._windows_handle_to_descriptor(leaf_handle, os.O_RDONLY)
+
+    assert transferred == [(leaf_handle, os.O_RDONLY)]
+    assert closed_descriptors == [descriptor]
+    assert windows_api.closed == [*reversed(ancestors)]
+    assert raw_authority == {}
+    assert descriptor_authority == {}
+
+
+def test_windows_descriptor_transfer_preopen_interruption_keeps_cleanup_owned(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    leaf_handle = 91
+    ancestors = (81, 82)
+    raw_authority = {leaf_handle: _authority(ancestors)}
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda _handle, _flags: (_ for _ in ()).throw(
+                KeyboardInterrupt("before descriptor transfer")
+            )
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="before descriptor transfer"):
+        filesystem._windows_handle_to_descriptor(leaf_handle, os.O_RDONLY)
+
+    assert windows_api.closed == [leaf_handle, *reversed(ancestors)]
+    assert raw_authority == {}
+
+
+def test_windows_descriptor_close_preserves_original_authority_across_numeric_reuse(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    descriptor = 73
+    original_ancestors = (81,)
+    reused_ancestors = (91,)
+    original_generation = _authority(original_ancestors)
+    reused_generation = _authority(reused_ancestors)
+    monkeypatch.setitem(
+        filesystem._WINDOWS_AUTHORITY.descriptors,
+        descriptor,
+        original_generation,
+    )
+
+    def close_and_reuse(value: int) -> None:
+        assert value == descriptor
+        filesystem._WINDOWS_AUTHORITY.descriptors[value] = (
+            reused_generation
+        )
+
+    monkeypatch.setattr(os, "close", close_and_reuse)
+
+    filesystem._close_descriptor(descriptor)
+
+    assert windows_api.closed == [*reversed(original_ancestors)]
+    assert (
+        filesystem._WINDOWS_AUTHORITY.descriptors[descriptor]
+        is reused_generation
+    )
+
+
+def test_windows_raw_close_setup_failure_keeps_registered_authority(
+    monkeypatch,
+) -> None:
+    leaf_handle = 91
+    ancestors = (81, 82)
+    generation = _authority(ancestors)
+    raw_authority = {leaf_handle: generation}
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_kernel32",
+        lambda: (_ for _ in ()).throw(OSError("kernel setup failed")),
+    )
+
+    with pytest.raises(OSError, match="kernel setup failed"):
+        filesystem._windows_close_raw_handle(leaf_handle)
+
+    assert raw_authority == {leaf_handle: generation}
+
+
+def test_windows_raw_numeric_reuse_reconciles_post_close_failure_authority(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    leaf_handle = 55
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    old_generation = _authority(old_ancestors)
+    raw_authority = {leaf_handle: old_generation}
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+
+    def close_then_raise(handle) -> int:
+        windows_api.closed.append(windows_api._number(handle))
+        raise KeyboardInterrupt("after raw close")
+
+    windows_api.CloseHandle.handler = close_then_raise
+    with pytest.raises(KeyboardInterrupt, match="after raw close"):
+        filesystem._windows_close_raw_handle(leaf_handle)
+    assert raw_authority == {leaf_handle: old_generation}
+
+    target = tmp_path / "value.txt"
+    windows_api.CloseHandle.handler = windows_api._close
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_retain_non_reparse_ancestors",
+        lambda _path: list(new_ancestors),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_create_raw_handle",
+        lambda _path, _access: leaf_handle,
+    )
+    monkeypatch.setattr(filesystem, "_windows_handle_attributes", lambda _handle: 0)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_final_path",
+        lambda _handle: target,
+    )
+
+    assert filesystem._windows_open_no_follow_handle(target, directory=False) == (
+        leaf_handle
+    )
+    new_generation = raw_authority[leaf_handle]
+    assert new_generation is not old_generation
+    assert new_generation.ancestors == new_ancestors
+
+    filesystem._windows_close_raw_handle(leaf_handle)
+
+    assert raw_authority == {}
+    assert windows_api.closed == [
+        leaf_handle,
+        *reversed(old_ancestors),
+        leaf_handle,
+        *reversed(new_ancestors),
+    ]
+
+
+def test_windows_descriptor_numeric_reuse_reconciles_each_generation(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    raw_handle = 55
+    descriptor = 73
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    raw_generation = _authority(new_ancestors)
+    old_descriptor_generation = _authority(old_ancestors)
+    raw_authority = {raw_handle: raw_generation}
+    descriptor_authority = {descriptor: old_descriptor_generation}
+    closed_descriptors: list[int] = []
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "descriptors",
+        descriptor_authority,
+    )
+
+    def close_then_raise(value: int) -> None:
+        closed_descriptors.append(value)
+        raise KeyboardInterrupt("after descriptor close")
+
+    monkeypatch.setattr(os, "close", close_then_raise)
+    with pytest.raises(KeyboardInterrupt, match="after descriptor close"):
+        filesystem._close_descriptor(descriptor)
+    assert descriptor_authority == {descriptor: old_descriptor_generation}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+    )
+    monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+    assert filesystem._windows_handle_to_descriptor(raw_handle, os.O_RDONLY) == (
+        descriptor
+    )
+    assert raw_authority == {}
+    new_descriptor_generation = descriptor_authority[descriptor]
+    assert new_descriptor_generation is not old_descriptor_generation
+    assert new_descriptor_generation.ancestors == new_ancestors
+
+    filesystem._close_descriptor(descriptor)
+
+    assert descriptor_authority == {}
+    assert closed_descriptors == [descriptor, descriptor]
+    assert windows_api.closed == [
+        *reversed(old_ancestors),
+        *reversed(new_ancestors),
+    ]
+
+
+def test_windows_raw_reuse_retains_stale_authority_when_cleanup_fails(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    leaf_handle = 55
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    raw_authority = {leaf_handle: _authority(old_ancestors)}
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    real_close_attempt = filesystem._windows_attempt_close_raw_handle
+    fail_next = True
+
+    def fail_first_cleanup(
+        handle: int,
+    ) -> RawCloseOutcome:
+        nonlocal fail_next
+        if fail_next:
+            fail_next = False
+            return RawCloseOutcome(
+                RawCloseState.RETRYABLE,
+                OSError("stale cleanup failed"),
+            )
+        return real_close_attempt(handle)
+
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        fail_first_cleanup,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_retain_non_reparse_ancestors",
+        lambda _path: list(new_ancestors),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_create_raw_handle",
+        lambda _path, _access: leaf_handle,
+    )
+    monkeypatch.setattr(filesystem, "_windows_handle_attributes", lambda _handle: 0)
+    target = tmp_path / "value.txt"
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_final_path",
+        lambda _handle: target,
+    )
+
+    with pytest.raises(OSError, match="stale cleanup failed"):
+        filesystem._windows_open_no_follow_handle(target, directory=False)
+
+    assert raw_authority == {}
+    assert _retired_handles(retired) == (old_ancestors,)
+    assert windows_api.closed == [leaf_handle, *reversed(new_ancestors)]
+
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert retired == {}
+    assert windows_api.closed == [
+        leaf_handle,
+        *reversed(new_ancestors),
+        *reversed(old_ancestors),
+    ]
+
+
+def test_windows_descriptor_reuse_retains_stale_authority_when_cleanup_fails(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    raw_handle = 55
+    descriptor = 73
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    raw_authority = {raw_handle: _authority(new_ancestors)}
+    descriptor_authority = {descriptor: _authority(old_ancestors)}
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    closed_descriptors: list[int] = []
+    real_close_attempt = filesystem._windows_attempt_close_raw_handle
+    fail_next = True
+
+    def fail_first_cleanup(
+        handle: int,
+    ) -> RawCloseOutcome:
+        nonlocal fail_next
+        if fail_next:
+            fail_next = False
+            return RawCloseOutcome(
+                RawCloseState.RETRYABLE,
+                OSError("stale cleanup failed"),
+            )
+        return real_close_attempt(handle)
+
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "descriptors",
+        descriptor_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        fail_first_cleanup,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+    )
+    monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+    with pytest.raises(OSError, match="stale cleanup failed"):
+        filesystem._windows_handle_to_descriptor(raw_handle, os.O_RDONLY)
+
+    assert raw_authority == {}
+    assert descriptor_authority == {}
+    assert _retired_handles(retired) == (old_ancestors,)
+    assert closed_descriptors == [descriptor]
+    assert windows_api.closed == [*reversed(new_ancestors)]
+
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert retired == {}
+    assert windows_api.closed == [
+        *reversed(new_ancestors),
+        *reversed(old_ancestors),
+    ]
+
+
+def test_windows_retired_cleanup_records_only_unproven_residual_handles(
+    monkeypatch,
+) -> None:
+    token = object()
+    retired = {token: _references((81, 82, 83))}
+    close_calls: list[int] = []
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+
+    def close_with_middle_failure(
+        handle: int,
+    ) -> RawCloseOutcome:
+        close_calls.append(handle)
+        if handle == 82:
+            return RawCloseOutcome(
+                RawCloseState.RETRYABLE,
+                OSError("middle close failed"),
+            )
+        return RawCloseOutcome(
+            RawCloseState.CLOSED
+        )
+
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        close_with_middle_failure,
+    )
+
+    with pytest.raises(OSError, match="middle close failed"):
+        filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert close_calls == [83, 82, 81]
+    assert _retired_handles(retired) == ((82,),)
+
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        lambda handle: (
+            close_calls.append(handle),
+            RawCloseOutcome(
+                RawCloseState.CLOSED
+            ),
+        )[1],
+    )
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert close_calls == [83, 82, 81, 82]
+    assert retired == {}
+
+
+@pytest.mark.parametrize("generation", ["raw", "descriptor"])
+def test_windows_reuse_never_retries_ambiguous_retired_handle(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+    generation: str,
+) -> None:
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    ambiguous: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    ambiguous_handles: dict[
+        int, tuple[GenerationAuthority, ...]
+    ] = {}
+    events: list[str] = []
+    live_generation = "retired"
+
+    def close_then_reuse(handle) -> int:
+        nonlocal live_generation
+        raw = windows_api._number(handle)
+        if raw != old_ancestors[0]:
+            return windows_api._close(handle)
+        if live_generation == "retired":
+            events.append("closed-retired")
+            live_generation = "unrelated-reuse"
+            raise KeyboardInterrupt("after retired close")
+        events.append("closed-unrelated-reuse")
+        return 1
+
+    windows_api.CloseHandle.handler = close_then_reuse
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous_retired",
+        ambiguous,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous",
+        ambiguous_handles,
+    )
+
+    if generation == "raw":
+        leaf_handle = 55
+        raw_authority = {leaf_handle: _authority(old_ancestors)}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_retain_non_reparse_ancestors",
+            lambda _path: list(new_ancestors),
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_create_raw_handle",
+            lambda _path, _access: leaf_handle,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_attributes",
+            lambda _handle: 0,
+        )
+        target = tmp_path / "value.txt"
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_final_path",
+            lambda _handle: target,
+        )
+
+        with pytest.raises(KeyboardInterrupt, match="after retired close"):
+            filesystem._windows_open_no_follow_handle(target, directory=False)
+
+        assert raw_authority == {}
+        assert windows_api.closed == [leaf_handle, *reversed(new_ancestors)]
+    else:
+        raw_handle = 55
+        descriptor = 73
+        raw_authority = {raw_handle: _authority(new_ancestors)}
+        descriptor_authority = {descriptor: _authority(old_ancestors)}
+        closed_descriptors: list[int] = []
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            descriptor_authority,
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "msvcrt",
+            SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+        )
+        monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+        with pytest.raises(KeyboardInterrupt, match="after retired close"):
+            filesystem._windows_handle_to_descriptor(raw_handle, os.O_RDONLY)
+
+        assert raw_authority == {}
+        assert descriptor_authority == {}
+        assert closed_descriptors == [descriptor]
+        assert windows_api.closed == [*reversed(new_ancestors)]
+
+    assert retired == {}
+    assert _retired_handles(ambiguous) == (old_ancestors,)
+    assert set(ambiguous_handles) == {old_ancestors[0]}
+    assert events == ["closed-retired"]
+
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+    with pytest.raises(OSError, match="ambiguous; refusing to retry"):
+        filesystem._windows_close_raw_handle(old_ancestors[0])
+
+    assert events == ["closed-retired"]
+    assert _retired_handles(ambiguous) == (old_ancestors,)
+
+
+@pytest.mark.parametrize("owner", ["raw", "descriptor"])
+def test_windows_current_close_attempts_every_ancestor_after_ambiguity(
+    windows_api: _Kernel32,
+    monkeypatch,
+    owner: str,
+) -> None:
+    ancestors = (81, 82, 83)
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    ambiguous: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    ambiguous_handles: dict[
+        int, tuple[GenerationAuthority, ...]
+    ] = {}
+    close_attempts: list[int] = []
+
+    def close_with_ambiguity(
+        handle: int,
+    ) -> RawCloseOutcome:
+        close_attempts.append(handle)
+        if handle == 82:
+            return RawCloseOutcome(
+                RawCloseState.AMBIGUOUS,
+                OSError("current ancestor close is ambiguous"),
+            )
+        return RawCloseOutcome(
+            RawCloseState.CLOSED
+        )
+
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous_retired",
+        ambiguous,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous",
+        ambiguous_handles,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        close_with_ambiguity,
+    )
+
+    if owner == "raw":
+        leaf_handle = 55
+        authority = {leaf_handle: _authority(ancestors)}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            authority,
+        )
+
+        with pytest.raises(OSError, match="current ancestor close is ambiguous"):
+            filesystem._windows_close_raw_handle(leaf_handle)
+
+        assert close_attempts == [leaf_handle, 83, 82, 81]
+    else:
+        descriptor = 73
+        authority = {descriptor: _authority(ancestors)}
+        closed_descriptors: list[int] = []
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            authority,
+        )
+        monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+        with pytest.raises(OSError, match="current ancestor close is ambiguous"):
+            filesystem._close_descriptor(descriptor)
+
+        assert closed_descriptors == [descriptor]
+        assert close_attempts == [83, 82, 81]
+
+    assert authority == {}
+    assert retired == {}
+    assert _retired_handles(ambiguous) == ((82,),)
+    assert set(ambiguous_handles) == {82}
+
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+    assert close_attempts == (
+        [55, 83, 82, 81] if owner == "raw" else [83, 82, 81]
+    )
+
+
+@pytest.mark.parametrize("owner", ["raw", "descriptor"])
+def test_windows_current_close_retains_only_retryable_ancestor(
+    monkeypatch,
+    owner: str,
+) -> None:
+    ancestors = (81, 82, 83)
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    close_attempts: list[int] = []
+
+    def close_with_retryable_failure(
+        handle: int,
+    ) -> RawCloseOutcome:
+        close_attempts.append(handle)
+        if handle == 82:
+            return RawCloseOutcome(
+                RawCloseState.RETRYABLE,
+                OSError("current ancestor remains open"),
+            )
+        return RawCloseOutcome(
+            RawCloseState.CLOSED
+        )
+
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        close_with_retryable_failure,
+    )
+
+    if owner == "raw":
+        numeric_value = 55
+        authority = {numeric_value: _authority(ancestors)}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            authority,
+        )
+        operation = lambda: filesystem._windows_close_raw_handle(numeric_value)
+        expected_attempts = [numeric_value, 83, 82, 81]
+    else:
+        numeric_value = 73
+        authority = {numeric_value: _authority(ancestors)}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            authority,
+        )
+        monkeypatch.setattr(os, "close", lambda _descriptor: None)
+        operation = lambda: filesystem._close_descriptor(numeric_value)
+        expected_attempts = [83, 82, 81]
+
+    with pytest.raises(OSError, match="current ancestor remains open"):
+        operation()
+
+    assert authority == {}
+    assert _retired_handles(retired) == ((82,),)
+    assert close_attempts == expected_attempts
+
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        lambda handle: (
+            close_attempts.append(handle),
+            RawCloseOutcome(
+                RawCloseState.CLOSED
+            ),
+        )[1],
+    )
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert retired == {}
+    assert close_attempts == [*expected_attempts, 82]
+
+
+def test_windows_close_handle_batch_preserves_ambiguous_current_generation(
+    monkeypatch,
+) -> None:
+    handles = (81, 82, 83)
+    authority = {handle: _authority() for handle in handles}
+    ambiguous_handles: dict[
+        int, tuple[GenerationAuthority, ...]
+    ] = {}
+    close_attempts: list[int] = []
+
+    def close_with_ambiguity(
+        handle: int,
+    ) -> RawCloseOutcome:
+        close_attempts.append(handle)
+        if handle == 82:
+            return RawCloseOutcome(
+                RawCloseState.AMBIGUOUS,
+                OSError("batch close is ambiguous"),
+            )
+        return RawCloseOutcome(
+            RawCloseState.CLOSED
+        )
+
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous",
+        ambiguous_handles,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_attempt_close_raw_handle",
+        close_with_ambiguity,
+    )
+
+    with pytest.raises(OSError, match="batch close is ambiguous"):
+        filesystem._windows_close_handles(handles)
+
+    assert close_attempts == [83, 82, 81]
+    assert set(authority) == {82}
+    assert authority[82].ancestors == ()
+    assert set(ambiguous_handles) == {82}
+
+
+def test_windows_ancestor_allocation_claims_reused_ambiguous_number(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    reused_handle = 100
+    raw_authority: dict[int, GenerationAuthority] = {}
+    old_generation = _authority()
+    ambiguous_handles = {reused_handle: (old_generation,)}
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous",
+        ambiguous_handles,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(os.path, "abspath", lambda _path: "/root/value.txt")
+
+    retained = filesystem._windows_retain_non_reparse_ancestors(
+        Path("/root/value.txt")
+    )
+
+    assert retained == [reused_handle]
+    assert not filesystem._WINDOWS_AUTHORITY._generation_is_ambiguous(
+        reused_handle,
+        raw_authority[reused_handle],
+    )
+    assert raw_authority[reused_handle].ancestors == ()
+
+    filesystem._windows_close_handles(retained)
+
+    assert windows_api.closed == [reused_handle]
+    assert raw_authority == {}
+    assert retired == {}
+
+
+def test_windows_leaf_allocation_claims_reused_number_before_classification(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    leaf_handle = 55
+    ancestors = (91, 92)
+    old_generation = _authority()
+    raw_authority = {leaf_handle: old_generation}
+    ambiguous_handles = {leaf_handle: (old_generation,)}
+    target = tmp_path / "value.txt"
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        raw_authority,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "ambiguous",
+        ambiguous_handles,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_retain_non_reparse_ancestors",
+        lambda _path: list(ancestors),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_create_raw_handle",
+        lambda _path, _access: leaf_handle,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_attributes",
+        lambda _handle: (_ for _ in ()).throw(OSError("classification failed")),
+    )
+
+    with pytest.raises(OSError, match="classification failed"):
+        filesystem._windows_open_no_follow_handle(target, directory=False)
+
+    assert raw_authority == {}
+    assert leaf_handle in ambiguous_handles
+    assert windows_api.closed == [leaf_handle, *reversed(ancestors)]
+
+
+@pytest.mark.parametrize("owner", ["raw", "descriptor"])
+@pytest.mark.parametrize("boundary", ["post_current", "pre_retired"])
+def test_windows_interrupted_generation_transition_retains_both_generations(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+    owner: str,
+    boundary: str,
+) -> None:
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+    pending: dict[object, _GenerationTransition] = {}
+    raw_authority: dict[int, GenerationAuthority]
+    descriptor_authority: dict[int, GenerationAuthority]
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "pending",
+        pending,
+    )
+
+    armed = True
+    if boundary == "post_current":
+        real_complete = filesystem._WINDOWS_AUTHORITY._complete_transition
+
+        def interrupt_completion(token: object) -> None:
+            nonlocal armed
+            if armed:
+                armed = False
+                raise KeyboardInterrupt("after current generation publication")
+            real_complete(token)
+
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "_complete_transition",
+            interrupt_completion,
+        )
+        expected = "after current generation publication"
+    else:
+        real_retained = filesystem._WINDOWS_AUTHORITY._transition_retired_references
+
+        def interrupt_retired_publication(
+            transition: _GenerationTransition,
+            token: object,
+        ) -> tuple[RawGenerationReference, ...]:
+            nonlocal armed
+            if armed:
+                armed = False
+                raise KeyboardInterrupt("before retired generation publication")
+            return real_retained(transition, token)
+
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "_transition_retired_references",
+            interrupt_retired_publication,
+        )
+        expected = "before retired generation publication"
+
+    if owner == "raw":
+        leaf_handle = 55
+        raw_authority = {leaf_handle: _authority(old_ancestors)}
+        descriptor_authority = {}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            descriptor_authority,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_retain_non_reparse_ancestors",
+            lambda _path: list(new_ancestors),
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_create_raw_handle",
+            lambda _path, _access: leaf_handle,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_attributes",
+            lambda _handle: 0,
+        )
+        target = tmp_path / "value.txt"
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_final_path",
+            lambda _handle: target,
+        )
+
+        with pytest.raises(KeyboardInterrupt, match=expected):
+            filesystem._windows_open_no_follow_handle(target, directory=False)
+
+        assert windows_api.closed == [leaf_handle, *reversed(new_ancestors)]
+    else:
+        raw_handle = 55
+        descriptor = 73
+        raw_authority = {raw_handle: _authority(new_ancestors)}
+        descriptor_authority = {descriptor: _authority(old_ancestors)}
+        closed_descriptors: list[int] = []
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            descriptor_authority,
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "msvcrt",
+            SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+        )
+        monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+        with pytest.raises(KeyboardInterrupt, match=expected):
+            filesystem._windows_handle_to_descriptor(raw_handle, os.O_RDONLY)
+
+        assert closed_descriptors == [descriptor]
+        assert windows_api.closed == [*reversed(new_ancestors)]
+
+    assert pending
+    assert retired == {}
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert pending == {}
+    assert retired == {}
+    assert raw_authority == {}
+    assert descriptor_authority == {}
+    assert windows_api.closed == (
+        [55, 92, 91, 81] if owner == "raw" else [92, 91, 81]
+    )
+
+
+@pytest.mark.parametrize("owner", ["raw", "descriptor"])
+@pytest.mark.parametrize("boundary", ["pre_pending_discovery", "pending_store"])
+def test_windows_failed_pre_pending_registration_retains_both_generations(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+    owner: str,
+    boundary: str,
+) -> None:
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+    retired: dict[
+        object, tuple[RawGenerationReference, ...]
+    ] = {}
+
+    class FailFirstPendingStore(
+        dict[object, _GenerationTransition]
+    ):
+        armed = True
+
+        def __setitem__(
+            self,
+            key: object,
+            value: _GenerationTransition,
+        ) -> None:
+            if self.armed:
+                self.armed = False
+                raise KeyboardInterrupt("before pending transition storage")
+            super().__setitem__(key, value)
+
+    pending: dict[object, _GenerationTransition]
+    pending = FailFirstPendingStore() if boundary == "pending_store" else {}
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "pending",
+        pending,
+    )
+    if boundary == "pre_pending_discovery":
+        real_unique = filesystem._WINDOWS_AUTHORITY._unique_generations
+        armed = True
+
+        def interrupt_discovery(
+            generations,
+        ) -> tuple[GenerationAuthority, ...]:
+            nonlocal armed
+            if armed:
+                armed = False
+                raise KeyboardInterrupt("during generation discovery")
+            return real_unique(generations)
+
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "_unique_generations",
+            interrupt_discovery,
+        )
+        expected = "during generation discovery"
+    else:
+        expected = "before pending transition storage"
+
+    if owner == "raw":
+        leaf_handle = 55
+        old_generation = _authority(old_ancestors)
+        raw_authority = {leaf_handle: old_generation}
+        descriptor_authority: dict[
+            int, GenerationAuthority
+        ] = {}
+        retry_token = object()
+        retired[retry_token] = (
+            RawGenerationReference(
+                leaf_handle,
+                old_generation,
+            ),
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            descriptor_authority,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_retain_non_reparse_ancestors",
+            lambda _path: list(new_ancestors),
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_create_raw_handle",
+            lambda _path, _access: leaf_handle,
+        )
+        target = tmp_path / "value.txt"
+
+        with pytest.raises(KeyboardInterrupt, match=expected):
+            filesystem._windows_open_no_follow_handle(target, directory=False)
+
+        assert windows_api.closed == [leaf_handle, *reversed(new_ancestors)]
+    else:
+        raw_handle = 55
+        descriptor = 73
+        raw_authority = {raw_handle: _authority(new_ancestors)}
+        descriptor_authority = {descriptor: _authority(old_ancestors)}
+        closed_descriptors: list[int] = []
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            descriptor_authority,
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "msvcrt",
+            SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+        )
+        monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+        with pytest.raises(KeyboardInterrupt, match=expected):
+            filesystem._windows_handle_to_descriptor(raw_handle, os.O_RDONLY)
+
+        assert closed_descriptors == [descriptor]
+        assert windows_api.closed == [*reversed(new_ancestors)]
+
+    assert pending == {}
+    assert retired
+    assert not any(
+        reference.handle == 55
+        for references in retired.values()
+        for reference in references
+    )
+    if owner == "raw":
+        real_attempt = filesystem._windows_attempt_close_raw_handle
+
+        def preserve_reused_sentinel(
+            handle: int,
+        ) -> RawCloseOutcome:
+            if handle == 55:
+                raise AssertionError("reconciliation closed the reused sentinel")
+            return real_attempt(handle)
+
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_attempt_close_raw_handle",
+            preserve_reused_sentinel,
+        )
+    filesystem._WINDOWS_AUTHORITY.reconcile()
+
+    assert pending == {}
+    assert retired == {}
+    assert raw_authority == {}
+    assert descriptor_authority == {}
+    assert windows_api.closed == (
+        [55, 92, 91, 81] if owner == "raw" else [92, 91, 81]
+    )
+
+
+@pytest.mark.parametrize("owner", ["raw", "descriptor"])
+def test_windows_empty_generation_reuse_preserves_new_authority(
+    windows_api: _Kernel32,
+    monkeypatch,
+    owner: str,
+) -> None:
+    numeric_value = 55 if owner == "raw" else 73
+    old_generation = _authority()
+    new_generation = _authority()
+
+    if owner == "raw":
+        authority = {numeric_value: old_generation}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            authority,
+        )
+
+        def close_and_reuse(handle) -> int:
+            windows_api.closed.append(windows_api._number(handle))
+            authority[numeric_value] = new_generation
+            return 1
+
+        windows_api.CloseHandle.handler = close_and_reuse
+        filesystem._windows_close_raw_handle(numeric_value)
+
+        assert windows_api.closed == [numeric_value]
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_attempt_close_raw_handle",
+            lambda _handle: RawCloseOutcome(
+                RawCloseState.RETRYABLE,
+                OSError("new raw generation remains open"),
+            ),
+        )
+        expected = "new raw generation remains open"
+        operation = lambda: filesystem._windows_close_raw_handle(numeric_value)
+    else:
+        authority = {numeric_value: old_generation}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            authority,
+        )
+
+        def close_and_reuse(_descriptor: int) -> None:
+            authority[numeric_value] = new_generation
+
+        monkeypatch.setattr(os, "close", close_and_reuse)
+        filesystem._close_descriptor(numeric_value)
+        monkeypatch.setattr(
+            os,
+            "close",
+            lambda _descriptor: (_ for _ in ()).throw(
+                OSError("new descriptor generation remains open")
+            ),
+        )
+        expected = "new descriptor generation remains open"
+        operation = lambda: filesystem._close_descriptor(numeric_value)
+
+    assert authority[numeric_value] is new_generation
+
+    with pytest.raises(OSError, match=expected):
+        operation()
+
+    assert authority[numeric_value] is new_generation
+
+
+@pytest.mark.parametrize("generation", ["raw", "descriptor"])
+def test_windows_reuse_post_cleanup_interruption_keeps_generations_separate(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+    generation: str,
+) -> None:
+    old_ancestors = (81,)
+    new_ancestors = (91, 92)
+
+    class InterruptAfterCleanup(dict[object, tuple[int, ...]]):
+        armed = True
+
+        def pop(self, key: object, default=None):
+            value = super().pop(key, default)
+            if self.armed:
+                self.armed = False
+                raise KeyboardInterrupt("after stale cleanup")
+            return value
+
+    retired = InterruptAfterCleanup()
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "retired",
+        retired,
+    )
+
+    if generation == "raw":
+        leaf_handle = 55
+        raw_authority = {leaf_handle: _authority(old_ancestors)}
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_retain_non_reparse_ancestors",
+            lambda _path: list(new_ancestors),
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_create_raw_handle",
+            lambda _path, _access: leaf_handle,
+        )
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_attributes",
+            lambda _handle: 0,
+        )
+        target = tmp_path / "value.txt"
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_final_path",
+            lambda _handle: target,
+        )
+
+        with pytest.raises(KeyboardInterrupt, match="after stale cleanup"):
+            filesystem._windows_open_no_follow_handle(target, directory=False)
+
+        assert raw_authority == {}
+        expected_leaf_closes = [leaf_handle]
+    else:
+        raw_handle = 55
+        descriptor = 73
+        raw_authority = {raw_handle: _authority(new_ancestors)}
+        descriptor_authority = {descriptor: _authority(old_ancestors)}
+        closed_descriptors: list[int] = []
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "handles",
+            raw_authority,
+        )
+        monkeypatch.setattr(
+            filesystem._WINDOWS_AUTHORITY,
+            "descriptors",
+            descriptor_authority,
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "msvcrt",
+            SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+        )
+        monkeypatch.setattr(os, "close", closed_descriptors.append)
+
+        with pytest.raises(KeyboardInterrupt, match="after stale cleanup"):
+            filesystem._windows_handle_to_descriptor(raw_handle, os.O_RDONLY)
+
+        assert raw_authority == {}
+        assert descriptor_authority == {}
+        assert closed_descriptors == [descriptor]
+        expected_leaf_closes = []
+
+    assert retired == {}
+    assert windows_api.closed == [
+        *reversed(old_ancestors),
+        *expected_leaf_closes,
+        *reversed(new_ancestors),
+    ]
+
+
+def test_windows_raw_close_is_a_noop_off_windows(monkeypatch) -> None:
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: False)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_kernel32",
+        lambda: (_ for _ in ()).throw(AssertionError("must not resolve kernel32")),
+    )
+
+    filesystem._windows_close_raw_handle(91)
+
+
+def test_windows_descriptor_close_interruption_keeps_registered_authority(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    descriptor = 73
+    ancestors = (81, 82)
+    generation = _authority(ancestors)
+    descriptor_authority = {descriptor: generation}
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "descriptors",
+        descriptor_authority,
+    )
+    monkeypatch.setattr(
+        os,
+        "close",
+        lambda _descriptor: (_ for _ in ()).throw(
+            KeyboardInterrupt("descriptor close interrupted")
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="descriptor close interrupted"):
+        filesystem._close_descriptor(descriptor)
+
+    assert descriptor_authority == {descriptor: generation}
+    assert windows_api.closed == []
 
 
 def test_windows_open_directory_and_create_failure_cleanup(
@@ -500,12 +2106,19 @@ def test_windows_regular_observer_adapter_uses_transferred_handle(
     source.write_text("value\n", encoding="utf-8")
     raw = os.open(source, os.O_RDONLY)
     closed: list[int] = []
+    requested_metadata_access: list[bool] = []
+
+    def open_retained(*_args, **kwargs) -> int:
+        requested_metadata_access.append(kwargs.get("write_metadata", False))
+        return raw
+
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
     monkeypatch.setattr(
         filesystem,
         "_windows_open_no_follow_handle",
-        lambda *_args, **_kwargs: raw,
+        open_retained,
     )
+    monkeypatch.setattr(filesystem, "_windows_handle_final_path", lambda _handle: source)
     monkeypatch.setattr(filesystem, "_windows_close_handle", closed.append)
     monkeypatch.setitem(
         sys.modules,
@@ -528,6 +2141,7 @@ def test_windows_regular_observer_adapter_uses_transferred_handle(
         os.close(raw)
 
     assert closed == []
+    assert requested_metadata_access == [True]
 
 
 def test_windows_regular_observer_rejects_redirect_and_wrong_handle(
@@ -540,13 +2154,32 @@ def test_windows_regular_observer_rejects_redirect_and_wrong_handle(
     other.write_text("outside\n", encoding="utf-8")
     other_fd = os.open(other, os.O_RDONLY)
     closed: list[int] = []
+    authority: dict[int, GenerationAuthority] = {}
+
+    def open_handle(handle: int):
+        def open_retained(*_args, **_kwargs):
+            authority[handle] = _authority()
+            return handle
+
+        return open_retained
+
+    def close_handle(handle: int) -> None:
+        authority.pop(handle, None)
+        closed.append(handle)
+
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handles",
+        authority,
+    )
     monkeypatch.setattr(
         filesystem,
         "_windows_open_no_follow_handle",
-        lambda *_args, **_kwargs: other_fd,
+        open_handle(other_fd),
     )
-    monkeypatch.setattr(filesystem, "_windows_close_handle", closed.append)
+    monkeypatch.setattr(filesystem, "_windows_handle_final_path", lambda _handle: other)
+    monkeypatch.setattr(filesystem, "_windows_close_handle", close_handle)
     monkeypatch.setitem(
         sys.modules,
         "msvcrt",
@@ -563,11 +2196,60 @@ def test_windows_regular_observer_rejects_redirect_and_wrong_handle(
     monkeypatch.setattr(
         filesystem,
         "_windows_open_no_follow_handle",
-        lambda *_args, **_kwargs: 88,
+        open_handle(88),
     )
+    monkeypatch.setattr(filesystem, "_windows_handle_final_path", lambda _handle: link)
     with pytest.raises(OSError, match="reparse point"):
         filesystem._open_observed(link)
-    assert closed == [88]
+    assert closed == [other_fd, 88]
+
+
+@pytest.mark.parametrize("failure_boundary", ["final_path", "initial_lstat"])
+def test_windows_regular_observer_closes_raw_authority_before_transfer_failure(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+    failure_boundary: str,
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("value\n", encoding="utf-8")
+    leaf_handle = 91
+    ancestors = (81, 82)
+    monkeypatch.setitem(
+        filesystem._WINDOWS_AUTHORITY.handles,
+        leaf_handle,
+        _authority(ancestors),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_open_no_follow_handle",
+        lambda *_args, **_kwargs: leaf_handle,
+    )
+    if failure_boundary == "final_path":
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_final_path",
+            lambda _handle: (_ for _ in ()).throw(OSError("final path failed")),
+        )
+        expected = "final path failed"
+    else:
+        monkeypatch.setattr(
+            filesystem,
+            "_windows_handle_final_path",
+            lambda _handle: source,
+        )
+        monkeypatch.setattr(
+            Path,
+            "lstat",
+            lambda _path: (_ for _ in ()).throw(OSError("lstat failed")),
+        )
+        expected = "lstat failed"
+
+    with pytest.raises(OSError, match=expected):
+        filesystem._open_observed(source)
+
+    assert windows_api.closed == [leaf_handle, *reversed(ancestors)]
+    assert leaf_handle not in filesystem._WINDOWS_AUTHORITY.handles
 
 
 def test_windows_descriptor_metadata_adapters_do_not_require_pathnames(

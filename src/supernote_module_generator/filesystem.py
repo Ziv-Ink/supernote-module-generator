@@ -11,7 +11,7 @@ import stat
 import sys
 import tempfile
 import uuid
-from typing import Any, Dict, Iterable, Iterator, Optional, Protocol, Tuple
+from typing import Any, Callable, cast, Dict, Iterable, Iterator, Optional, Protocol, Tuple
 
 from .errors import (
     ConcurrentSourceMutation,
@@ -37,6 +37,19 @@ def _detect_descriptor_relative_io_support() -> bool:
 
 
 _DESCRIPTOR_RELATIVE_IO_SUPPORTED = _detect_descriptor_relative_io_support()
+
+
+from .windows_authority import (
+    GenerationAuthority as _WindowsGenerationAuthority,
+    RawCloseOutcome as _WindowsRawCloseOutcome,
+    RawCloseState as _WindowsRawCloseState,
+    WindowsAuthorityRegistry,
+)
+
+
+_WINDOWS_AUTHORITY = WindowsAuthorityRegistry(
+    lambda handle: _windows_attempt_close_raw_handle(handle)
+)
 
 
 def _windows_host() -> bool:
@@ -67,7 +80,34 @@ def _windows_handle_to_descriptor(handle: int, flags: int) -> int:
     import msvcrt
 
     opener = getattr(msvcrt, "open_osfhandle")
-    return int(opener(handle, flags))
+    registered = _WINDOWS_AUTHORITY.handle_generation(handle)
+    ancestor_generations = (
+        () if registered is None else registered.ancestor_generations
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = int(opener(handle, flags))
+        _WINDOWS_AUTHORITY.claim_descriptor(
+            descriptor,
+            ancestor_generations,
+        )
+        _WINDOWS_AUTHORITY.release_handle_if(handle, registered)
+        return descriptor
+    except BaseException:
+        if descriptor is None:
+            _windows_close_raw_handle(handle)
+        else:
+            descriptor_registered = _WINDOWS_AUTHORITY.descriptor_generation(
+                descriptor
+            )
+            if descriptor_registered is None:
+                _WINDOWS_AUTHORITY.ensure_descriptor(
+                    descriptor,
+                    _WindowsGenerationAuthority(ancestor_generations)
+                )
+            _WINDOWS_AUTHORITY.release_handle_if(handle, registered)
+            _close_descriptor(descriptor)
+        raise
 
 
 def _windows_descriptor_handle(descriptor: int) -> int:
@@ -245,22 +285,33 @@ def _windows_open_no_follow_handle(
     if write_metadata:
         desired_access |= 0x100  # FILE_WRITE_ATTRIBUTES
     try:
+        ancestor_generations = _WINDOWS_AUTHORITY.capture_raw_generations(
+            tuple(ancestor_handles)
+        )
         raw_handle = _windows_create_raw_handle(path, desired_access)
     except BaseException:
         _windows_close_handles(ancestor_handles)
         raise
     try:
+        _WINDOWS_AUTHORITY.claim_handle(
+            raw_handle,
+            ancestor_generations,
+        )
         if _windows_handle_attributes(raw_handle) & 0x400 and not allow_reparse_leaf:
             raise OSError(f"Source entry is a Windows reparse point: {path}")
         if not allow_reparse_leaf:
             final_path = _windows_handle_final_path(raw_handle)
             if _windows_path_key(final_path) != _windows_path_key(path):
                 raise OSError(f"Source path contains a Windows reparse point: {path}")
-        _windows_close_handles(ancestor_handles)
         return raw_handle
     except BaseException:
+        registered = _WINDOWS_AUTHORITY.handle_generation(raw_handle)
+        if registered is None:
+            _WINDOWS_AUTHORITY.ensure_handle(
+                raw_handle,
+                _WindowsGenerationAuthority(ancestor_generations)
+            )
         _windows_close_raw_handle(raw_handle)
-        _windows_close_handles(ancestor_handles)
         raise
 
 
@@ -344,8 +395,15 @@ def _windows_handle_final_path(handle: int) -> Path:
 
 
 def _windows_close_handles(handles: Iterable[int]) -> None:
+    first_error: BaseException | None = None
     for handle in reversed(tuple(handles)):
-        _windows_close_raw_handle(handle)
+        try:
+            _windows_close_raw_handle(handle)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
 
 
 def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
@@ -389,8 +447,8 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             current /= part
             handle = create_file(
                 _windows_api_path(current),
-                0x80,  # FILE_READ_ATTRIBUTES
-                0x1 | 0x2,
+                0x1 | 0x80,  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
+                0x1,
                 None,
                 3,
                 0x00200000 | 0x02000000,
@@ -400,6 +458,8 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             if handle == invalid_handle:
                 raise _windows_error()
             raw_handle = int(handle)
+            retained.append(raw_handle)
+            _WINDOWS_AUTHORITY.claim_handle(raw_handle, ())
             tag_info = FileAttributeTagInfo()
             if not get_info(
                 handle,
@@ -407,29 +467,69 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
                 ctypes.byref(tag_info),
                 ctypes.sizeof(tag_info),
             ):
-                _windows_close_raw_handle(raw_handle)
                 raise _windows_error()
             if tag_info.FileAttributes & 0x400:
-                _windows_close_raw_handle(raw_handle)
                 raise OSError(f"Source path contains a Windows reparse point: {path}")
-            retained.append(raw_handle)
         return retained
     except BaseException:
-        for handle in reversed(retained):
-            _windows_close_raw_handle(handle)
+        _windows_close_handles(retained)
         raise
 
 
-def _windows_close_raw_handle(handle: int) -> None:
-    if not _windows_host():
-        return
-    from ctypes import wintypes
+def _windows_attempt_close_raw_handle(handle: int) -> _WindowsRawCloseOutcome:
+    """Attempt one native close and classify whether retrying is safe."""
 
-    close_handle = _windows_kernel32().CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
-    if not close_handle(wintypes.HANDLE(handle)):
-        raise _windows_error()
+    if not _windows_host():
+        return _WindowsRawCloseOutcome(_WindowsRawCloseState.CLOSED)
+    try:
+        from ctypes import wintypes
+
+        close_handle = _windows_kernel32().CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+    except BaseException as exc:
+        return _WindowsRawCloseOutcome(
+            _WindowsRawCloseState.RETRYABLE,
+            exc,
+        )
+    attempted = False
+    returned = False
+    closed = False
+    try:
+        attempted = True
+        closed = bool(close_handle(wintypes.HANDLE(handle)))
+        returned = True
+        if closed:
+            return _WindowsRawCloseOutcome(_WindowsRawCloseState.CLOSED)
+        return _WindowsRawCloseOutcome(
+            _WindowsRawCloseState.RETRYABLE,
+            _windows_error(),
+        )
+    except BaseException as exc:
+        if returned:
+            state = (
+                _WindowsRawCloseState.CLOSED
+                if closed
+                else _WindowsRawCloseState.RETRYABLE
+            )
+        else:
+            state = (
+                _WindowsRawCloseState.AMBIGUOUS
+                if attempted
+                else _WindowsRawCloseState.RETRYABLE
+            )
+        return _WindowsRawCloseOutcome(state, exc)
+
+
+def _windows_close_raw_handle(handle: int) -> None:
+    _WINDOWS_AUTHORITY.close_raw(handle)
+
+
+def _close_descriptor(descriptor: int) -> None:
+    """Close a descriptor and the retained Windows ancestor authorities."""
+
+    close_descriptor = cast(Callable[[int], object], os.close)
+    _WINDOWS_AUTHORITY.close_descriptor(descriptor, close_descriptor)
 
 
 def _windows_close_handle(handle: int) -> None:
@@ -653,33 +753,51 @@ def _windows_entry_type(attributes: int) -> int:
     return stat.S_IFREG
 
 
+def _windows_open_observed_descriptor(path: Path) -> tuple[int, os.stat_result]:
+    """Bind one regular Windows entry and transfer its retained authority."""
+
+    handle = _windows_open_no_follow_handle(
+        path,
+        directory=False,
+        write_metadata=True,
+    )
+    try:
+        if _windows_path_key(_windows_handle_final_path(handle)) != _windows_path_key(
+            path
+        ):
+            raise ConcurrentSourceMutation(
+                f"Source entry changed while it was opened: {path}"
+            )
+        before = path.lstat()
+        if _metadata_is_redirecting_reparse_point(before):
+            raise OSError(f"Source entry is a Windows reparse point: {path}")
+        descriptor = _windows_handle_to_descriptor(
+            handle,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+    except BaseException:
+        if _WINDOWS_AUTHORITY.handle_generation(handle) is not None:
+            _windows_close_handle(handle)
+        raise
+    return descriptor, before
+
+
 def _open_observed(path: Path, *, directory: bool = False) -> tuple[int, os.stat_result]:
     if _windows_host():
         if directory:
             raise OSError(f"Source directory cannot be opened safely: {path}")
-        handle = _windows_open_no_follow_handle(path, directory=False)
-        before = path.lstat()
-        if _metadata_is_redirecting_reparse_point(before):
-            _windows_close_handle(handle)
-            raise OSError(f"Source entry is a Windows reparse point: {path}")
-        try:
-            descriptor = _windows_handle_to_descriptor(
-                handle,
-                os.O_RDONLY | getattr(os, "O_BINARY", 0),
-            )
-        except BaseException:
-            _windows_close_handle(handle)
-            raise
-        opened = os.fstat(descriptor)
+        descriptor, before = _windows_open_observed_descriptor(path)
         try:
             live = path.lstat()
         except BaseException:
-            os.close(descriptor)
+            _close_descriptor(descriptor)
             raise
-        if not _same_observed_entry(before, opened) or not _same_observed_entry(
-            opened, live
-        ):
-            os.close(descriptor)
+        # The native leaf handle and retained non-reparse ancestor handles bind
+        # the object. Windows CRT descriptor stats do not project a compatible
+        # volume/mode tuple for every filename; compare the two pathname samples
+        # taken while replacement is denied instead.
+        if not _same_observed_entry(before, live):
+            _close_descriptor(descriptor)
             raise ConcurrentSourceMutation(
                 f"Source entry changed while it was opened: {path}"
             )
@@ -791,6 +909,26 @@ def _finish_observed_atime(
 ) -> bool:
     """Restore only read-induced atime on the same otherwise-unchanged entry."""
 
+    if _windows_host():
+        try:
+            after = path.lstat()
+        except OSError:
+            return False
+        if not _same_observed_entry(before, after):
+            return False
+        # Windows may defer access-time updates. Reapply the captured value
+        # unconditionally so this is also the boundary that detects a
+        # concurrent write arriving between observation and publication.
+        _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        try:
+            restored = path.lstat()
+        except OSError:
+            return False
+        return (
+            _same_observed_entry(before, restored)
+            and restored.st_atime_ns == before.st_atime_ns
+        )
+
     after = os.fstat(descriptor)
     try:
         live = path.lstat()
@@ -799,16 +937,7 @@ def _finish_observed_atime(
     if not _same_observed_entry(before, after) or not _same_observed_entry(after, live):
         return False
     if after.st_atime_ns != before.st_atime_ns:
-        if _windows_host():
-            _windows_apply_handle_metadata_values(
-                _windows_descriptor_handle(descriptor),
-                mode=None,
-                regular=stat.S_ISREG(after.st_mode),
-                atime_ns=before.st_atime_ns,
-                mtime_ns=None,
-            )
-        else:
-            _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
         restored = os.fstat(descriptor)
         try:
             restored_live = path.lstat()
@@ -922,7 +1051,7 @@ def _restore_observed_path_atime(path: Path, before: os.stat_result) -> bool:
     try:
         return _finish_observed_atime(path, descriptor, before)
     finally:
-        os.close(descriptor)
+        _close_descriptor(descriptor)
 
 
 def read_regular_bytes_no_follow(path: Path) -> tuple[bytes, os.stat_result]:
@@ -945,7 +1074,7 @@ def read_regular_bytes_no_follow(path: Path) -> tuple[bytes, os.stat_result]:
             raise FilesystemError(f"Source entry changed while it was read: {path}")
         return b"".join(chunks), before
     finally:
-        os.close(descriptor)
+        _close_descriptor(descriptor)
 
 
 def validate_contained_path_no_follow(
@@ -1111,7 +1240,7 @@ def contained_directory_entries_no_follow(
             raise descriptor_error
         return tuple(sorted(descriptor_rows))
     finally:
-        os.close(descriptor)
+        _close_descriptor(descriptor)
 
 
 def contained_tree_entries_no_follow(
@@ -1180,7 +1309,7 @@ def contained_tree_entries_no_follow(
     try:
         walk(descriptor, path)
     finally:
-        os.close(descriptor)
+        _close_descriptor(descriptor)
     return tuple(rows)
 
 
@@ -2985,8 +3114,8 @@ def _copy_file_preserve_stat(source: Path, destination: Path) -> None:
         raise
     finally:
         if destination_descriptor is not None:
-            os.close(destination_descriptor)
-        os.close(source_descriptor)
+            _close_descriptor(destination_descriptor)
+        _close_descriptor(source_descriptor)
 
 
 def _open_copy_destination(
@@ -2994,6 +3123,9 @@ def _open_copy_destination(
     metadata: os.stat_result,
 ) -> int:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    # CRT text descriptors translate LF on Windows.  Recovery copies are a
+    # byte-for-byte authority record, so both ends must remain binary.
+    flags |= getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     return os.open(destination, flags, stat.S_IMODE(metadata.st_mode))
@@ -3095,7 +3227,7 @@ def _update_digest_from_file(digest: _Digest, path: Path) -> None:
                 f"Source file changed while it was hashed: {path}"
             )
     finally:
-        os.close(descriptor)
+        _close_descriptor(descriptor)
 
 
 def _is_build_or_cache_path(relative: str) -> bool:

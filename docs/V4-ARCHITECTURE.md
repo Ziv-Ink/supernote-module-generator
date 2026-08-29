@@ -148,11 +148,14 @@ tests, and regression history remain useful only when they satisfy V4 decisions.
 The checked-in Ruff gate applies Python correctness checks to all active source
 and tests. The gradual mypy boundary covers the public CLI grammar, canonical V4
 identity, semantic IR, artifact plan, integrity manifest, descriptor-bound
-filesystem observation, recovery-registry schema, transaction engine, template
+filesystem observation, generation-bound Windows handle authority,
+recovery-registry schema, transaction engine, template
 capability, generation execution, and command-result models. Low-level
 contracts must not import terminal rendering, Doctor, or operation
 orchestration. Generation execution consumes those contracts without reversing
-that dependency. CI runs both gates on every supported Python version.
+that dependency. Imported modules remain available for type information, while
+diagnostics are emitted only for the explicit gradual boundary. CI runs the
+bare checked-in Ruff and mypy commands on every supported Python version.
 
 Artifact planning is split into independently typed phases for artifact
 identity, dependency edits, wiring edits, tree-removal authority, stale-file
@@ -160,6 +163,12 @@ comparison, and execution preconditions. Generation execution separately
 exposes staging, detach, conditional activation, and completion-checkpoint
 phases. Dedicated CI complexity checks keep both orchestration entry points
 below the checked-in McCabe ceiling.
+
+Windows path, reparse-point, and metadata operations remain in the filesystem
+adapter. A separately typed authority registry owns raw-handle and CRT-descriptor
+generations, retained ancestors, retryable retirement, and ambiguous close
+outcomes. The adapter injects the native close operation; the registry never
+reopens a pathname or calls Win32 path APIs.
 
 The public command grammar is likewise separated into command discovery, token
 collection, positional policy, output-mode policy, and value validation. Its

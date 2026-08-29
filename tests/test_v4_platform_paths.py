@@ -250,6 +250,7 @@ def test_windows_copy_destination_cannot_be_replaced_before_metadata_publication
 ) -> None:
     source = tmp_path / "source.txt"
     source.write_text("value\n", encoding="utf-8")
+    expected = source.read_bytes()
     destination = tmp_path / "destination.txt"
     original_apply = filesystem_module._apply_descriptor_metadata
     attempted = False
@@ -270,7 +271,7 @@ def test_windows_copy_destination_cannot_be_replaced_before_metadata_publication
     copy_entry_no_follow(source, destination)
 
     assert attempted
-    assert destination.read_bytes() == b"value\n"
+    assert destination.read_bytes() == expected
     assert not (tmp_path / "detached.txt").exists()
 
 
