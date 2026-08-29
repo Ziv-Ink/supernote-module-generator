@@ -353,7 +353,7 @@ def _windows_create_raw_handle(path: Path, desired_access: int) -> int:
     handle = create_file(
         _windows_api_path(path),
         desired_access,
-        0x1 | 0x2,
+        0x1 | 0x2 | 0x4,
         None,
         3,
         0x00200000 | 0x02000000,
@@ -640,7 +640,7 @@ def _windows_apply_handle_metadata_values(
     basic.LastWriteTime = 0 if mtime_ns is None else unix_epoch + mtime_ns // 100
     basic.ChangeTime = 0
     readonly = 0x1
-    if mode is None:
+    if mode is None or not regular:
         # FILE_BASIC_INFO defines zero as "leave all file attributes unchanged".
         # An observational atime repair must not replay attributes sampled by
         # GetFileInformationByHandleEx over a concurrent owner update.

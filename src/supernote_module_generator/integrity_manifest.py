@@ -11,7 +11,7 @@ import stat
 from typing import Dict, Iterable, Optional, Tuple
 
 from .feature_identity import canonical_feature_id
-from .filesystem import read_contained_regular_bytes_no_follow
+from .filesystem import _windows_host, read_contained_regular_bytes_no_follow
 from .generation_plan import OwnedArtifact
 from .naming import NPM_NAME
 from .semantic_ir import CPP_FRONTEND_VERSION, JVM_FRONTEND_VERSION
@@ -612,7 +612,12 @@ def _regular_entry_hash(content: bytes, metadata: os.stat_result) -> str:
 
     digest = hashlib.sha256()
     digest.update(b".\0file\0")
-    digest.update(f"{stat.S_IMODE(metadata.st_mode):o}".encode("ascii"))
+    mode = (
+        (stat.S_IWRITE if metadata.st_mode & stat.S_IWRITE else 0) | stat.S_IREAD
+        if _windows_host()
+        else stat.S_IMODE(metadata.st_mode)
+    )
+    digest.update(f"{mode:o}".encode("ascii"))
     digest.update(b"\0")
     digest.update(content)
     return digest.hexdigest()
