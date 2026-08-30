@@ -261,6 +261,7 @@ def test_materializer_keeps_each_fixture_scoped_and_deterministic(
     )
     assert config["pluginID"] == result["plugin_id"]
     assert len(config["pluginID"]) == 16
-    assert package["dependencies"]["sn-plugin-lib"] == "0.1.63"
+    assert package["dependencies"]["sn-plugin-lib"] == materialize.SN_PLUGIN_LIB_VERSION
+    assert materialize.SN_PLUGIN_LIB_VERSION == "0.1.65"
     assert "__HOST__" not in application
     assert f"const HOST = '{host}'" in application

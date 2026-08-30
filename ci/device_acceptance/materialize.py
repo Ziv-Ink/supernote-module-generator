@@ -13,6 +13,7 @@ from typing import Sequence
 
 PINNED_REVISION = "9f626ed39be82b43ff74eb735d10b7de61f51508"
 FEATURE = "device-probe"
+SN_PLUGIN_LIB_VERSION = "0.1.65"
 
 
 def _run(root: Path, command: Sequence[str], *, capture: bool = False) -> str:
@@ -82,7 +83,7 @@ def materialize(
     package_path = root / "package.json"
     package = json.loads(package_path.read_text(encoding="utf-8"))
     package["name"] = label
-    package["dependencies"]["sn-plugin-lib"] = "0.1.63"
+    package["dependencies"]["sn-plugin-lib"] = SN_PLUGIN_LIB_VERSION
     package_path.write_text(
         json.dumps(package, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
