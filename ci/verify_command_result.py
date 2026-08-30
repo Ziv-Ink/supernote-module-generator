@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail a release gate unless a public V4 JSON result has the expected outcome."""
+"""Fail a release gate unless a public JSON result has the expected outcome."""
 from __future__ import annotations
 
 import argparse
@@ -12,8 +12,8 @@ def _read_result(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("command result must be a JSON object")
-    if value.get("schema_version") != "4.0":
-        raise ValueError("command result does not use schema version 4.0")
+    if value.get("schema_version") != "1.0":
+        raise ValueError("command result does not use schema version 1.0")
     return value
 
 

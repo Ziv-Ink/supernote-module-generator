@@ -146,7 +146,7 @@ def test_official_template_scaffold_activates_only_declared_dotfiles(
         (
             "update-no-op",
             {
-                "schema_version": "4.0",
+                "schema_version": "1.0",
                 "status": "success",
                 "exit_code": 0,
                 "metadata": {"no_op": True},
@@ -157,7 +157,7 @@ def test_official_template_scaffold_activates_only_declared_dotfiles(
         (
             "check-build",
             {
-                "schema_version": "4.0",
+                "schema_version": "1.0",
                 "status": "success",
                 "exit_code": 0,
                 "validation": {"build": "passed"},
@@ -177,6 +177,26 @@ def test_release_result_verifier_accepts_only_green_contracts(
     result.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(ValueError, match="did not succeed"):
         verify(result, expectation)
+
+
+def test_release_result_verifier_rejects_pre_public_schema(tmp_path: Path) -> None:
+    result = tmp_path / "result.json"
+    result.write_text(
+        json.dumps(
+            {
+                "schema_version": "4.0",
+                "status": "success",
+                "exit_code": 0,
+                "metadata": {"no_op": True},
+                "changes": [],
+                "actual_changes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="schema version 1.0"):
+        verify(result, "update-no-op")
 
 
 def test_v4_device_canary_evidence_is_scoped_and_complete() -> None:
