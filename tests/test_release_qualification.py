@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+import ci.run_wiki_acceptance as wiki_acceptance
 from supernote_module_generator import __version__
 from ci.materialize_readme_examples import materialize, read_examples
 from ci.run_wiki_acceptance import (
@@ -24,6 +25,7 @@ from supernote_module_generator.binding_codegen import scan_cpp_semantic_model
 from supernote_module_generator.arguments import parse_arguments
 from supernote_module_generator.feature_generator import FeatureConfig, stage_feature
 from supernote_module_generator.feature_model import StarterFamily
+from supernote_module_generator.errors import ConfigurationError
 from supernote_module_generator.helptext import COMMAND_HELP
 
 
@@ -379,12 +381,8 @@ def test_every_readme_and_wiki_command_output_record_is_source_classified(
         if record.classification in {"explanatory_output", "placeholder"}
     )
     for record in records:
-        if (
-            record.argv
-            and record.argv[0] == "sn-module-gen"
-            and record.classification != "placeholder"
-        ):
-            parse_arguments(list(record.argv[1:]))
+        if record.argv and record.argv[0] == "sn-module-gen":
+            parse_arguments(wiki_acceptance._grammar_arguments(record))
 
     by_source_and_text = {(record.source, record.text): record for record in records}
     expected = {
@@ -428,6 +426,7 @@ def test_every_readme_and_wiki_command_output_record_is_source_classified(
 
 def test_pinned_wiki_audit_inventories_commands_and_explanatory_output(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = ROOT / "ci/fixtures/supernote-module-generator-wiki.bundle"
     wiki = tmp_path / "wiki"
@@ -452,7 +451,15 @@ def test_pinned_wiki_audit_inventories_commands_and_explanatory_output(
         encoding="utf-8",
     )
     generator.chmod(0o755)
-    audit_commands(wiki, ROOT / "README.md", str(generator), output)
+    parsed_arguments: list[tuple[str, ...]] = []
+    original_parse_arguments = wiki_acceptance.parse_arguments
+
+    def tracked_parse_arguments(arguments: list[str]):
+        parsed_arguments.append(tuple(arguments))
+        return original_parse_arguments(arguments)
+
+    monkeypatch.setattr(wiki_acceptance, "parse_arguments", tracked_parse_arguments)
+    audited_records = audit_commands(wiki, ROOT / "README.md", str(generator), output)
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "1.1"
     assert manifest["record_count"] == len(manifest["records"])
@@ -464,6 +471,27 @@ def test_pinned_wiki_audit_inventories_commands_and_explanatory_output(
         record["classification"] == "explanatory_output"
         for record in manifest["records"]
     )
+    placeholders = [
+        record
+        for record in audited_records
+        if record.classification == "placeholder"
+        and record.argv[:1] == ("sn-module-gen",)
+    ]
+    assert {(record.source, record.text) for record in placeholders} == {
+        (
+            "Error-Handling.md",
+            "sn-module-gen validate <module-name> --build --verbose",
+        ),
+        ("Using-the-CLI.md", "sn-module-gen add [PACKAGE] [options]"),
+        ("Using-the-CLI.md", "sn-module-gen update [FEATURE] [options]"),
+        ("Using-the-CLI.md", "sn-module-gen validate [FEATURE] [options]"),
+        ("Using-the-CLI.md", "sn-module-gen validate --all [options]"),
+        ("Using-the-CLI.md", "sn-module-gen remove [FEATURE] [options]"),
+        ("Using-the-CLI.md", "sn-module-gen remove --all [options]"),
+    }
+    assert {
+        tuple(wiki_acceptance._grammar_arguments(record)) for record in placeholders
+    } <= set(parsed_arguments)
 
 
 def test_pinned_wiki_doctor_adb_claim_matches_source_and_installed_help(
@@ -573,6 +601,31 @@ sn-module-gen check
     )
     with pytest.raises(ValueError, match="unclassified bash fenced command"):
         scan_documented_commands([page])
+
+    wiki = tmp_path / "invalid-wiki"
+    wiki.mkdir()
+    readme = tmp_path / "empty-readme.md"
+    readme.write_text("# Readme\n", encoding="utf-8")
+    invalid = wiki / "Invalid.md"
+    invalid.write_text(
+        "# Invalid placeholder command\n\n"
+        "```bash\n"
+        "sn-module-gen validate <module-name> --definitely-invalid\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match='unknown option "--definitely-invalid"'):
+        audit_commands(wiki, readme, "unused-generator", tmp_path / "invalid.json")
+
+    invalid.write_text(
+        "# Unsupported placeholder\n\n"
+        "```bash\n"
+        "sn-module-gen validate <unknown-module>\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unsupported documented placeholder"):
+        audit_commands(wiki, readme, "unused-generator", tmp_path / "invalid.json")
 
 
 def test_template_launch_contract_and_fake_device_harness(tmp_path: Path) -> None:

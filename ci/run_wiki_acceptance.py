@@ -382,8 +382,21 @@ def _grammar_arguments(command: DocumentedCommand) -> list[str]:
         "[MODULE]": "example",
         "<module-name>": "example",
     }
-    arguments = [values.get(value, value) for value in command.argv[1:]]
-    return [value for value in arguments if value != "[options]"]
+    arguments: list[str] = []
+    for value in command.argv[1:]:
+        if value == "[options]":
+            continue
+        if PLACEHOLDER.search(value):
+            replacement = values.get(value)
+            if replacement is None:
+                raise ValueError(
+                    f"{command.source}:{command.line}: unsupported documented "
+                    f"placeholder: {value}"
+                )
+            arguments.append(replacement)
+        else:
+            arguments.append(value)
+    return arguments
 
 
 def audit_commands(
@@ -404,13 +417,11 @@ def audit_commands(
             raise ValueError(
                 f"{command.source}:{command.line}: classified record lacks gate or reason"
             )
-        if (
-            command.classification == "placeholder"
-            or not command.argv
-            or command.argv[0] != "sn-module-gen"
-        ):
+        if not command.argv or command.argv[0] != "sn-module-gen":
             continue
         parse_arguments(_grammar_arguments(command))
+        if command.classification == "placeholder":
+            continue
         if command.execution_gate == "documentation-smoke":
             subprocess.run(
                 (generator_command, *command.argv[1:]),
