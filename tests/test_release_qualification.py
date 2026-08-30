@@ -228,7 +228,8 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
     assert "tests/test_v4_regression_harness.py" in quality
     assert "tests/test_v4_platform_paths.py" in quality
     assert "python -m compileall -q src tests ci" in quality
-    assert "python -m coverage run -m pytest -q" in quality
+    assert "--data-file=.coverage.linux-complete" in quality
+    assert "path: .coverage.linux-complete" in quality
     assert "--data-file=.coverage.platform-${{ runner.os }}" in quality
     assert "pattern: coverage-*" in quality
     assert "python -m coverage combine coverage-data" in quality

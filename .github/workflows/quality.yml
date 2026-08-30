@@ -86,12 +86,15 @@ jobs:
       - name: Install coverage dependencies
         run: python -m pip install -e '.[dev]'
       - name: Measure complete-suite branch coverage
-        run: python -m coverage run -m pytest -q
+        run: >-
+          python -m coverage run
+          --data-file=.coverage.linux-complete
+          -m pytest -q
       - name: Retain complete-suite coverage input
         uses: actions/upload-artifact@v4
         with:
           name: coverage-linux-complete
-          path: .coverage
+          path: .coverage.linux-complete
           include-hidden-files: true
 
   platform:
