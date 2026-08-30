@@ -298,7 +298,7 @@ def test_missing_marker_end_is_a_single_runtime_scoped_issue(tmp_path: Path):
     root = canonical_plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end sn-module-gen-v4-runtime", "")
+        settings.read_text().replace("// end supernote-module-v4-runtime", "")
     )
 
     result = V4Validator(root).validate()

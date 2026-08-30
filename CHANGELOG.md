@@ -9,8 +9,10 @@ should also check their installed version with `sn-module-gen --version`.
 ## 0.1.0 - 2026-08-30
 
 - First public release as the `sn-module-gen` distribution and command.
-- Preserve the qualified pre-public generator behavior while resetting active
-  generated, diagnostic, and structured-result identities to public schema 1.0.
+- Rename the structured command-result resource to `command-result.schema.json`,
+  reset that public envelope to schema `1.0`, and use `SNMG_*` diagnostics.
+- Generated runtime and persisted-project identities remain at their qualified
+  pre-public spellings until their separately reviewed transition.
 - No migration or compatibility support is provided for pre-public generated projects.
 
 The entries below record pre-public development history. Their original version

@@ -194,9 +194,9 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
     canonical = settings.read_text()
     user_line = "include ':user-library'\n"
     if damage == "missing_end":
-        damaged = canonical.replace("// end sn-module-gen-v4-runtime\n", "")
+        damaged = canonical.replace("// end supernote-module-v4-runtime\n", "")
     elif damage == "duplicate":
-        start = canonical.index("// sn-module-gen-v4-runtime")
+        start = canonical.index("// supernote-module-v4-runtime")
         block = canonical[start:]
         damaged = canonical + block
     else:
@@ -241,8 +241,8 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
         for change in repaired["actual_changes"]
     )
     text = settings.read_text()
-    assert text.count("// sn-module-gen-v4-runtime") == 1
-    assert text.count("// end sn-module-gen-v4-runtime") == 1
+    assert text.count("// supernote-module-v4-runtime") == 1
+    assert text.count("// end supernote-module-v4-runtime") == 1
     assert text.count(user_line.strip()) == 1
     assert invoke(root, ["--json", "check"])[0] == 0
 
@@ -261,15 +261,15 @@ def test_repair_restores_every_malformed_wiring_family_atomically(tmp_path: Path
     settings = root / "android/settings.gradle"
     app_build = root / "android/app/build.gradle"
     settings.write_text(
-        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
+        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
         + "include ':user-library'\n"
     )
     app_build.write_text(
-        app_build.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
+        app_build.read_text().replace("// end supernote-module-v4-runtime\n", "")
         + "dependencies { implementation project(':user-library') }\n"
     )
     application.write_text(
-        application.read_text().replace("// end sn-module-gen-v4-package\n", "")
+        application.read_text().replace("// end supernote-module-v4-package\n", "")
     )
     before = inventory_project(root)
 
@@ -290,9 +290,9 @@ def test_repair_restores_every_malformed_wiring_family_atomically(tmp_path: Path
     assert "include ':user-library'" in settings.read_text()
     assert "implementation project(':user-library')" in app_build.read_text()
     assert "add(UserPackage())" in application.read_text()
-    assert settings.read_text().count("// end sn-module-gen-v4-runtime") == 1
-    assert app_build.read_text().count("// end sn-module-gen-v4-runtime") == 1
-    assert application.read_text().count("// end sn-module-gen-v4-package") == 1
+    assert settings.read_text().count("// end supernote-module-v4-runtime") == 1
+    assert app_build.read_text().count("// end supernote-module-v4-runtime") == 1
+    assert application.read_text().count("// end supernote-module-v4-package") == 1
     assert invoke(root, ["--json", "check"])[0] == 0
 
 
@@ -303,7 +303,7 @@ def test_staged_repair_validation_rejection_rolls_back_with_authoritative_issues
     root = plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
+        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
     )
     preview_code, preview_stdout, preview_stderr = invoke(
         root, ["--json", "repair", "--diff"]
@@ -367,7 +367,7 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
     root = plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
+        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
     )
     preview_code, preview_stdout, _ = invoke(
         root, ["--json", "repair", "--diff"]
@@ -459,14 +459,14 @@ def test_repair_structurally_canonicalizes_every_v4_marker_variant(
     text = path.read_text()
     package_marker = wiring_family == "application"
     start = (
-        "// sn-module-gen-v4-package"
+        "// supernote-module-v4-package"
         if package_marker
-        else "// sn-module-gen-v4-runtime"
+        else "// supernote-module-v4-runtime"
     )
     end = (
-        "// end sn-module-gen-v4-package"
+        "// end supernote-module-v4-package"
         if package_marker
-        else "// end sn-module-gen-v4-runtime"
+        else "// end supernote-module-v4-runtime"
     )
     if damage == "reversed":
         text = text.replace(start, "// marker-placeholder", 1)

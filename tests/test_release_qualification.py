@@ -4,12 +4,19 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 from supernote_module_generator import __version__
 from ci.materialize_readme_examples import materialize, read_examples
-from ci.run_wiki_acceptance import END, START, read_commands, scan_documented_commands
+from ci.run_wiki_acceptance import (
+    END,
+    START,
+    audit_commands,
+    read_commands,
+    scan_documented_commands,
+)
 from ci.scaffold_release_fixture import TEMPLATE_DOTFILES, scaffold
 from ci.template_launch_contract import UNVERIFIED, prepare_stub, verify_output, verify_template
 from ci.verify_command_result import verify
@@ -271,7 +278,7 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     assert '"$RUNNER_TEMP/generator-venv/bin/python"' in quality[
         wiki_runner - 100 : wiki_runner
     ]
-    assert "Execute the exact pinned Wiki command sequence" in quality
+    assert "Audit pinned Wiki commands and run the public CLI scenario" in quality
     assert "Prove the Wiki project is canonical and source-read-only" in quality
     assert "Build and verify the Wiki acceptance package" in quality
     assert "run_file_reader_acceptance.py" in quality
@@ -332,11 +339,43 @@ def test_every_readme_and_wiki_cli_example_is_source_classified(tmp_path: Path) 
 
     assert len(commands) >= 100
     classifications = {command.classification for command in commands}
-    assert {"placeholder", "smoke", "android", "interactive", "project"} <= classifications
+    assert {"android", "project", "legacy-documentation-deferred"} <= classifications
     assert all(command.reason for command in commands)
     for command in commands:
-        if command.classification != "placeholder":
+        if command.classification not in {
+            "placeholder",
+            "legacy-documentation-deferred",
+        }:
             parse_arguments(list(command.argv[1:]))
+
+
+def test_pinned_wiki_audit_preserves_legacy_source_argv(tmp_path: Path) -> None:
+    bundle = ROOT / "ci/fixtures/supernote-module-generator-wiki.bundle"
+    wiki = tmp_path / "wiki"
+    subprocess.run(("git", "clone", str(bundle), str(wiki)), check=True)
+
+    commands = scan_documented_commands([wiki / "Getting-Started.md"])
+    legacy = [
+        command
+        for command in commands
+        if command.classification == "legacy-documentation-deferred"
+    ]
+
+    assert legacy
+    assert all(command.argv[0] == "supernote-module" for command in legacy)
+    assert all("Checkpoint 3" in command.reason for command in legacy)
+    assert read_commands(wiki / "Getting-Started.md")[0][0] == "supernote-module"
+
+    output = tmp_path / "documented-commands.json"
+    audit_commands(wiki, ROOT / "README.md", sys.executable, output)
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    deferred = [
+        command
+        for command in manifest["commands"]
+        if command["classification"] == "legacy-documentation-deferred"
+    ]
+    assert deferred
+    assert all(command["argv"][0] == "supernote-module" for command in deferred)
 
 
 def test_wiki_acceptance_commands_are_bounded_and_source_backed(tmp_path: Path) -> None:
@@ -372,7 +411,7 @@ sn-module-gen check
         f"{START}\n```bash\nnpm install\n```\n{END}\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="only sn-module-gen"):
+    with pytest.raises(ValueError, match="documented generator CLI"):
         read_commands(page)
 
 

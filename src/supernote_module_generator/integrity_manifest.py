@@ -803,8 +803,8 @@ def _parse_wiring(raw: object, index: int) -> WiringRecord:
     sha256 = raw.get("sha256")
     _require_canonical_relative(path, f"wiring[{index}].path")
     if marker not in {
-        "sn-module-gen-v4-runtime",
-        "sn-module-gen-v4-package",
+        "supernote-module-v4-runtime",
+        "supernote-module-v4-package",
     }:
         raise IntegrityManifestError(f"wiring[{index}] marker is invalid")
     _require_sha256(sha256, f"wiring[{index}].sha256")

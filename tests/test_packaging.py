@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import subprocess
 import sys
@@ -52,18 +53,38 @@ def test_clean_wheel_installs_only_the_public_console_script(tmp_path: Path) -> 
     )
     environment = tmp_path / "environment"
     subprocess.run((sys.executable, "-m", "venv", str(environment)), check=True)
-    executable = environment / "bin" / "python"
+    executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     subprocess.run(
         (str(executable), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(next(dist.glob("*.whl")))),
         check=True,
         capture_output=True,
         text=True,
     )
-    script_directory = environment / "bin"
-    assert (script_directory / "sn-module-gen").is_file()
-    assert not (script_directory / "supernote-module").exists()
+    script_directory = Path(
+        subprocess.check_output(
+            (
+                str(executable),
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('scripts'))",
+            ),
+            text=True,
+        ).strip()
+    )
+    scoped_path = str(script_directory)
+    public_launcher = shutil.which("sn-module-gen", path=scoped_path)
+    assert public_launcher is not None
+    assert shutil.which("supernote-module", path=scoped_path) is None
+    assert not (script_directory / "supernote-module.exe").exists()
+    assert any(
+        path.name == "sn-module-gen" or path.name.startswith("sn-module-gen.")
+        for path in script_directory.iterdir()
+    )
+    assert not any(
+        path.name == "supernote-module" or path.name.startswith("supernote-module.")
+        for path in script_directory.iterdir()
+    )
     version = subprocess.run(
-        (str(script_directory / "sn-module-gen"), "--version"),
+        (public_launcher, "--version"),
         check=True,
         capture_output=True,
         text=True,

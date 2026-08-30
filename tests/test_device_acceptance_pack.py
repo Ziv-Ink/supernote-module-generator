@@ -75,7 +75,7 @@ def test_doc_fixture_pdf_is_deterministic_and_self_contained() -> None:
     (
         (
             "note",
-            "/storage/emulated/0/Note/SNV4_Bounded_Acceptance/SNV4_Bounded_NOTE.note",
+            "/storage/emulated/0/Note/SNMG_Bounded_Acceptance/SNMG_Bounded_NOTE.note",
             0,
         ),
         (
@@ -169,6 +169,20 @@ def test_retained_device_evidence_matches_the_source_contract(
 
     assert normalized == retained
     assert retained["check_count"] == 15
+
+
+def test_device_evidence_rejects_mixed_marker_families() -> None:
+    cases = json.loads((PACK / "cases.json").read_text(encoding="utf-8"))
+    historical = (EVIDENCE / "note-reactnative.log").read_text(encoding="utf-8")
+    mixed = historical.replace("SNV4_TEST_RESULT ", "SNMG_TEST_RESULT ")
+
+    with pytest.raises(ValueError, match="mixed current and historical marker families"):
+        validate_evidence(
+            mixed,
+            cases,
+            "note",
+            "/storage/emulated/0/Note/SNV4_Bounded_Acceptance/SNV4_Bounded_NOTE.note",
+        )
 
 
 @pytest.mark.parametrize(

@@ -139,9 +139,9 @@ def test_public_commands_reject_unmanifested_v4_wiring_without_mutation(
     settings = root / "android/settings.gradle"
     settings.write_text(
         settings.read_text()
-        + "// sn-module-gen-v4-runtime\n"
+        + "// supernote-module-v4-runtime\n"
         + "include ':unmanifested-v4-runtime'\n"
-        + "// end sn-module-gen-v4-runtime\n"
+        + "// end supernote-module-v4-runtime\n"
     )
     before = inventory_project(root)
     before_metadata = exact_metadata(root)
@@ -554,8 +554,8 @@ def test_legacy_wiring_without_runtime_is_rejected_without_rewrite(tmp_path: Pat
     settings = root / "android/settings.gradle"
     settings.write_text(
         settings.read_text()
-        + "// sn-module-gen-v2-runtime\nlegacy\n"
-        + "// end sn-module-gen-v2-runtime\n"
+        + "// supernote-module-v2-runtime\nlegacy\n"
+        + "// end supernote-module-v2-runtime\n"
     )
     before = settings.read_bytes()
 
@@ -564,6 +564,29 @@ def test_legacy_wiring_without_runtime_is_rejected_without_rewrite(tmp_path: Pat
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert settings.read_bytes() == before
+
+
+def test_add_rejects_real_v2_wiring_without_any_mutation(tmp_path: Path):
+    root = plugin(tmp_path)
+    settings = root / "android/settings.gradle"
+    settings.write_text(
+        settings.read_text()
+        + "// supernote-module-v2-runtime\nlegacy\n"
+        + "// end supernote-module-v2-runtime\n"
+    )
+    before = inventory_project(root)
+    before_metadata = exact_metadata(root)
+
+    code, result = invoke(
+        root,
+        ["add", "fresh", "--starter", "cpp", "--skip-install", "--yes"],
+    )
+
+    assert code == 1
+    assert result["error"]["kind"] == "unsupported_legacy_project"
+    assert inventory_project(root) == before
+    assert exact_metadata(root) == before_metadata
+    assert not (root / ".supernote-module/manifest.json").exists()
 
 
 def test_v4_manifest_schema_is_required_and_legacy_schema_is_not_reinterpreted(

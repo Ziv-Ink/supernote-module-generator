@@ -131,6 +131,7 @@ jobs:
           tests/test_v4_regression_harness.py
           tests/test_v4_platform_paths.py
           tests/test_devconfig.py
+          tests/test_packaging.py::test_clean_wheel_installs_only_the_public_console_script
       - name: Retain native-platform coverage input
         uses: actions/upload-artifact@v4
         with:
@@ -399,7 +400,7 @@ jobs:
             wiki-plugin
           cd wiki-plugin
           npm install --ignore-scripts
-      - name: Execute the exact pinned Wiki command sequence
+      - name: Audit pinned Wiki commands and run the public CLI scenario
         env:
           SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |

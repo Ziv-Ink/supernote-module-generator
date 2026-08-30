@@ -12,11 +12,12 @@ from typing import Any, Sequence
 RESULT_MARKER = "SNMG_TEST_RESULT "
 EVENT_MARKER = "SNMG_TEST_EVENT "
 PERMISSION_MARKER = "SNMG_PERMISSION_REQUEST "
-HISTORICAL_MARKERS = {
-    RESULT_MARKER: "SNV4_TEST_RESULT ",
-    EVENT_MARKER: "SNV4_TEST_EVENT ",
-    PERMISSION_MARKER: "SNV4_PERMISSION_REQUEST ",
-}
+CURRENT_MARKERS = (RESULT_MARKER, EVENT_MARKER, PERMISSION_MARKER)
+HISTORICAL_MARKERS = (
+    "SNV4_TEST_RESULT ",
+    "SNV4_TEST_EVENT ",
+    "SNV4_PERMISSION_REQUEST ",
+)
 
 
 def _payloads(log: str, marker: str) -> list[dict[str, Any]]:
@@ -31,9 +32,20 @@ def _payloads(log: str, marker: str) -> list[dict[str, Any]]:
     return payloads
 
 
-def _current_or_historical_payloads(log: str, marker: str) -> list[dict[str, Any]]:
-    current = _payloads(log, marker)
-    return current if current else _payloads(log, HISTORICAL_MARKERS[marker])
+def _marker_family(log: str) -> tuple[tuple[str, str, str], list[dict[str, Any]]]:
+    current_results = _payloads(log, CURRENT_MARKERS[0])
+    historical_results = _payloads(log, HISTORICAL_MARKERS[0])
+    if len(current_results) + len(historical_results) != 1:
+        raise ValueError(
+            "expected one terminal result across current and historical marker families"
+        )
+    if current_results:
+        selected, rejected, results = CURRENT_MARKERS, HISTORICAL_MARKERS, current_results
+    else:
+        selected, rejected, results = HISTORICAL_MARKERS, CURRENT_MARKERS, historical_results
+    if any(_payloads(log, marker) for marker in rejected):
+        raise ValueError("mixed current and historical marker families")
+    return selected, results
 
 
 def validate_evidence(
@@ -45,9 +57,7 @@ def validate_evidence(
     if host not in {"note", "doc"}:
         raise ValueError("host must be note or doc")
     expected_checks = [item["id"] for item in cases["checks"]]
-    results = _current_or_historical_payloads(log, RESULT_MARKER)
-    if len(results) != 1:
-        raise ValueError(f"expected one terminal result, found {len(results)}")
+    markers, results = _marker_family(log)
     result = results[0]
     if result.get("suite") != cases["suite"] or result.get("host") != host:
         raise ValueError("terminal result suite/host mismatch")
@@ -60,11 +70,11 @@ def validate_evidence(
     if ids != expected_checks or any(item.get("status") != "pass" for item in checks):
         raise ValueError("terminal checks are incomplete, reordered, or failed")
 
-    events = _current_or_historical_payloads(log, EVENT_MARKER)
+    events = _payloads(log, markers[1])
     event_ids = [item.get("id") for item in events]
     if event_ids != expected_checks:
         raise ValueError("event sequence does not match the source-backed cases")
-    requests = _current_or_historical_payloads(log, PERMISSION_MARKER)
+    requests = _payloads(log, markers[2])
     expected_host = cases["hosts"][host]
     expected_request = {
         "schema": 1,

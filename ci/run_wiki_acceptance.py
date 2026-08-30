@@ -79,6 +79,11 @@ def _fenced_shell_lines(page: Path) -> tuple[tuple[int, str], ...]:
 
 
 def _classification(source: str, argv: tuple[str, ...]) -> tuple[str, str]:
+    if argv[0] == "supernote-module":
+        return (
+            "legacy-documentation-deferred",
+            "pinned pre-public Wiki command preserved verbatim until Checkpoint 3",
+        )
     joined = " ".join(argv)
     if PLACEHOLDER.search(joined):
         return "placeholder", "contains a documented value placeholder"
@@ -107,8 +112,6 @@ def scan_documented_commands(paths: Iterable[Path]) -> tuple[DocumentedCommand, 
             if not stripped.startswith(("sn-module-gen", "supernote-module")):
                 continue
             argv = tuple(shlex.split(stripped, posix=True))
-            if argv[0] == "supernote-module":
-                argv = ("sn-module-gen", *argv[1:])
             classification, reason = _classification(page.name, argv)
             commands.append(
                 DocumentedCommand(page.name, line, argv, classification, reason)
@@ -137,6 +140,8 @@ def audit_commands(
     if not commands:
         raise ValueError("No public sn-module-gen examples were found")
     for command in commands:
+        if command.classification == "legacy-documentation-deferred":
+            continue
         parse_arguments(_grammar_arguments(command))
         if command.classification == "smoke":
             subprocess.run(
@@ -184,14 +189,25 @@ def read_commands(page: Path) -> tuple[tuple[str, ...], ...]:
     if not commands:
         raise ValueError("Wiki release command block is empty")
     for command in commands:
-        if not command or command[0] != "sn-module-gen":
-            raise ValueError("Wiki release commands may invoke only sn-module-gen")
+        if not command or command[0] not in {"sn-module-gen", "supernote-module"}:
+            raise ValueError("Wiki release commands may invoke only a documented generator CLI")
     return commands
 
 
-def run_commands(page: Path, plugin_root: Path, generator_command: str) -> None:
-    for command in read_commands(page):
-        subprocess.run((generator_command, *command[1:]), check=True, cwd=plugin_root)
+def run_checkpoint_scenario(plugin_root: Path, generator_command: str) -> None:
+    commands = (
+        (
+            "add", "wiki-feature", "--starter", "cpp", "--starter", "kotlin",
+            "--javascript-name", "WikiFeature", "--android-namespace",
+            "com.example.wiki_feature", "--package-manager", "npm", "--yes",
+        ),
+        ("update", "wiki-feature", "--dry-run"),
+        ("update", "wiki-feature", "--yes"),
+        ("check",),
+        ("repair", "--dry-run"),
+    )
+    for command in commands:
+        subprocess.run((generator_command, *command), check=True, cwd=plugin_root)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -208,11 +224,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments.generator_command,
         arguments.output,
     )
-    run_commands(
-        arguments.wiki_root / "Getting-Started.md",
-        arguments.plugin_root,
-        arguments.generator_command,
-    )
+    read_commands(arguments.wiki_root / "Getting-Started.md")
+    run_checkpoint_scenario(arguments.plugin_root, arguments.generator_command)
     return 0
 
 

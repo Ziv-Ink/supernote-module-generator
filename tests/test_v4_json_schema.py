@@ -132,7 +132,7 @@ def test_staged_repair_validation_failure_conforms_to_schema(
     )[0] == 0
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
+        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
     )
     issue = ValidationIssue(
         "SNMG_STAGED_REPAIR_REJECTED",
@@ -175,7 +175,7 @@ def test_staged_repair_partial_rollback_separates_plan_from_actual_residue(
     )[0] == 0
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
+        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
     )
     preview_code, preview = invoke(root, ["repair", "--diff"])
     assert preview_code == 0

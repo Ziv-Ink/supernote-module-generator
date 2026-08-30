@@ -20,12 +20,12 @@ from .filesystem import (
 PROJECT_NAME = "supernote-v4-runtime"
 ANNOTATIONS_PROJECT = "supernote-v4-annotations"
 PROCESSOR_PROJECT = "supernote-v4-processor"
-START = "// sn-module-gen-v4-runtime"
-END = "// end sn-module-gen-v4-runtime"
-PACKAGE_START = "// sn-module-gen-v4-package"
-PACKAGE_END = "// end sn-module-gen-v4-package"
+START = "// supernote-module-v4-runtime"
+END = "// end supernote-module-v4-runtime"
+PACKAGE_START = "// supernote-module-v4-package"
+PACKAGE_END = "// end supernote-module-v4-package"
 LEGACY_MARKERS = tuple(
-    f"// sn-module-gen-v{version}-{kind}"
+    f"// supernote-module-v{version}-{kind}"
     for version in (1, 2, 3)
     for kind in ("runtime", "package")
 )
@@ -130,7 +130,7 @@ def desired_runtime_wiring_files(
                 text,
                 canonical if enabled else None,
             )
-            marker = "sn-module-gen-v4-runtime"
+            marker = "supernote-module-v4-runtime"
         elif path == app_build:
             canonical = _dependency_block(path.suffix == ".kts")
             if (
@@ -146,7 +146,7 @@ def desired_runtime_wiring_files(
                 text,
                 canonical if enabled else None,
             )
-            marker = "sn-module-gen-v4-runtime"
+            marker = "supernote-module-v4-runtime"
         else:
             canonical = _package_block(path.suffix == ".kt")
             if (
@@ -172,7 +172,7 @@ def desired_runtime_wiring_files(
                 enabled=enabled,
                 kotlin=path.suffix == ".kt",
             )
-            marker = "sn-module-gen-v4-package"
+            marker = "supernote-module-v4-package"
         rows.append(
             CanonicalWiringFile(
                 path,
@@ -201,12 +201,12 @@ def expected_runtime_wiring_blocks(
     blocks = [
         CanonicalWiringBlock(
             settings,
-            "sn-module-gen-v4-runtime",
+            "supernote-module-v4-runtime",
             _settings_block(settings.suffix == ".kts"),
         ),
         CanonicalWiringBlock(
             app_build,
-            "sn-module-gen-v4-runtime",
+            "supernote-module-v4-runtime",
             _dependency_block(app_build.suffix == ".kts"),
         ),
     ]
@@ -245,7 +245,7 @@ def expected_runtime_wiring_blocks(
         blocks.append(
             CanonicalWiringBlock(
                 application.path,
-                "sn-module-gen-v4-package",
+                "supernote-module-v4-package",
                 _extract_marker_block(expected, PACKAGE_START, PACKAGE_END),
             )
         )

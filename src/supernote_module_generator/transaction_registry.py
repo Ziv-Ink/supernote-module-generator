@@ -157,7 +157,7 @@ def private_recovery_registry(
     effective_uid: int | None,
     windows: bool,
 ) -> Path:
-    registry = temporary_root / f"sn-module-gen-v4-recovery-v2-{identity}"
+    registry = temporary_root / f"supernote-module-v4-recovery-v2-{identity}"
     kind = entry_kind(registry)
     if kind is None:
         try:

@@ -1588,15 +1588,15 @@ def test_add_rejects_stale_v2_generated_runtime_without_mutation(tmp_path: Path)
     app_build = root / "android/app/build.gradle"
     settings.write_text(
         settings.read_text()
-        + "// sn-module-gen-v2-runtime\nlegacy settings\n"
-        "// end sn-module-gen-v2-runtime\n"
+        + "// supernote-module-v2-runtime\nlegacy settings\n"
+        "// end supernote-module-v2-runtime\n"
         "include ':user-library'\n",
         encoding="utf-8",
     )
     app_build.write_text(
         app_build.read_text()
-        + "// sn-module-gen-v2-runtime\nlegacy dependency\n"
-        "// end sn-module-gen-v2-runtime\n"
+        + "// supernote-module-v2-runtime\nlegacy dependency\n"
+        "// end supernote-module-v2-runtime\n"
         "dependencies { implementation project(':user-library') }\n",
         encoding="utf-8",
     )
@@ -1734,7 +1734,7 @@ def test_failed_or_interrupted_dependency_refresh_exactly_restores_main_applicat
     assert code == (130 if interrupted else 1), stderr
     assert application.read_bytes() == before
     expected_marker_count = 0 if command == "add" else 1
-    assert application.read_text().count("sn-module-gen-v4-package") == (
+    assert application.read_text().count("supernote-module-v4-package") == (
         expected_marker_count * 2
     )
     assert not (root / ".supernote-module-transaction.json").exists()
@@ -1786,7 +1786,7 @@ def test_empty_validation_rejects_unmanifested_v4_runtime_and_package_wiring(
     assert "without a schema-4 integrity manifest" in stderr
     assert "cannot prove ownership" in stderr
     assert {path: path.read_bytes() for path in before} == before
-    assert application.read_text().count("sn-module-gen-v4-package") == 2
+    assert application.read_text().count("supernote-module-v4-package") == 2
 
 
 def test_empty_validation_rejects_unmanifested_package_registration_alone(
@@ -1807,7 +1807,7 @@ def test_empty_validation_rejects_unmanifested_package_registration_alone(
     assert "without a schema-4 integrity manifest" in stderr
     assert "cannot prove ownership" in stderr
     assert application.read_bytes() == before
-    assert application.read_text().count("sn-module-gen-v4-package") == 2
+    assert application.read_text().count("supernote-module-v4-package") == 2
 
 
 def test_feature_validation_rejects_missing_main_application_registration(
@@ -1833,7 +1833,7 @@ def test_feature_validation_rejects_missing_main_application_registration(
     assert code == 1
     assert "SNMG_WIRING_INVALID" in stderr
     assert "expected 1 start/end pair" in stderr
-    assert "sn-module-gen-v4-package" not in application.read_text()
+    assert "supernote-module-v4-package" not in application.read_text()
 
 
 def test_remove_preserves_build_outputs_unless_cleanup_is_explicit(tmp_path: Path):

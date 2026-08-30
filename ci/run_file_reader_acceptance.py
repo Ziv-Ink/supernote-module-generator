@@ -253,13 +253,17 @@ def run(
         b"export type Corrupted = never;\n",
     )
     settings = project / "android/settings.gradle"
+    settings_baseline = settings.read_bytes()
+    corrupted_settings = settings_baseline.replace(
+        b"supernote-module-v4-runtime", b"broken-v4-runtime", 1
+    )
+    if corrupted_settings == settings_baseline:
+        raise RuntimeError("runtime wiring corruption substitution changed no bytes")
     _check_corruption(
         project,
         executable,
         settings,
-        settings.read_bytes().replace(
-            b"supernote-module-v4-runtime", b"broken-v4-runtime", 1
-        ),
+        corrupted_settings,
     )
     manifest_path = project / ".supernote-module/manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -298,10 +302,10 @@ def run(
     for host, expected_file in (
         (
             "note",
-            "/storage/emulated/0/Note/SNMG_Bounded_Acceptance/"
-            "SNMG_Bounded_NOTE.note",
+            "/storage/emulated/0/Note/SNV4_Bounded_Acceptance/"
+            "SNV4_Bounded_NOTE.note",
         ),
-        ("doc", "/storage/emulated/0/Document/SNMG_Bounded_Acceptance.pdf"),
+        ("doc", "/storage/emulated/0/Document/SNV4_Bounded_Acceptance.pdf"),
     ):
         log = (bounded_device_evidence / f"{host}-reactnative.log").read_text(
             encoding="utf-8"
