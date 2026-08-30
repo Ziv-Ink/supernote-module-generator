@@ -2063,6 +2063,7 @@ def restore_protected_directory_metadata(
 
     root = root.resolve(strict=True)
     metadata = validate_protected_directory_metadata(root, metadata)
+    _WINDOWS_AUTHORITY.reconcile()
     failures: list[str] = []
     for relative, (mode, atime_ns, mtime_ns) in sorted(
         metadata.items(),
@@ -2073,12 +2074,12 @@ def restore_protected_directory_metadata(
             _apply_contained_directory_metadata(
                 root, relative, mode, atime_ns, mtime_ns
             )
-        except OSError:
+        except (OSError, FilesystemError):
             failures.append(f"modified:{relative}")
     for relative, (mode, atime_ns, mtime_ns) in metadata.items():
         try:
             value = _stat_contained_directory(root, relative)
-        except OSError:
+        except (OSError, FilesystemError):
             marker = f"deleted:{relative}"
             if marker not in failures:
                 failures.append(marker)
@@ -2803,7 +2804,14 @@ def _validate_metadata_recovery_binding(
         set(manifest) != expected_fields
         or manifest.get("schema_version") != 2
         or manifest.get("recovery_kind") != "transaction-directory-metadata"
-        or manifest.get("plugin_root") != str(root)
+        or (
+            (
+                _windows_path_key(Path(str(manifest.get("plugin_root"))))
+                != _windows_path_key(root)
+            )
+            if _windows_host()
+            else manifest.get("plugin_root") != str(root)
+        )
         or manifest.get("transaction_id") != transaction_id
         or manifest.get("outcome") != outcome
         or manifest.get("bundle_id") != bundle_id

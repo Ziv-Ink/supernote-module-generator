@@ -396,7 +396,7 @@ class V4Validator:
             if not path.is_file():
                 continue
             result = subprocess.run(
-                [node, "--check", str(path)],
+                [node, "--check", path.relative_to(self.root).as_posix()],
                 cwd=self.root,
                 capture_output=True,
                 text=True,

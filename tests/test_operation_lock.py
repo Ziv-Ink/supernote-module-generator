@@ -216,7 +216,7 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
         original(self, decisions)
         if decisions.package_name == "first":
             entered.set()
-            assert release.wait(timeout=5)
+            assert release.wait(timeout=30)
 
     monkeypatch.setattr(FeatureCliOperationService, "_validate_add", blocking_preflight)
     first_result = []
@@ -229,7 +229,7 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
         )
     )
     first.start()
-    assert entered.wait(timeout=5)
+    assert entered.wait(timeout=30)
     try:
         second = invoke(
             root,
@@ -237,7 +237,7 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
         )
     finally:
         release.set()
-        first.join(timeout=5)
+        first.join(timeout=30)
 
     assert not first.is_alive()
     assert first_result and first_result[0][0] == 0

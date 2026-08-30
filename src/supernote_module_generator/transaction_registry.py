@@ -10,7 +10,7 @@ import stat
 from typing import Mapping
 
 from .errors import FilesystemError
-from .filesystem import entry_kind
+from .filesystem import _windows_path_key, entry_kind
 
 
 RECOVERY_POINTER_SCHEMA = 1
@@ -237,7 +237,14 @@ def parse_recovery_pointer(raw: object, root: Path) -> RecoveryPointer:
     if (
         set(raw) != expected_fields
         or raw.get("schema_version") != RECOVERY_POINTER_SCHEMA
-        or raw.get("plugin_root") != str(root.resolve(strict=True))
+        or (
+            (
+                _windows_path_key(Path(str(raw.get("plugin_root"))))
+                != _windows_path_key(root.resolve(strict=True))
+            )
+            if os.name == "nt"
+            else raw.get("plugin_root") != str(root.resolve(strict=True))
+        )
         or not _is_hex(identifier, 32)
         or outcome not in {"rollback", "commit", "abandon"}
         or not isinstance(recovery_path, str)
