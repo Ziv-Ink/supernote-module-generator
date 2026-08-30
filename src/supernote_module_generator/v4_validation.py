@@ -11,9 +11,8 @@ from typing import Dict, Iterable, Mapping, Tuple
 
 from .diagnostics import relevant_diagnostic_lines, write_process_diagnostics
 from .filesystem import (
-    _windows_api_path,
-    _windows_host,
     protected_directory_metadata,
+    read_regular_bytes_no_follow,
     restore_protected_directory_metadata,
     source_tree_changes,
     source_tree_inventory,
@@ -397,24 +396,40 @@ class V4Validator:
             path = feature.root / "index.js"
             if not path.is_file():
                 continue
-            target_path = _windows_api_path(path) if _windows_host() else str(path)
             try:
+                content, _metadata = read_regular_bytes_no_follow(path)
                 result = subprocess.run(
-                    [node, "--check", target_path],
+                    [node, "--input-type=module", "--check", "-"],
+                    input=content,
                     capture_output=True,
-                    text=True,
                     check=False,
                 )
-            except OSError:
+            except OSError as exc:
+                issues.append(
+                    ValidationIssue(
+                        "SNV4_JAVASCRIPT_CHECK_FAILED",
+                        "error",
+                        "generated artifact",
+                        f"Node.js syntax validation could not run: {exc}",
+                        feature_id=feature.identity.feature_id,
+                        path=path.relative_to(self.root).as_posix(),
+                        suggested_command=(
+                            "Restore a working Node.js installation, then rerun "
+                            "supernote-module check."
+                        ),
+                    )
+                )
                 continue
             if result.returncode:
-                diagnostic = (result.stderr or result.stdout).strip().splitlines()
+                diagnostic = _process_text(
+                    result.stderr or result.stdout
+                ).strip().splitlines()
                 issues.append(
                     ValidationIssue(
                         "SNV4_JAVASCRIPT_INVALID",
                         "error",
                         "generated artifact",
-                        diagnostic[-1] if diagnostic else "generated JavaScript is invalid",
+                        _javascript_diagnostic(diagnostic),
                         feature_id=feature.identity.feature_id,
                         path=path.relative_to(self.root).as_posix(),
                         suggested_command="supernote-module update --all",
@@ -436,6 +451,17 @@ def _process_text(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _javascript_diagnostic(lines: Iterable[str]) -> str:
+    cleaned = tuple(line.strip() for line in lines if line.strip())
+    for line in cleaned:
+        if "SyntaxError" in line:
+            return line
+    for line in cleaned:
+        if "Error" in line and not line.startswith("Node.js "):
+            return line
+    return cleaned[0] if cleaned else "generated JavaScript is invalid"
 
 
 def _deduplicate(issues: Iterable[ValidationIssue]) -> Tuple[ValidationIssue, ...]:

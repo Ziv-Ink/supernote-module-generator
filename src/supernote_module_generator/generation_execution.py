@@ -7,7 +7,6 @@ import tempfile
 from typing import Callable, Iterable
 
 from .errors import ConcurrentSourceMutation
-from .filesystem import _descriptor_relative_io_supported
 from .generation_plan import ArtifactChange, GenerationPlan, PlanConflictError
 from .integrity_manifest import INTEGRITY_MANIFEST_PATH
 from .transaction import Transaction
@@ -188,8 +187,7 @@ class GenerationPlanExecutor:
             destination = self.root.joinpath(*PurePosixPath(relative).parts)
             precondition = preconditions[relative]
             if (
-                _descriptor_relative_io_supported()
-                and precondition.kind == "file"
+                precondition.kind == "file"
                 and precondition.content_sha256 is not None
                 and precondition.mode is not None
             ):

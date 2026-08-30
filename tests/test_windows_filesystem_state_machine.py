@@ -70,6 +70,7 @@ class _Kernel32:
         self.attributes: dict[str, int] = {}
         self.closed: list[int] = []
         self.basic_updates: list[SimpleNamespace] = []
+        self.rename_updates: list[bytes] = []
         self.reparse_payload = b""
         self.final_paths: dict[int, str] = {}
         self.directory_page: bytes | None = None
@@ -138,10 +139,13 @@ class _Kernel32:
             return 0
         return 1
 
-    def _set_info(self, _handle, _info_class, pointer, _size):
+    def _set_info(self, _handle, info_class, pointer, size):
         if self.fail_set:
             self.last_error = 5
             return 0
+        if info_class == 3:
+            self.rename_updates.append(ctypes.string_at(pointer, size))
+            return 1
         row = pointer._obj
         self.basic_updates.append(
             SimpleNamespace(
@@ -170,6 +174,150 @@ class _Kernel32:
         returned._obj.value = len(self.reparse_payload)
         return 1
 
+
+def test_windows_conditional_open_denies_write_and_delete_sharing(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def open_handle(path, **kwargs):
+        observed["path"] = path
+        observed.update(kwargs)
+        return 91
+
+    monkeypatch.setattr(filesystem, "_windows_open_no_follow_handle", open_handle)
+    monkeypatch.setattr(
+        filesystem, "_windows_handle_to_descriptor", lambda handle, flags: 73
+    )
+
+    assert filesystem._windows_open_conditional_regular_descriptor(
+        Path("C:/plugin/value.js")
+    ) == 73
+    assert observed["desired_access"] == 0x80000000 | 0x10000 | 0x100 | 0x80
+    assert observed["share_mode"] == 0x1
+
+
+def test_windows_descriptor_rename_uses_no_replace_file_rename_info(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    destination = Path("C:/plugin/long 名/value.js")
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+
+    filesystem._windows_rename_descriptor_no_replace(73, destination)
+
+    assert len(windows_api.rename_updates) == 1
+    raw = windows_api.rename_updates[0]
+    encoded = filesystem._windows_api_path(destination).encode("utf-16-le")
+    assert raw[:4] == b"\0\0\0\0"
+    assert int.from_bytes(raw[16:20], "little") == len(encoded)
+    assert raw.endswith(encoded)
+
+
+def test_windows_descriptor_rename_surfaces_native_failure(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    windows_api.fail_set = True
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+
+    with pytest.raises(OSError, match="fake Windows error"):
+        filesystem._windows_rename_descriptor_no_replace(
+            73, Path("C:/plugin/value.js")
+        )
+
+
+def test_windows_conditional_open_closes_registered_handle_on_transfer_failure(
+    monkeypatch,
+) -> None:
+    closed: list[int] = []
+    monkeypatch.setattr(
+        filesystem, "_windows_open_no_follow_handle", lambda *_args, **_kwargs: 91
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_to_descriptor",
+        lambda *_args: (_ for _ in ()).throw(OSError("transfer failed")),
+    )
+    monkeypatch.setattr(
+        filesystem._WINDOWS_AUTHORITY,
+        "handle_generation",
+        lambda _handle: GenerationAuthority(()),
+    )
+    monkeypatch.setattr(filesystem, "_windows_close_raw_handle", closed.append)
+
+    with pytest.raises(OSError, match="transfer failed"):
+        filesystem._windows_open_conditional_regular_descriptor(Path("value.js"))
+
+    assert closed == [91]
+
+
+def test_windows_conditional_descriptor_read_restores_observed_atime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "value.js"
+    path.write_bytes(b"content")
+    descriptor = os.open(path, os.O_RDONLY)
+    actual = os.fstat(descriptor)
+    before = SimpleNamespace(
+        st_mode=actual.st_mode,
+        st_dev=actual.st_dev,
+        st_ino=actual.st_ino,
+        st_mtime_ns=actual.st_mtime_ns,
+        st_atime_ns=1_000,
+        st_size=actual.st_size,
+    )
+    after = SimpleNamespace(**{**before.__dict__, "st_atime_ns": 1_200})
+    observations = iter((before, after))
+    applied: list[dict[str, object]] = []
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem.os, "fstat", lambda _fd: next(observations))
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_apply_handle_metadata_values",
+        lambda _handle, **kwargs: applied.append(kwargs),
+    )
+    try:
+        content, metadata = filesystem._read_windows_conditional_regular_descriptor(
+            descriptor
+        )
+    finally:
+        os.close(descriptor)
+
+    assert content == b"content"
+    assert metadata is before
+    assert applied == [
+        {
+            "mode": None,
+            "regular": True,
+            "atime_ns": 1_000,
+            "mtime_ns": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("directory", "write_metadata", "override", "expected"),
+    [
+        (False, False, None, 0x80000000 | 0x80),
+        (True, False, None, 0x1 | 0x80),
+        (True, True, None, 0x100 | 0x80),
+        (False, True, 0x10000, 0x10000 | 0x100),
+    ],
+)
+def test_windows_desired_access_is_scoped_to_operation(
+    directory: bool,
+    write_metadata: bool,
+    override: int | None,
+    expected: int,
+) -> None:
+    assert filesystem._windows_desired_access(
+        directory=directory,
+        write_metadata=write_metadata,
+        override=override,
+    ) == expected
 
 @pytest.fixture
 def windows_api(monkeypatch):
@@ -216,7 +364,7 @@ def test_windows_open_retains_ancestors_and_classifies_leaf(
     assert ancestor_calls
     assert windows_api.create_calls[-1][1] & 0x100
     assert all(access & 0x1 for _path, access, _share in ancestor_calls)
-    assert all(share == 0x1 for _path, _access, share in ancestor_calls)
+    assert all(share == 0x1 | 0x2 for _path, _access, share in ancestor_calls)
 
 
 def test_windows_descriptor_owns_retained_ancestors_until_close(
@@ -1974,22 +2122,33 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
     directory = tmp_path / "directory"
     directory.mkdir()
     before = directory.lstat()
-    restored: list[tuple[int, int | None]] = []
+    restored: list[int] = []
+    requested_metadata_access: list[bool] = []
     closed: list[int] = []
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+
+    def open_read_only(*_args, **kwargs):
+        requested_metadata_access.append(kwargs.get("write_metadata", False))
+        return 77
+
     monkeypatch.setattr(
         filesystem,
         "_windows_open_no_follow_handle",
-        lambda *_args, **_kwargs: 77,
+        open_read_only,
     )
 
     def enumerate_and_advance_atime(_handle, _path, _metadata):
         os.utime(directory, ns=(before.st_atime_ns + 1_000_000_000, before.st_mtime_ns))
         return ()
 
-    def restore_atime(_handle, **values):
-        restored.append((values["atime_ns"], values["mtime_ns"]))
-        os.utime(directory, ns=(values["atime_ns"], directory.lstat().st_mtime_ns))
+    def restore_atime(path, metadata):
+        assert path == directory
+        restored.append(metadata.st_atime_ns)
+        os.utime(
+            directory,
+            ns=(metadata.st_atime_ns, directory.lstat().st_mtime_ns),
+        )
+        return True
 
     import os
 
@@ -2000,7 +2159,7 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
     )
     monkeypatch.setattr(
         filesystem,
-        "_windows_apply_handle_metadata_values",
+        "_restore_observed_path_atime",
         restore_atime,
     )
     monkeypatch.setattr(filesystem, "_windows_close_handle", closed.append)
@@ -2009,7 +2168,8 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
 
     assert children == []
     assert observed.st_ino == before.st_ino
-    assert restored == [(before.st_atime_ns, None)]
+    assert restored == [before.st_atime_ns]
+    assert requested_metadata_access == [False]
     assert closed == [77]
 
 

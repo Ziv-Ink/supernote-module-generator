@@ -22,7 +22,14 @@ from .filesystem import (
     _open_contained_directory_descriptor,
     _open_contained_parent_descriptor,
     _windows_host,
+    _windows_descriptor_path_matches,
+    _windows_close_handle,
+    _windows_open_no_follow_handle,
+    _windows_open_conditional_regular_descriptor,
     _windows_path_key,
+    _windows_rename_descriptor_no_replace,
+    _read_windows_conditional_regular_descriptor,
+    _close_descriptor,
     copy_entry_no_follow,
     entry_kind,
     hash_entry_no_follow,
@@ -197,6 +204,14 @@ class _ConditionalBatchDescriptors:
             os.close(descriptor)
 
 
+def _require_descriptor_relative_conditional_io() -> None:
+    if not _descriptor_relative_io_supported():
+        raise FilesystemError(
+            "Conditional replacement requires descriptor-relative "
+            "no-follow filesystem operations"
+        )
+
+
 def _prepare_conditional_state_descriptors(
     root: Path,
     state_dir: Path,
@@ -204,6 +219,7 @@ def _prepare_conditional_state_descriptors(
 ) -> _ConditionalBatchDescriptors:
     """Retain trusted state and live destination-parent descriptors."""
 
+    _require_descriptor_relative_conditional_io()
     state_descriptor = _open_contained_directory_descriptor(root, state_dir.name)
     opened: list[int] = []
     try:
@@ -667,6 +683,15 @@ class _RetainedRegularReplacement:
     prepared: _PreparedRegularReplacement
 
 
+@dataclass(frozen=True)
+class _WindowsConditionalReplacement:
+    prepared: _PreparedRegularReplacement
+    live_descriptor: int
+    staged_descriptor: int
+    restore: Path
+    entry: Dict[str, object]
+
+
 def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
     """Capture exact no-follow content and supported metadata for one entry tree."""
 
@@ -699,6 +724,11 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
                 if os.name == "nt"
                 else before.st_mtime_ns != after.st_mtime_ns
             )
+            or (
+                (before.st_atime_ns // 100 != after.st_atime_ns // 100)
+                if os.name == "nt"
+                else before.st_atime_ns != after.st_atime_ns
+            )
             or before.st_size != after.st_size
         ):
             raise ConcurrentSourceMutation(
@@ -714,11 +744,17 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
             if os.name == "nt"
             else after.st_mtime_ns
         )
+        atime_ns = (
+            (after.st_atime_ns // 100) * 100
+            if os.name == "nt"
+            else after.st_atime_ns
+        )
         state.append(
             (
                 relative,
                 current_kind,
                 mode,
+                atime_ns,
                 mtime_ns,
                 after.st_size,
                 digest,
@@ -1141,6 +1177,23 @@ def _write_conditional_retention_authority(
             pass
 
 
+def _write_windows_conditional_retention_authority(
+    modules: Path,
+    identifier: str,
+    destination_parents: object,
+) -> None:
+    """Arm Windows recovery through the already-private transaction state."""
+
+    _write_json_atomic(
+        modules / PurePosixPath(CONDITIONAL_RETENTION_AUTHORITY_NAME).name,
+        {
+            "schema_version": 1,
+            "transaction_id": identifier,
+            "destination_parents_sha256": _entry_digest(destination_parents),
+        },
+    )
+
+
 def _conditional_destination_parents_match(
     root: Path,
     data: Dict[str, object],
@@ -1174,7 +1227,18 @@ def _conditional_destination_parents_match(
             raise FilesystemError(
                 "Transaction destination-parent authority is invalid"
             )
-        parsed = validate_persisted_relative_path(relative)
+        parsed = validate_persisted_relative_path(relative, allow_root=True)
+        if _windows_host():
+            if not _windows_conditional_parent_matches(
+                root,
+                relative,
+                parsed,
+                expected_dev,
+                expected_ino,
+            ):
+                return False
+            seen_parents.add(relative)
+            continue
         try:
             descriptor = _open_contained_directory_descriptor(
                 root, parsed.as_posix()
@@ -1189,6 +1253,30 @@ def _conditional_destination_parents_match(
             return False
         seen_parents.add(relative)
     return True
+
+
+def _windows_conditional_parent_matches(
+    root: Path,
+    relative: str,
+    parsed: PurePosixPath,
+    expected_dev: int,
+    expected_ino: int,
+) -> bool:
+    parent = root if relative == "." else root.joinpath(*parsed.parts)
+    handle: int | None = None
+    try:
+        handle = _windows_open_no_follow_handle(
+            parent,
+            directory=True,
+            share_mode=0x1 | 0x2,
+        )
+        current = parent.lstat()
+        return current.st_dev == expected_dev and current.st_ino == expected_ino
+    except (OSError, FilesystemError):
+        return False
+    finally:
+        if handle is not None:
+            _windows_close_handle(handle)
 
 
 def _conditional_conflict_is_durable(
@@ -1224,6 +1312,26 @@ def _read_conditional_authorities(
     identifier: str,
     authority_name: str,
 ) -> tuple[object, object]:
+    if _windows_host():
+        modules = root / f"{STATE_PREFIX}{identifier}" / "modules"
+        if entry_kind(modules) is None:
+            return None, None
+        if entry_kind(modules) != "directory":
+            raise FilesystemError("Transaction conditional authority is unsafe")
+        marker_name = PurePosixPath(authority_name).name
+        retention_name = PurePosixPath(
+            CONDITIONAL_RETENTION_AUTHORITY_NAME
+        ).name
+        return (
+            _read_optional_path_json_authority(
+                modules / marker_name,
+                "Transaction conflict authority",
+            ),
+            _read_optional_path_json_authority(
+                modules / retention_name,
+                "Transaction retention authority",
+            ),
+        )
     state_descriptor = _open_contained_directory_descriptor(
         root, f"{STATE_PREFIX}{identifier}"
     )
@@ -1254,6 +1362,19 @@ def _read_conditional_authorities(
     finally:
         os.close(modules_descriptor)
     return authority, retention_authority
+
+
+def _read_optional_path_json_authority(path: Path, description: str) -> object:
+    kind = entry_kind(path)
+    if kind is None:
+        return None
+    if kind != "file":
+        raise FilesystemError(f"{description} is unsafe")
+    content, _metadata = read_regular_bytes_no_follow(path)
+    try:
+        return json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise FilesystemError(f"{description} is unreadable") from exc
 
 
 def _read_optional_relative_json_authority(
@@ -1712,6 +1833,7 @@ class Transaction:
         self._abandon_durable = False
         self._conditional_conflict_durable = False
         self._conditional_batch_activated = False
+        self._windows_conditional_descriptors: list[int] = []
         if self.journal_path.exists():
             raise PartialFailure(
                 "An incomplete transaction must be recovered before a new operation begins.",
@@ -2347,12 +2469,10 @@ class Transaction:
     ) -> None:
         """Retain and verify every live file before activating any replacement."""
 
-        if not _descriptor_relative_io_supported():
-            raise FilesystemError(
-                "Conditional replacement requires descriptor-relative "
-                "no-follow filesystem operations"
-            )
         replacement_items = tuple(replacements)
+        if _windows_host():
+            self._replace_windows_regular_batch_if_matches(replacement_items)
+            return
         descriptors = _prepare_conditional_state_descriptors(
             self.root,
             self.state_dir,
@@ -2490,6 +2610,227 @@ class Transaction:
             # identity check.
         finally:
             descriptors.close()
+
+    def _replace_windows_regular_batch_if_matches(
+        self,
+        replacements: tuple[tuple[Path, Path, str, int], ...],
+    ) -> None:
+        """Conditionally publish Windows files through retained native identities."""
+
+        modules = self.state_dir / "modules"
+        modules.mkdir(exist_ok=True)
+        previous_mutated = self.mutated
+        entry_count_before = len(self._entries())
+        opened: list[int] = []
+        prepared: list[_WindowsConditionalReplacement] = []
+        parent_authority: dict[str, Dict[str, object]] = {}
+        try:
+            self._prepare_windows_conditional_replacements(
+                replacements,
+                modules,
+                entry_count_before,
+                opened,
+                prepared,
+                parent_authority,
+            )
+
+            self._windows_conditional_descriptors.extend(opened)
+            opened.clear()
+            self.data["conditional_destination_parents"] = [
+                parent_authority[key] for key in sorted(parent_authority)
+            ]
+            self._entries().extend(item.entry for item in prepared)
+            self.data["mutated"] = True
+            self._authorize_entries()
+            _write_windows_conditional_retention_authority(
+                modules,
+                self.identifier,
+                self.data["conditional_destination_parents"],
+            )
+
+            for item in prepared:
+                self._conditional_batch_activated = True
+                self._rename_windows_descriptor_checked(
+                    item.live_descriptor,
+                    item.prepared.destination,
+                    item.restore,
+                )
+            for item in prepared:
+                self._rename_windows_descriptor_checked(
+                    item.staged_descriptor,
+                    item.prepared.staged,
+                    item.prepared.destination,
+                )
+        except BaseException as exc:
+            restored = self._restore_windows_conditional_batch(prepared)
+            if restored:
+                del self._entries()[entry_count_before:]
+                self.data["mutated"] = previous_mutated
+                self.data["conditional_destination_parents"] = []
+                self._conditional_batch_activated = False
+                self._authorize_entries()
+                try:
+                    (modules / PurePosixPath(
+                        CONDITIONAL_RETENTION_AUTHORITY_NAME
+                    ).name).unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                self.retain_conflict()
+            self._release_windows_conditional_descriptors()
+            for descriptor in reversed(opened):
+                _close_descriptor(descriptor)
+            if restored:
+                raise
+            raise TransactionCleanupError(
+                "Windows conditional replacement could not restore its exact "
+                "retained identities",
+                recovery_path=self.journal_path,
+                interrupted=isinstance(exc, KeyboardInterrupt),
+            ) from exc
+
+    def _prepare_windows_conditional_replacements(
+        self,
+        replacements: Iterable[tuple[Path, Path, str, int]],
+        modules: Path,
+        entry_count_before: int,
+        opened: list[int],
+        prepared: list[_WindowsConditionalReplacement],
+        parent_authority: dict[str, Dict[str, object]],
+    ) -> None:
+        for staged_path, destination_path, expected_sha256, expected_mode in replacements:
+            staged = _managed_entry(self.root, staged_path)
+            destination = _managed_entry(self.root, destination_path)
+            if staged.parent != self.state_dir / "template":
+                raise FilesystemError(f"Staged path is unsafe: {staged}")
+            live_descriptor = _windows_open_conditional_regular_descriptor(destination)
+            opened.append(live_descriptor)
+            staged_descriptor = _windows_open_conditional_regular_descriptor(staged)
+            opened.append(staged_descriptor)
+            live_content, live_metadata = (
+                _read_windows_conditional_regular_descriptor(live_descriptor)
+            )
+            staged_content, staged_metadata = (
+                _read_windows_conditional_regular_descriptor(staged_descriptor)
+            )
+            live_mode = self._windows_portable_mode(live_metadata.st_mode)
+            staged_mode = self._windows_portable_mode(staged_metadata.st_mode)
+            if (
+                hashlib.sha256(live_content).hexdigest() != expected_sha256
+                or (live_mode & stat.S_IWRITE) != (expected_mode & stat.S_IWRITE)
+            ):
+                raise ConcurrentSourceMutation(
+                    "Destination changed before conditional replacement: "
+                    f"{destination}"
+                )
+            restore = modules / str(entry_count_before + len(prepared))
+            published_hash = _regular_entry_hash(staged_content, staged_mode)
+            entry: Dict[str, object] = {
+                "path": str(destination),
+                "restore": str(restore),
+                "existed": True,
+                "kind": "replace",
+                "entry_type": "file",
+                "hash": _regular_entry_hash(live_content, live_mode),
+                "result_kind": "file",
+                "result_hash": published_hash,
+            }
+            prepared.append(
+                _WindowsConditionalReplacement(
+                    _PreparedRegularReplacement(
+                        staged=staged,
+                        destination=destination,
+                        baseline_sha256=expected_sha256,
+                        baseline_mode=expected_mode,
+                        published_sha256=hashlib.sha256(staged_content).hexdigest(),
+                        published_entry_hash=published_hash,
+                        published_mode=staged_mode,
+                        published_dev=staged_metadata.st_dev,
+                        published_ino=staged_metadata.st_ino,
+                    ),
+                    live_descriptor,
+                    staged_descriptor,
+                    restore,
+                    entry,
+                )
+            )
+            relative_parent = destination.parent.relative_to(self.root).as_posix()
+            if relative_parent not in parent_authority:
+                parent_metadata = destination.parent.lstat()
+                parent_authority[relative_parent] = {
+                    "path": relative_parent,
+                    "dev": parent_metadata.st_dev,
+                    "ino": parent_metadata.st_ino,
+                }
+
+    @staticmethod
+    def _windows_portable_mode(mode: int) -> int:
+        return (stat.S_IWRITE if mode & stat.S_IWRITE else 0) | stat.S_IREAD
+
+    @staticmethod
+    def _rename_windows_descriptor_checked(
+        descriptor: int,
+        source: Path,
+        destination: Path,
+    ) -> None:
+        try:
+            _windows_rename_descriptor_no_replace(descriptor, destination)
+        except BaseException:
+            if _windows_descriptor_path_matches(descriptor, destination):
+                return
+            if not _windows_descriptor_path_matches(descriptor, source):
+                raise FilesystemError(
+                    "Windows conditional rename has an ambiguous destination"
+                )
+            raise
+
+    def _restore_windows_conditional_batch(
+        self,
+        prepared: Iterable[_WindowsConditionalReplacement],
+    ) -> bool:
+        restored = True
+        items = tuple(prepared)
+        for item in reversed(items):
+            try:
+                if _windows_descriptor_path_matches(
+                    item.staged_descriptor, item.prepared.destination
+                ):
+                    self._rename_windows_descriptor_checked(
+                        item.staged_descriptor,
+                        item.prepared.destination,
+                        item.prepared.staged,
+                    )
+            except BaseException:
+                restored = False
+        for item in reversed(items):
+            try:
+                if _windows_descriptor_path_matches(
+                    item.live_descriptor, item.restore
+                ):
+                    self._rename_windows_descriptor_checked(
+                        item.live_descriptor,
+                        item.restore,
+                        item.prepared.destination,
+                    )
+                if not _windows_descriptor_path_matches(
+                    item.live_descriptor, item.prepared.destination
+                ):
+                    restored = False
+            except BaseException:
+                restored = False
+        return restored
+
+    def _release_windows_conditional_descriptors(self) -> None:
+        first_error: BaseException | None = None
+        while self._windows_conditional_descriptors:
+            descriptor = self._windows_conditional_descriptors.pop()
+            try:
+                _close_descriptor(descriptor)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def _prepare_regular_replacements(
         self,
@@ -3073,7 +3414,7 @@ class Transaction:
     def conflict_is_durable(self) -> bool:
         """Return whether automatic rollback is blocked by an ambiguous edit."""
 
-        return (
+        durable = (
             self.data.get("phase") == "conflict"
             or self._conditional_conflict_durable
             or (
@@ -3090,6 +3431,9 @@ class Transaction:
                 allow_parent_fallback=False,
             )
         )
+        if durable:
+            self._release_windows_conditional_descriptors()
+        return durable
 
     def conditional_conflict_is_durable(self) -> bool:
         """Return whether descriptor-only cleanup retained external authority."""
@@ -3118,6 +3462,7 @@ class Transaction:
         self.data["phase"] = "commit"
         self._persist()
         self._commit_durable = True
+        self._release_windows_conditional_descriptors()
         self.finish_commit()
 
     def commit_is_durable(self) -> bool:
@@ -3142,6 +3487,7 @@ class Transaction:
 
         if not self.commit_is_durable():
             raise FilesystemError("Cannot finish a transaction before durable commit")
+        self._release_windows_conditional_descriptors()
         if _load_recovery_pointer(self.root) is not None:
             _complete_recovery_pointer(self.root)
             return
@@ -3163,6 +3509,7 @@ class Transaction:
         self.data["phase"] = "abandon"
         self._persist()
         self._abandon_durable = True
+        self._release_windows_conditional_descriptors()
         self.checkpoint("after_abandon_persist")
         self.finish_abandon()
 
@@ -3206,6 +3553,7 @@ class Transaction:
         *,
         reconcile: Optional[Callable[[List[str]], bool]] = None,
     ) -> RollbackResult:
+        self._release_windows_conditional_descriptors()
         return _rollback_data(
             self.root,
             self.journal_path,
@@ -3231,6 +3579,11 @@ def recover_pending(
     *,
     reconcile: Optional[Callable[[List[str]], bool]] = None,
 ) -> RecoveryOutcome:
+    # A preceding in-process rollback may have completed an OS close after
+    # Python recorded a retryable outcome. Finish that generation-bound cleanup
+    # before pathlib opens the plugin root again. No transaction owns native
+    # observation handles at this command boundary.
+    filesystem_ops.reconcile_retained_windows_authority()
     root = root.resolve()
     try:
         pending_pointer = _load_recovery_pointer(root)

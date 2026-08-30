@@ -107,6 +107,97 @@ def test_corrupt_javascript_fails_before_build_with_feature_scope(
     assert artifact.feature_id is not None
 
 
+def test_javascript_validation_uses_module_stdin_without_a_filename_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = canonical_plugin(tmp_path)
+    observed: dict[str, object] = {}
+
+    def check(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.shutil.which",
+        lambda _name: "node-test",
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.subprocess.run",
+        check,
+    )
+
+    result = V4Validator(root).validate()
+
+    assert result.status == "success"
+    assert observed["command"] == [
+        "node-test",
+        "--input-type=module",
+        "--check",
+        "-",
+    ]
+    assert observed["input"] == (root / "local_modules/alpha/index.js").read_bytes()
+    assert observed["capture_output"] is True
+    assert observed["check"] is False
+    assert "cwd" not in observed
+
+
+def test_javascript_validation_reports_node_launch_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = canonical_plugin(tmp_path)
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.shutil.which",
+        lambda _name: "node-test",
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("Node launch denied")
+        ),
+    )
+
+    result = V4Validator(root).validate()
+
+    assert result.status == "failure"
+    issue = next(
+        item
+        for item in result.issues
+        if item.code == "SNV4_JAVASCRIPT_CHECK_FAILED"
+    )
+    assert issue.path == "local_modules/alpha/index.js"
+    assert issue.message == (
+        "Node.js syntax validation could not run: Node launch denied"
+    )
+
+
+def test_javascript_validation_reports_syntax_error_not_node_version(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = canonical_plugin(tmp_path)
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.shutil.which",
+        lambda _name: "node-test",
+    )
+    stderr = (
+        b"[stdin]:1\nconst = ;\n^^^^^\n\n"
+        b"SyntaxError: Unexpected token '='\n\nNode.js v22.23.2\n"
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.subprocess.run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 1, b"", stderr
+        ),
+    )
+
+    result = V4Validator(root).validate()
+
+    issue = next(
+        item for item in result.issues if item.code == "SNV4_JAVASCRIPT_INVALID"
+    )
+    assert issue.message == "SyntaxError: Unexpected token '='"
+
+
 def test_untrusted_feature_generated_path_is_rejected_and_preserved(tmp_path: Path):
     root = canonical_plugin(tmp_path)
     metadata_path = root / "local_modules/alpha/.supernote-module.json"

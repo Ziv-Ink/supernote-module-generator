@@ -182,7 +182,9 @@ def private_recovery_registry(
 
 
 def recovery_pointer_path(root: Path, registry: Path) -> Path:
-    key = hashlib.sha256(str(root.resolve(strict=True)).encode("utf-8")).hexdigest()
+    resolved = root.resolve(strict=True)
+    identity = _windows_path_key(resolved) if os.name == "nt" else str(resolved)
+    key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return registry / f"{key}.json"
 
 

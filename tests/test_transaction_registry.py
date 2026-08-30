@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import os
 import stat
 
 import pytest
 
+import supernote_module_generator.transaction_registry as registry_module
 from supernote_module_generator.transaction_registry import (
     entry_digest,
     entry_kind_fields_are_valid,
@@ -243,6 +245,25 @@ def test_private_recovery_registry_create_reuse_and_pointer_identity(
     assert pointer.parent == registry
     assert pointer.suffix == ".json"
     assert len(pointer.stem) == 64
+
+
+def test_windows_recovery_pointer_identity_uses_normalized_path_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    normalized = r"c:\users\owner\plugin"
+    monkeypatch.setattr(registry_module.os, "name", "nt")
+    monkeypatch.setattr(
+        registry_module,
+        "_windows_path_key",
+        lambda _path: normalized,
+    )
+
+    pointer = recovery_pointer_path(tmp_path, registry)
+
+    expected = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    assert pointer == registry / f"{expected}.json"
 
 
 def test_private_recovery_registry_rejects_non_directory(

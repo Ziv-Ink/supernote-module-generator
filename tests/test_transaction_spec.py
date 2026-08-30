@@ -2093,6 +2093,50 @@ def test_conflict_adoption_never_replays_stale_live_metadata_after_copy(
     assert not transaction.state_dir.exists()
 
 
+def test_exact_entry_state_distinguishes_different_supported_atimes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.cpp"
+    source.write_text("stable\n", encoding="utf-8")
+    first_atime = 61_000_000_000
+    second_atime = 63_000_000_000
+    mtime = 62_000_000_000
+    os.utime(source, ns=(first_atime, mtime))
+
+    first = transaction_module._exact_entry_state(source)
+    os.utime(source, ns=(second_atime, mtime))
+    second = transaction_module._exact_entry_state(source)
+
+    precision = 100 if os.name == "nt" else 1
+    assert first[0][3] == first_atime // precision * precision
+    assert second[0][3] == second_atime // precision * precision
+    assert first != second
+
+
+def test_recover_pending_reconciles_windows_authority_before_root_resolution(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[str] = []
+
+    class ObservedPath(type(tmp_path)):
+        def resolve(self, *args, **kwargs):
+            if "resolved" not in events:
+                assert events == ["reconciled"]
+                events.append("resolved")
+            return super().resolve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        transaction_module.filesystem_ops,
+        "reconcile_retained_windows_authority",
+        lambda: events.append("reconciled"),
+    )
+
+    outcome = recover_pending(ObservedPath(tmp_path))
+
+    assert outcome.rollback.status == "not_needed"
+    assert events[:2] == ["reconciled", "resolved"]
+
+
 def test_tree_conflict_adoption_versions_post_copy_changes_before_recovery(
     tmp_path: Path,
     monkeypatch,
@@ -2267,3 +2311,242 @@ def test_recovery_copy_retries_only_explicit_concurrent_source_mutations(
     assert attempts == 1
     assert source.read_text(encoding="utf-8") == "source remains\n"
     assert not destination.exists()
+
+
+def _install_fake_windows_conditional_io(monkeypatch):
+    paths: dict[int, Path] = {}
+    closed: list[int] = []
+    next_descriptor = 70
+
+    def open_descriptor(path: Path) -> int:
+        nonlocal next_descriptor
+        descriptor = next_descriptor
+        next_descriptor += 1
+        paths[descriptor] = Path(path)
+        return descriptor
+
+    def read_descriptor(descriptor: int):
+        path = paths[descriptor]
+        return path.read_bytes(), path.stat()
+
+    def rename_descriptor(descriptor: int, destination: Path) -> None:
+        source = paths[descriptor]
+        if destination.exists():
+            raise FileExistsError(destination)
+        source.rename(destination)
+        paths[descriptor] = destination
+
+    monkeypatch.setattr(transaction_module, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        transaction_module,
+        "_hash_path",
+        lambda path: transaction_module._regular_entry_hash(
+            Path(path).read_bytes(),
+            transaction_module.Transaction._windows_portable_mode(
+                Path(path).stat().st_mode
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_open_conditional_regular_descriptor",
+        open_descriptor,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_read_windows_conditional_regular_descriptor",
+        read_descriptor,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_rename_descriptor_no_replace",
+        rename_descriptor,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_descriptor_path_matches",
+        lambda descriptor, path: paths[descriptor] == path,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_close_descriptor",
+        lambda descriptor: closed.append(descriptor),
+    )
+    return paths, closed, rename_descriptor
+
+
+def test_windows_conditional_batch_retains_identity_until_durable_commit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    destination = tmp_path / "generated.js"
+    destination.write_bytes(b"baseline\n")
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    staged = transaction.state_dir / "template" / "0"
+    staged.parent.mkdir()
+    staged.write_bytes(b"replacement\n")
+    _paths, closed, _rename = _install_fake_windows_conditional_io(monkeypatch)
+
+    transaction.replace_regular_batch_if_matches(
+        ((staged, destination, hashlib.sha256(b"baseline\n").hexdigest(), 0o644),)
+    )
+
+    assert destination.read_bytes() == b"replacement\n"
+    assert (transaction.state_dir / "modules" / "0").read_bytes() == b"baseline\n"
+    assert closed == []
+    transaction.commit()
+    assert len(closed) == 2
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+
+
+def test_windows_conditional_batch_never_clobbers_reappearing_destination(
+    tmp_path: Path,
+    monkeypatch,
+):
+    destination = tmp_path / "generated.js"
+    destination.write_bytes(b"baseline\n")
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    staged = transaction.state_dir / "template" / "0"
+    staged.parent.mkdir()
+    staged.write_bytes(b"replacement\n")
+    paths, closed, rename_descriptor = _install_fake_windows_conditional_io(
+        monkeypatch
+    )
+    injected = False
+
+    def inject_concurrent_destination(descriptor: int, target: Path) -> None:
+        nonlocal injected
+        source = paths[descriptor]
+        if not injected and source == staged and target == destination:
+            injected = True
+            destination.write_bytes(b"external\n")
+        rename_descriptor(descriptor, target)
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_rename_descriptor_no_replace",
+        inject_concurrent_destination,
+    )
+
+    with pytest.raises(
+        transaction_module.TransactionCleanupError,
+        match="could not restore its exact retained identities",
+    ):
+        transaction.replace_regular_batch_if_matches(
+            (
+                (
+                    staged,
+                    destination,
+                    hashlib.sha256(b"baseline\n").hexdigest(),
+                    0o644,
+                ),
+            )
+        )
+
+    assert injected
+    assert destination.read_bytes() == b"external\n"
+    assert staged.read_bytes() == b"replacement\n"
+    assert (transaction.state_dir / "modules" / "0").read_bytes() == b"baseline\n"
+    assert transaction.data["phase"] == "conflict"
+    assert len(closed) == 2
+
+
+def test_windows_conditional_stale_baseline_restores_unmutated_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    destination = tmp_path / "generated.js"
+    destination.write_bytes(b"changed\n")
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    staged = transaction.state_dir / "template" / "0"
+    staged.parent.mkdir()
+    staged.write_bytes(b"replacement\n")
+    _paths, closed, _rename = _install_fake_windows_conditional_io(monkeypatch)
+
+    with pytest.raises(ConcurrentSourceMutation, match="Destination changed"):
+        transaction.replace_regular_batch_if_matches(
+            ((staged, destination, hashlib.sha256(b"baseline\n").hexdigest(), 0o644),)
+        )
+
+    assert destination.read_bytes() == b"changed\n"
+    assert staged.read_bytes() == b"replacement\n"
+    assert transaction.data["entries"] == []
+    assert transaction.mutated is False
+    assert len(closed) == 2
+
+
+def test_windows_conditional_parent_authority_uses_retained_identity(
+    tmp_path: Path,
+    monkeypatch,
+):
+    metadata = tmp_path.lstat()
+    closed: list[int] = []
+    monkeypatch.setattr(transaction_module, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_open_no_follow_handle",
+        lambda *_args, **_kwargs: 91,
+    )
+    monkeypatch.setattr(transaction_module, "_windows_close_handle", closed.append)
+    data = {
+        "conditional_destination_parents": [
+            {"path": ".", "dev": metadata.st_dev, "ino": metadata.st_ino}
+        ]
+    }
+
+    assert transaction_module._conditional_destination_parents_match(tmp_path, data)
+    data["conditional_destination_parents"][0]["ino"] = metadata.st_ino + 1
+    assert not transaction_module._conditional_destination_parents_match(
+        tmp_path, data
+    )
+    assert closed == [91, 91]
+
+
+def test_windows_conditional_authority_reader_uses_private_state_paths(
+    tmp_path: Path,
+    monkeypatch,
+):
+    identifier = "a" * 32
+    modules = tmp_path / f"{transaction_module.STATE_PREFIX}{identifier}" / "modules"
+    modules.mkdir(parents=True)
+    retention = modules / "conditional-retention-authority.json"
+    payload = {"schema_version": 1, "transaction_id": identifier}
+    retention.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(transaction_module, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        transaction_module,
+        "read_regular_bytes_no_follow",
+        lambda path: (Path(path).read_bytes(), Path(path).stat()),
+    )
+
+    authority, retention_authority = transaction_module._read_conditional_authorities(
+        tmp_path,
+        identifier,
+        transaction_module.CONDITIONAL_CONFLICT_AUTHORITY_NAME,
+    )
+
+    assert authority is None
+    assert retention_authority == payload
+
+
+def test_windows_conditional_descriptor_release_reports_first_close_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    transaction._windows_conditional_descriptors[:] = [71, 72]
+    closed: list[int] = []
+
+    def close(descriptor: int) -> None:
+        closed.append(descriptor)
+        if descriptor == 72:
+            raise OSError("close failed")
+
+    monkeypatch.setattr(transaction_module, "_close_descriptor", close)
+
+    with pytest.raises(OSError, match="close failed"):
+        transaction._release_windows_conditional_descriptors()
+
+    assert closed == [72, 71]
+    assert transaction._windows_conditional_descriptors == []

@@ -56,6 +56,13 @@ def _windows_host() -> bool:
     return os.name == "nt"
 
 
+def reconcile_retained_windows_authority() -> None:
+    """Finish delayed native-handle cleanup at a quiescent command boundary."""
+
+    if _windows_host():
+        _WINDOWS_AUTHORITY.reconcile()
+
+
 def _windows_kernel32() -> Any:
     import ctypes
 
@@ -292,23 +299,26 @@ def _windows_open_no_follow_handle(
     directory: bool,
     write_metadata: bool = False,
     allow_reparse_leaf: bool = False,
+    desired_access: int | None = None,
+    share_mode: int = 0x1 | 0x2 | 0x4,
 ) -> int:
     """Open a non-replaceable Windows entry and reject redirected ancestors."""
 
     if not _windows_host():
         raise OSError("Windows handle operations are unavailable")
     ancestor_handles = _windows_retain_non_reparse_ancestors(path)
-    if directory:
-        desired_access = 0x1 | 0x80  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
-    else:
-        desired_access = 0x80000000 | 0x80  # GENERIC_READ | FILE_READ_ATTRIBUTES
-    if write_metadata:
-        desired_access |= 0x100  # FILE_WRITE_ATTRIBUTES
+    desired_access = _windows_desired_access(
+        directory=directory,
+        write_metadata=write_metadata,
+        override=desired_access,
+    )
     try:
         ancestor_generations = _WINDOWS_AUTHORITY.capture_raw_generations(
             tuple(ancestor_handles)
         )
-        raw_handle = _windows_create_raw_handle(path, desired_access)
+        raw_handle = _windows_create_shared_raw_handle(
+            path, desired_access, share_mode
+        )
     except BaseException:
         _windows_close_handles(ancestor_handles)
         raise
@@ -335,7 +345,43 @@ def _windows_open_no_follow_handle(
         raise
 
 
-def _windows_create_raw_handle(path: Path, desired_access: int) -> int:
+def _windows_desired_access(
+    *,
+    directory: bool,
+    write_metadata: bool,
+    override: int | None,
+) -> int:
+    if override is not None:
+        desired_access = override
+    elif directory:
+        desired_access = 0x80  # FILE_READ_ATTRIBUTES
+        if not write_metadata:
+            desired_access |= 0x1  # FILE_LIST_DIRECTORY
+    else:
+        desired_access = 0x80000000 | 0x80  # GENERIC_READ | FILE_READ_ATTRIBUTES
+    return desired_access | (0x100 if write_metadata else 0)
+
+
+def _windows_create_shared_raw_handle(
+    path: Path,
+    desired_access: int,
+    share_mode: int,
+) -> int:
+    if share_mode == 0x1 | 0x2 | 0x4:
+        return _windows_create_raw_handle(path, desired_access)
+    return _windows_create_raw_handle(
+        path,
+        desired_access,
+        share_mode=share_mode,
+    )
+
+
+def _windows_create_raw_handle(
+    path: Path,
+    desired_access: int,
+    *,
+    share_mode: int = 0x1 | 0x2 | 0x4,
+) -> int:
     import ctypes
     from ctypes import wintypes
 
@@ -353,7 +399,7 @@ def _windows_create_raw_handle(path: Path, desired_access: int) -> int:
     handle = create_file(
         _windows_api_path(path),
         desired_access,
-        0x1 | 0x2 | 0x4,
+        share_mode,
         None,
         3,
         0x00200000 | 0x02000000,
@@ -414,6 +460,117 @@ def _windows_handle_final_path(handle: int) -> Path:
     return Path(buffer.value)
 
 
+def _windows_rename_descriptor_no_replace(
+    descriptor: int,
+    destination: Path,
+) -> None:
+    """Rename the exact open Windows file identity without replacing a peer."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class FileRenameInfoHeader(ctypes.Structure):
+        _fields_ = (
+            ("ReplaceIfExists", wintypes.BOOL),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+        )
+
+    filename = _windows_api_path(destination).encode("utf-16-le")
+    filename_offset = (
+        FileRenameInfoHeader.FileNameLength.offset + ctypes.sizeof(wintypes.DWORD)
+    )
+    buffer = ctypes.create_string_buffer(filename_offset + len(filename))
+    header = FileRenameInfoHeader.from_buffer(buffer)
+    header.ReplaceIfExists = False
+    header.RootDirectory = None
+    header.FileNameLength = len(filename)
+    ctypes.memmove(ctypes.addressof(buffer) + filename_offset, filename, len(filename))
+    set_info = _windows_kernel32().SetFileInformationByHandle
+    set_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_info.restype = wintypes.BOOL
+    handle = _windows_descriptor_handle(descriptor)
+    if not set_info(
+        wintypes.HANDLE(handle),
+        3,  # FileRenameInfo
+        ctypes.byref(buffer),
+        len(buffer),
+    ):
+        raise _windows_error()
+
+
+def _windows_descriptor_path_matches(descriptor: int, path: Path) -> bool:
+    """Return whether one retained descriptor currently names ``path``."""
+
+    handle = _windows_descriptor_handle(descriptor)
+    return _windows_path_key(_windows_handle_final_path(handle)) == _windows_path_key(
+        path
+    )
+
+
+def _windows_open_conditional_regular_descriptor(path: Path) -> int:
+    """Open one regular file for identity-bound read/rename and deny mutation."""
+
+    handle = _windows_open_no_follow_handle(
+        path,
+        directory=False,
+        desired_access=0x80000000 | 0x10000 | 0x100 | 0x80,
+        share_mode=0x1,
+    )
+    try:
+        return _windows_handle_to_descriptor(handle, os.O_RDONLY)
+    except BaseException:
+        if _WINDOWS_AUTHORITY.handle_generation(handle) is not None:
+            _windows_close_raw_handle(handle)
+        raise
+
+
+def _read_windows_conditional_regular_descriptor(
+    descriptor: int,
+) -> tuple[bytes, os.stat_result]:
+    """Read and re-time an already retained Windows regular-file identity."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise FilesystemError("Conditional capture is not a regular file")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    after = os.fstat(descriptor)
+    if (
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_mode != after.st_mode
+        or before.st_mtime_ns // 100 != after.st_mtime_ns // 100
+        or before.st_size != after.st_size
+    ):
+        raise ConcurrentSourceMutation(
+            "Conditional capture changed while it was inspected"
+        )
+    if before.st_atime_ns // 100 != after.st_atime_ns // 100:
+        _windows_apply_handle_metadata_values(
+            _windows_descriptor_handle(descriptor),
+            mode=None,
+            regular=True,
+            atime_ns=before.st_atime_ns,
+            mtime_ns=None,
+        )
+    return b"".join(chunks), before
+
+
 def _windows_close_handles(handles: Iterable[int]) -> None:
     first_error: BaseException | None = None
     for handle in reversed(tuple(handles)):
@@ -468,7 +625,7 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             handle = create_file(
                 _windows_api_path(current),
                 0x1 | 0x80,  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
-                0x1,
+                0x1 | 0x2,
                 None,
                 3,
                 0x00200000 | 0x02000000,
@@ -891,19 +1048,11 @@ def _observed_directory_entries(
             if _windows_host()
             else after.st_atime_ns != before.st_atime_ns
         ):
-            _windows_apply_handle_metadata_values(
-                handle,
-                mode=None,
-                regular=False,
-                atime_ns=before.st_atime_ns,
-                mtime_ns=None,
-            )
-            restored = path.lstat()
-            if not _same_observed_entry(before, restored) or (
-                (restored.st_atime_ns // 100 != before.st_atime_ns // 100)
-                if _windows_host()
-                else restored.st_atime_ns != before.st_atime_ns
-            ):
+            # Enumeration itself needs only list/read authority. Acquire a
+            # separate write-attributes handle only when NTFS actually reports
+            # an access-time change; the retained enumeration handle continues
+            # to bind the same directory throughout that repair.
+            if not _restore_observed_path_atime(path, before):
                 raise ConcurrentSourceMutation(
                     f"Source directory changed while it was inspected: {path}"
                 )
