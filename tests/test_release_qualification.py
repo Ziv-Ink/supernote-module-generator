@@ -267,10 +267,18 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     assert "9f626ed39be82b43ff74eb735d10b7de61f51508" in quality
     assert "Verify pinned V4 Wiki commit" in quality
     assert "run_wiki_acceptance.py" in quality
+    wiki_runner = quality.index("generator/ci/run_wiki_acceptance.py")
+    assert '"$RUNNER_TEMP/generator-venv/bin/python"' in quality[
+        wiki_runner - 100 : wiki_runner
+    ]
     assert "Execute the exact pinned Wiki command sequence" in quality
     assert "Prove the Wiki project is canonical and source-read-only" in quality
     assert "Build and verify the Wiki acceptance package" in quality
     assert "run_file_reader_acceptance.py" in quality
+    project_runner = quality.index("generator/ci/run_file_reader_acceptance.py")
+    assert '"$RUNNER_TEMP/generator-venv/bin/python"' in quality[
+        project_runner - 100 : project_runner
+    ]
     assert '"pluginID": "file_reader_test"' in quality
     assert "v4-bounded-note-doc-2026-08-27" in quality
     assert "7.11-bounded-note-doc-device-evidence" in (

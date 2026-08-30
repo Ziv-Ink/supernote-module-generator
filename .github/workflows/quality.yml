@@ -403,7 +403,8 @@ jobs:
         env:
           SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
         run: |
-          python generator/ci/run_wiki_acceptance.py \
+          "$RUNNER_TEMP/generator-venv/bin/python" \
+            generator/ci/run_wiki_acceptance.py \
             official-wiki \
             generator/README.md \
             wiki-plugin \
@@ -490,7 +491,8 @@ jobs:
         run: npm install --ignore-scripts
       - name: Exercise non-migration real-project scenarios 7.1-7.7 and retained 7.9-7.10
         run: |
-          python generator/ci/run_file_reader_acceptance.py \
+          "$RUNNER_TEMP/generator-venv/bin/python" \
+            generator/ci/run_file_reader_acceptance.py \
             file-reader-test \
             "$RUNNER_TEMP/generator-venv/bin/supernote-module" \
             "$RUNNER_TEMP/file-reader-acceptance.json" \
