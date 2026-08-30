@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, Iterable, Mapping, Tuple
 
 from .filesystem import (
+    _windows_host,
     entry_kind,
     hash_entry_no_follow,
     lexists,
@@ -419,7 +420,13 @@ def _prepare_dependency_actions(
             raise GenerationPlanError(
                 f"dependency action baseline is stale: {action.path!r}"
             )
-        if stat.S_IMODE(destination.stat().st_mode) != action.previous_mode:
+        mode_matches = (
+            (destination.stat().st_mode & stat.S_IWRITE)
+            == (action.previous_mode & stat.S_IWRITE)
+            if _windows_host()
+            else stat.S_IMODE(destination.stat().st_mode) == action.previous_mode
+        )
+        if not mode_matches:
             raise GenerationPlanError(
                 f"dependency action mode baseline is stale: {action.path!r}"
             )
@@ -448,7 +455,13 @@ def _prepare_wiring_actions(
             raise GenerationPlanError(
                 f"wiring action baseline is stale: {action.path!r}"
             )
-        if stat.S_IMODE(destination.stat().st_mode) != action.previous_mode:
+        wiring_mode_matches = (
+            (destination.stat().st_mode & stat.S_IWRITE)
+            == (action.previous_mode & stat.S_IWRITE)
+            if _windows_host()
+            else stat.S_IMODE(destination.stat().st_mode) == action.previous_mode
+        )
+        if not wiring_mode_matches:
             raise GenerationPlanError(
                 f"wiring action mode baseline is stale: {action.path!r}"
             )
@@ -548,7 +561,12 @@ def _compare_owned_artifact(
     mode_mismatch = (
         artifact.expected_mode is not None
         and kind == "file"
-        and (destination.stat().st_mode & 0o7777) != artifact.expected_mode
+        and (
+            (destination.stat().st_mode & stat.S_IWRITE)
+            != (artifact.expected_mode & stat.S_IWRITE)
+            if _windows_host()
+            else (destination.stat().st_mode & 0o7777) != artifact.expected_mode
+        )
     )
     if kind is None:
         return ArtifactChange(

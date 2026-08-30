@@ -33,6 +33,7 @@ from .generation_plan import (
 )
 from .generation_execution import GenerationPlanExecutor
 from .filesystem import (
+    _windows_host,
     contained_directory_entries_no_follow,
     contained_entry_kind_no_follow,
     entry_kind,
@@ -446,7 +447,13 @@ class GenerationService:
                 raise PlanConflictError(
                     f"{label} file changed after planning: {action.path}"
                 )
-            if stat.S_IMODE(destination.stat().st_mode) != action.previous_mode:
+            mode_matches = (
+                (destination.stat().st_mode & stat.S_IWRITE)
+                == (action.previous_mode & stat.S_IWRITE)
+                if _windows_host()
+                else stat.S_IMODE(destination.stat().st_mode) == action.previous_mode
+            )
+            if not mode_matches:
                 raise PlanConflictError(
                     f"{label} file mode changed after planning: {action.path}"
                 )
