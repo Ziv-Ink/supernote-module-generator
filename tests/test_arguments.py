@@ -188,7 +188,7 @@ def test_two_command_help_routes_are_byte_identical(tmp_path: Path, command: str
 def test_add_help_preserves_multiline_example(tmp_path: Path):
     _, stdout, _ = invoke(["help", "add"], tmp_path)
     assert (
-        "  supernote-module add @acme/stylus --starter kotlin \\\n"
+        "  sn-module-gen add @acme/stylus --starter kotlin \\\n"
         "    --javascript-name Stylus \\\n"
         "    --android-namespace com.acme.stylus \\\n"
         "    --package-manager yarn --yes\n"
@@ -248,7 +248,7 @@ def test_doctor_accepts_explicit_full_build_probe():
 def test_version_is_exact_and_works_outside_plugin(tmp_path: Path):
     assert invoke(["--version"], tmp_path) == (
         0,
-        f"supernote-module {__version__}\n",
+        f"sn-module-gen {__version__}\n",
         "",
     )
 
@@ -259,7 +259,7 @@ def test_no_command_in_non_tty_is_usage_error(tmp_path: Path):
     assert stdout == ""
     assert stderr == (
         "error: no command was provided\n\n"
-        "Run `supernote-module --help` for usage.\n"
+        "Run `sn-module-gen --help` for usage.\n"
     )
 
 
@@ -277,7 +277,7 @@ def test_unknown_option_recovery_names_command(tmp_path: Path):
     code, _, stderr = invoke(["add", "--force"], tmp_path)
     assert code == 2
     assert "unknown option \"--force\"" in stderr
-    assert "supernote-module add --help" in stderr
+    assert "sn-module-gen add --help" in stderr
 
 
 def test_unknown_command_recovery_suggests_a_close_command(tmp_path: Path):
@@ -285,5 +285,5 @@ def test_unknown_command_recovery_suggests_a_close_command(tmp_path: Path):
 
     assert code == 2
     assert 'unknown command "ad"' in stderr
-    assert "Did you mean `supernote-module add`?" in stderr
-    assert "supernote-module --help" in stderr
+    assert "Did you mean `sn-module-gen add`?" in stderr
+    assert "sn-module-gen --help" in stderr

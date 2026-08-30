@@ -415,7 +415,7 @@ def _recovery_action(
     recovery_path = str(authority) if authority is not None else None
     if recovery_path is not None:
         summary = f"{summary} Recovery authority remains at {recovery_path}."
-    return RecoveryAction(summary, ["supernote-module", "doctor"]), recovery_path
+    return RecoveryAction(summary, ["sn-module-gen", "doctor"]), recovery_path
 
 
 def _abandon_result(
@@ -721,9 +721,9 @@ class TemplateContractService:
                     {
                         "kind": "template_drift",
                         "code": (
-                            "SNV4_TEMPLATE_MISSING"
+                            "SNMG_TEMPLATE_MISSING"
                             if missing
-                            else "SNV4_TEMPLATE_DRIFT"
+                            else "SNMG_TEMPLATE_DRIFT"
                         ),
                         "severity": "error",
                         "scope": "plugin",
@@ -733,9 +733,9 @@ class TemplateContractService:
             ),
             affected_targets=["template launch scripts"],
             next_action=(
-                "Restore missing official-template files, then run `supernote-module template sync --yes`."
+                "Restore missing official-template files, then run `sn-module-gen template sync --yes`."
                 if missing
-                else "Run `supernote-module template sync --dry-run`, then sync explicitly with --yes."
+                else "Run `sn-module-gen template sync --dry-run`, then sync explicitly with --yes."
             ),
             error=ErrorInfo(
                 "template_state_failed" if missing else "template_drift",

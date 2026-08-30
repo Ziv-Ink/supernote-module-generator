@@ -104,9 +104,11 @@ def scan_documented_commands(paths: Iterable[Path]) -> tuple[DocumentedCommand, 
     for page in sorted(paths):
         for line, source in _logical_commands(_fenced_shell_lines(page)):
             stripped = source.removeprefix("$ ").strip()
-            if not stripped.startswith("supernote-module"):
+            if not stripped.startswith(("sn-module-gen", "supernote-module")):
                 continue
             argv = tuple(shlex.split(stripped, posix=True))
+            if argv[0] == "supernote-module":
+                argv = ("sn-module-gen", *argv[1:])
             classification, reason = _classification(page.name, argv)
             commands.append(
                 DocumentedCommand(page.name, line, argv, classification, reason)
@@ -133,7 +135,7 @@ def audit_commands(
 ) -> tuple[DocumentedCommand, ...]:
     commands = scan_documented_commands([readme, *wiki_root.glob("*.md")])
     if not commands:
-        raise ValueError("No public supernote-module examples were found")
+        raise ValueError("No public sn-module-gen examples were found")
     for command in commands:
         parse_arguments(_grammar_arguments(command))
         if command.classification == "smoke":
@@ -182,8 +184,8 @@ def read_commands(page: Path) -> tuple[tuple[str, ...], ...]:
     if not commands:
         raise ValueError("Wiki release command block is empty")
     for command in commands:
-        if not command or command[0] != "supernote-module":
-            raise ValueError("Wiki release commands may invoke only supernote-module")
+        if not command or command[0] != "sn-module-gen":
+            raise ValueError("Wiki release commands may invoke only sn-module-gen")
     return commands
 
 

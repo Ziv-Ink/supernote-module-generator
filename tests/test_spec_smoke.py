@@ -202,11 +202,11 @@ def test_json_add_has_stable_envelope_and_empty_stderr(tmp_path: Path):
 
     schema_path = (
         Path(supernote_module_generator.__file__).parent
-        / "schemas/command-result-v4.schema.json"
+        / "schemas/command-result.schema.json"
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-    assert schema["properties"]["schema_version"] == {"const": "4.0"}
+    assert schema["properties"]["schema_version"] == {"const": "1.0"}
     assert schema["required"] == list(value)
 
 

@@ -25,13 +25,50 @@ def test_setup_cfg_is_the_single_metadata_source():
     assert f'__version__ = "{__version__}"' in (
         ROOT / "src/supernote_module_generator/__init__.py"
     ).read_text(encoding="utf-8")
-    assert "name = supernote-module-generator" in setup
+    assert "name = sn-module-gen" in setup
     assert "author = Ziv-Ink" in setup
     assert "Generate typed C/C++ and Kotlin/Java features for existing Supernote plugins" in setup
     assert "url = https://github.com/Ziv-Ink/supernote-module-generator" in setup
-    assert "PyPI = https://pypi.org/project/supernote-module-generator/" in setup
+    assert "PyPI = https://pypi.org/project/sn-module-gen/" in setup
     assert "Source = https://github.com/Ziv-Ink/supernote-module-generator" in setup
-    assert "supernote-module = supernote_module_generator.cli:main" in setup
+    assert "sn-module-gen = supernote_module_generator.cli:main" in setup
+    assert "supernote-module =" not in setup
+
+
+def test_clean_wheel_installs_only_the_public_console_script(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(
+        ROOT,
+        source,
+        ignore=shutil.ignore_patterns(".git", ".venv", ".pytest_cache", "__pycache__", "*.pyc", "build", "dist", "*.egg-info"),
+    )
+    dist = tmp_path / "dist"
+    subprocess.run(
+        (sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(dist)),
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    environment = tmp_path / "environment"
+    subprocess.run((sys.executable, "-m", "venv", str(environment)), check=True)
+    executable = environment / "bin" / "python"
+    subprocess.run(
+        (str(executable), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(next(dist.glob("*.whl")))),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    script_directory = environment / "bin"
+    assert (script_directory / "sn-module-gen").is_file()
+    assert not (script_directory / "supernote-module").exists()
+    version = subprocess.run(
+        (str(script_directory / "sn-module-gen"), "--version"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert version.stdout == "sn-module-gen 0.1.0\n"
 
 
 def test_release_license_and_manifest_are_present():
@@ -87,8 +124,8 @@ def test_root_readme_is_the_self_contained_pypi_description():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     setup = (ROOT / "setup.cfg").read_text(encoding="utf-8")
 
-    assert "pip install supernote-module-generator" in readme
-    assert "supernote-module doctor" in readme
+    assert "pip install sn-module-gen" in readme
+    assert "sn-module-gen doctor" in readme
     assert "## License" in readme
     assert "github.com/Ziv-Ink/supernote-module-generator" in readme
     assert "long_description = file: README.md" in setup
@@ -122,7 +159,7 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "Install wheel in a clean environment" in quality
     assert "Install and smoke the source distribution" in quality
     assert "pip install --no-deps --no-build-isolation" in quality
-    assert 'schemas/command-result-v4.schema.json' in quality
+    assert 'schemas/command-result.schema.json' in quality
     assert "Generated Android plugin" in quality
     assert "supernote-plugin-template" in quality
     assert "af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f" in quality

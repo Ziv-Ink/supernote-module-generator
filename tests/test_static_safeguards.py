@@ -83,7 +83,7 @@ FORBIDDEN_HIGH_LEVEL_IMPORTS = {
     "interaction",
     "rendering",
     "subprocesses",
-    "v4_cli_operations",
+    "cli_operations",
     "v4_validation",
 }
 
@@ -220,7 +220,7 @@ def test_low_level_v4_contracts_do_not_depend_on_command_or_ui_layers():
         ),
         ("from .rendering import HumanRenderer", "rendering"),
         ("from . import feature_operations", "feature_operations"),
-        ("from supernote_module_generator import v4_cli_operations", "v4_cli_operations"),
+        ("from supernote_module_generator import cli_operations", "cli_operations"),
     ],
 )
 def test_dependency_guard_normalizes_every_supported_import_form(

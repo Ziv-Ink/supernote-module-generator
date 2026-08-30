@@ -3860,7 +3860,7 @@ def recover_pending(
         raise PartialFailure(
             f"Automatic recovery could not complete: {exc}",
             phase="startup_recovery",
-            recovery=["supernote-module", "doctor"],
+            recovery=["sn-module-gen", "doctor"],
         ) from exc
     journal = root / JOURNAL_NAME
     if not journal.is_file():
@@ -3896,7 +3896,7 @@ def recover_pending(
             return RecoveryOutcome(
                 RollbackResult(True, "partial", []),
                 None,
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
                 "Restore scripts/runPlugin.sh and scripts/runPlugin.ps1 to the "
                 "retained pre-sync bytes and metadata, preserve the transaction "
                 "journal/state, then run Doctor.",
@@ -3926,21 +3926,21 @@ def recover_pending(
             return RecoveryOutcome(
                 RollbackResult(True, "partial", []),
                 None,
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
             )
         rollback = _rollback_data(root, journal, data, reconcile=reconcile)
     except Exception as exc:
         raise PartialFailure(
             f"Automatic recovery could not complete: {exc}",
             phase="startup_recovery",
-            recovery=["supernote-module", "doctor"],
+            recovery=["sn-module-gen", "doctor"],
         ) from exc
     if rollback.status == "partial":
         external = data.get("external_command")
         recovery_command = (
             [str(item) for item in external]
             if isinstance(external, list) and external
-            else ["supernote-module", "doctor"]
+            else ["sn-module-gen", "doctor"]
         )
         return RecoveryOutcome(rollback, None, recovery_command)
     description = command.capitalize()

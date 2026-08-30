@@ -63,7 +63,7 @@ def write_process_diagnostics(
     """Write complete raw process output under the ordinary Android build tree."""
 
     root = plugin_root.resolve(strict=True)
-    relative_parts = ("android", "build", "supernote-module", "diagnostics")
+    relative_parts = ("android", "build", "sn-module-gen", "diagnostics")
     filename = f"{name}.log"
     path = root.joinpath(*relative_parts, filename)
     directory_fd: int | None = None

@@ -36,7 +36,7 @@ from .plugin_runtime_codegen import RUNTIME_RELATIVE_ROOT
 from .subprocesses import run_process
 
 
-class V4CliOperationService:
+class CliOperationService:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
@@ -456,15 +456,15 @@ class V4CliOperationService:
     ) -> CommandResult:
         issues = [issue.manifest() for issue in result.issues]
         structural_failed = any(
-            issue.code.startswith("SNV4_ARTIFACT")
-            or issue.code in {"SNV4_INPUT_INVALID", "SNV4_JAVASCRIPT_INVALID"}
+            issue.code.startswith("SNMG_ARTIFACT")
+            or issue.code in {"SNMG_INPUT_INVALID", "SNMG_JAVASCRIPT_INVALID"}
             for issue in result.issues
         )
         integration_failed = any(
-            issue.code == "SNV4_WIRING_INVALID" for issue in result.issues
+            issue.code == "SNMG_WIRING_INVALID" for issue in result.issues
         )
         dependency_failed = any(
-            issue.code.startswith("SNV4_DEPENDENCY") for issue in result.issues
+            issue.code.startswith("SNMG_DEPENDENCY") for issue in result.issues
         )
         validation = ValidationResult(
             structural="failed" if structural_failed else "passed",
@@ -475,7 +475,7 @@ class V4CliOperationService:
         )
         affected_targets = self._affected_targets(result.issues, project=project)
         only_dependency_issues = bool(result.issues) and all(
-            issue.code.startswith("SNV4_DEPENDENCY")
+            issue.code.startswith("SNMG_DEPENDENCY")
             for issue in result.issues
         )
         next_action = (
@@ -485,7 +485,7 @@ class V4CliOperationService:
             if result.build == "failed"
             else "Run `npm install` to refresh local dependencies."
             if only_dependency_issues
-            else "Run `supernote-module update --all --dry-run --diff` to preview repair."
+            else "Run `sn-module-gen update --all --dry-run --diff` to preview repair."
         )
         metadata = {
             "generation_id": result.generation_id,
@@ -627,18 +627,18 @@ class V4CliOperationService:
         has_live_residue = residue_verified and bool(failure.remaining)
         authoritative.next_action = (
             f"Preserve the recovery backup at {failure.recovery_path}, restore "
-            "the listed residue, then run `supernote-module doctor`."
+            "the listed residue, then run `sn-module-gen doctor`."
             if has_live_residue
             else f"Preserve the recovery backup at {failure.recovery_path}, then "
-            "run `supernote-module doctor`; current project residue could not be "
+            "run `sn-module-gen doctor`; current project residue could not be "
             "inventoried."
             if not residue_verified
             else f"Preserve the recovery backup at {failure.recovery_path}, then "
-            "run `supernote-module doctor` to verify and complete guard cleanup."
+            "run `sn-module-gen doctor` to verify and complete guard cleanup."
         )
         authoritative.recovery = RecoveryAction(
             f"Protected source backup retained at {failure.recovery_path}.",
-            ["supernote-module", "doctor"],
+            ["sn-module-gen", "doctor"],
         )
         authoritative.error = (
             ErrorInfo(
@@ -686,7 +686,7 @@ class V4CliOperationService:
     @staticmethod
     def _frontend_mutation_options() -> dict[str, str]:
         return {
-            "issue_code": "SNV4_FRONTEND_MUTATED_SOURCE",
+            "issue_code": "SNMG_FRONTEND_MUTATED_SOURCE",
             "error_kind": "frontend_mutated_source",
             "phase": "frontend",
             "stage_label": "The JVM frontend",
@@ -789,7 +789,7 @@ class V4CliOperationService:
     def _validator_mutation_options(build: bool) -> dict[str, str]:
         if build:
             return {
-                "issue_code": "SNV4_BUILD_MUTATED_SOURCE",
+                "issue_code": "SNMG_BUILD_MUTATED_SOURCE",
                 "error_kind": "build_mutated_source",
                 "phase": "build",
                 "stage_label": "The Android build",
@@ -799,7 +799,7 @@ class V4CliOperationService:
                 ),
             }
         return {
-            "issue_code": "SNV4_VALIDATION_MUTATED_SOURCE",
+            "issue_code": "SNMG_VALIDATION_MUTATED_SOURCE",
             "error_kind": "validation_mutated_source",
             "phase": "check",
             "stage_label": "Validation",
@@ -1222,7 +1222,7 @@ class V4CliOperationService:
                         rollback=RollbackResult(True, "partial", []),
                         recovery=RecoveryAction(
                             "Precommit conflict cleanup left directory metadata residue.",
-                            ["supernote-module", "doctor"],
+                            ["sn-module-gen", "doctor"],
                         ),
                         error=ErrorInfo(
                             "plan_conflict_cleanup_failed",
@@ -1318,7 +1318,7 @@ class V4CliOperationService:
         next_action = (
             first_issue.suggested_command
             if first_issue is not None and first_issue.suggested_command
-            else "Review the staged validation issues, then rerun `supernote-module repair --dry-run`."
+            else "Review the staged validation issues, then rerun `sn-module-gen repair --dry-run`."
         )
         authoritative.status = (
             "failure" if rollback.status == "completed" else "partial"
@@ -1346,7 +1346,7 @@ class V4CliOperationService:
         if rollback.status != "completed":
             authoritative.recovery = RecoveryAction(
                 "Staged repair rollback is incomplete; inspect the listed residue.",
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
             )
         return authoritative
 
@@ -1429,7 +1429,7 @@ class V4CliOperationService:
         residue_verified: bool = True,
         restore_diagnostics: tuple[str, ...] = (),
         project: ProjectModel | None = None,
-        issue_code: str = "SNV4_FRONTEND_MUTATED_SOURCE",
+        issue_code: str = "SNMG_FRONTEND_MUTATED_SOURCE",
         error_kind: str = "frontend_mutated_source",
         phase: str = "frontend",
         stage_label: str = "The JVM frontend",
@@ -1455,13 +1455,13 @@ class V4CliOperationService:
         if recovery_path is not None:
             next_action = (
                 f"Preserve the recovery backup at {recovery_path}, restore the listed "
-                "residue, then rerun `supernote-module doctor`."
+                "residue, then rerun `sn-module-gen doctor`."
                 if residue_verified and residue
                 else f"Preserve the recovery backup at {recovery_path}, then rerun "
-                "`supernote-module doctor`; current residue could not be inventoried."
+                "`sn-module-gen doctor`; current residue could not be inventoried."
                 if not residue_verified
                 else f"Preserve the recovery backup at {recovery_path}, then rerun "
-                "`supernote-module doctor` to complete guard cleanup."
+                "`sn-module-gen doctor` to complete guard cleanup."
             )
         verified_rollback = rollback or RollbackResult(
             True, "completed" if restored else "partial", []
@@ -1484,7 +1484,7 @@ class V4CliOperationService:
             recovery=(
                 RecoveryAction(
                     f"Protected source backup retained at {recovery_path}.",
-                    ["supernote-module", "doctor"],
+                    ["sn-module-gen", "doctor"],
                 )
                 if recovery_path is not None
                 else None
@@ -1515,7 +1515,7 @@ class V4CliOperationService:
         mutations: tuple[str, ...],
         *,
         project: ProjectModel | None = None,
-        issue_code: str = "SNV4_FRONTEND_MUTATED_SOURCE",
+        issue_code: str = "SNMG_FRONTEND_MUTATED_SOURCE",
         stage_label: str = "The JVM frontend",
         suggested: str = (
             "Disable or fix the source-writing KSP/frontend hook, restore affected "
@@ -1584,7 +1584,7 @@ class V4CliOperationService:
         residue_verified: bool = True,
         restore_diagnostics: tuple[str, ...] = (),
         project: ProjectModel | None = None,
-        issue_code: str = "SNV4_FRONTEND_MUTATED_SOURCE",
+        issue_code: str = "SNMG_FRONTEND_MUTATED_SOURCE",
         error_kind: str = "frontend_mutated_source",
         phase: str = "frontend",
         stage_label: str = "The JVM frontend",
@@ -1616,15 +1616,15 @@ class V4CliOperationService:
         if not completed:
             next_action = (
                 f"Preserve the recovery backup at {recovery_path}, restore the listed "
-                "residue, then run `supernote-module doctor`."
+                "residue, then run `sn-module-gen doctor`."
                 if recovery_path is not None and residue_verified and residue
                 else f"Preserve the recovery backup at {recovery_path}, then run "
-                "`supernote-module doctor`; current residue could not be inventoried."
+                "`sn-module-gen doctor`; current residue could not be inventoried."
                 if recovery_path is not None and not residue_verified
                 else f"Preserve the recovery backup at {recovery_path}, then run "
-                "`supernote-module doctor` to complete guard cleanup."
+                "`sn-module-gen doctor` to complete guard cleanup."
                 if recovery_path is not None
-                else "Run `supernote-module doctor`, restore the listed residue, then rerun the command."
+                else "Run `sn-module-gen doctor`, restore the listed residue, then rerun the command."
             )
             recovery = RecoveryAction(
                 (
@@ -1632,7 +1632,7 @@ class V4CliOperationService:
                     if recovery_path is not None
                     else "Cancellation recovery is incomplete."
                 ),
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
             )
             error = ErrorInfo(
                 (
@@ -1732,7 +1732,7 @@ class V4CliOperationService:
                             else " The durable transaction journal remains available for recovery."
                         )
                     ),
-                    ["supernote-module", "doctor"],
+                    ["sn-module-gen", "doctor"],
                 ),
                 error=ErrorInfo("commit_cleanup_failed", "commit", str(exc)),
                 metadata={
@@ -1796,7 +1796,7 @@ class V4CliOperationService:
             affected_targets=list(plan.affected_targets),
             recovery=RecoveryAction(
                 "Precommit cleanup is incomplete; startup recovery will finish the durable abandon without restoring stale snapshots.",
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
             ),
             error=ErrorInfo(
                 "plan_conflict_cleanup_failed", "precommit", str(exc)

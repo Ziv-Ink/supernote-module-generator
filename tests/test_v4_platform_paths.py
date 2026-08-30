@@ -21,7 +21,7 @@ from supernote_module_generator.filesystem import (
 )
 from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.transaction import Transaction
-from supernote_module_generator.v4_cli_operations import V4CliOperationService
+from supernote_module_generator.cli_operations import CliOperationService
 
 
 def _plugin(root: Path) -> Path:
@@ -72,7 +72,7 @@ def _exercise_mutation_validation_and_rollback(root: Path) -> None:
 
     committed = service.plan(operation="update", requested_targets=("alpha",))
     service.execute(committed, Transaction(root, "update", ("alpha",)))
-    assert V4CliOperationService(root).check().status == "success"
+    assert CliOperationService(root).check().status == "success"
 
 
 @pytest.mark.parametrize("directory", ("project with spaces", "פרויקט-unicode-文档"))

@@ -31,7 +31,7 @@ from supernote_module_generator.models import (
     SubprocessError,
     ValidationResult,
 )
-from supernote_module_generator.v4_cli_operations import V4CliOperationService
+from supernote_module_generator.cli_operations import CliOperationService
 from supernote_module_generator.v4_validation import (
     V4ValidationResult,
     V4Validator,
@@ -41,7 +41,7 @@ from supernote_module_generator.v4_validation import (
 
 SCHEMA_PATH = (
     Path(__file__).parents[1]
-    / "src/supernote_module_generator/schemas/command-result-v4.schema.json"
+    / "src/supernote_module_generator/schemas/command-result.schema.json"
 )
 
 
@@ -132,10 +132,10 @@ def test_staged_repair_validation_failure_conforms_to_schema(
     )[0] == 0
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
     )
     issue = ValidationIssue(
-        "SNV4_STAGED_REPAIR_REJECTED",
+        "SNMG_STAGED_REPAIR_REJECTED",
         "error",
         "plugin",
         "staged repair sentinel",
@@ -175,12 +175,12 @@ def test_staged_repair_partial_rollback_separates_plan_from_actual_residue(
     )[0] == 0
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
     )
     preview_code, preview = invoke(root, ["repair", "--diff"])
     assert preview_code == 0
     issue = ValidationIssue(
-        "SNV4_STAGED_REPAIR_REJECTED",
+        "SNMG_STAGED_REPAIR_REJECTED",
         "error",
         "plugin",
         "staged repair sentinel",
@@ -193,7 +193,7 @@ def test_staged_repair_partial_rollback_separates_plan_from_actual_residue(
             "failure", "1" * 64, (issue,)
         ),
     )
-    original = V4CliOperationService._rollback_with_verification
+    original = CliOperationService._rollback_with_verification
     residue = Change("android/settings.gradle", "update", "rollback_residue")
 
     def partial_rollback(self, transaction, baseline, directory_metadata):
@@ -203,7 +203,7 @@ def test_staged_repair_partial_rollback_separates_plan_from_actual_residue(
         return RollbackResult(True, "partial", rollback.restored), [residue]
 
     monkeypatch.setattr(
-        V4CliOperationService,
+        CliOperationService,
         "_rollback_with_verification",
         partial_rollback,
     )
@@ -262,7 +262,7 @@ def test_doctor_build_cli_preserves_authoritative_check_contract(
             if status == "success"
             else [
                 {
-                    "code": f"SNV4_{status.upper()}",
+                    "code": f"SNMG_{status.upper()}",
                     "severity": "error",
                     "scope": "toolchain",
                     "message": f"{status} sentinel",
@@ -281,7 +281,7 @@ def test_doctor_build_cli_preserves_authoritative_check_contract(
         if status == "cancelled"
         else RecoveryAction(
             f"{status} recovery sentinel",
-            ["supernote-module", "check", "--build"],
+            ["sn-module-gen", "check", "--build"],
         )
     )
     nested_next_action = (
@@ -341,7 +341,7 @@ def test_doctor_build_cli_preserves_authoritative_check_contract(
         lambda *args, **kwargs: [],
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_cli_operations.V4CliOperationService.check",
+        "supernote_module_generator.cli_operations.CliOperationService.check",
         lambda *args, **kwargs: nested,
     )
 
@@ -425,7 +425,7 @@ def test_doctor_build_keeps_successful_nested_evidence_when_another_check_fails(
         lambda *args, **kwargs: [],
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_cli_operations.V4CliOperationService.check",
+        "supernote_module_generator.cli_operations.CliOperationService.check",
         lambda *args, **kwargs: nested,
     )
 
@@ -468,7 +468,7 @@ def _isolate_doctor_build(monkeypatch, nested: CommandResult) -> None:
         lambda *args, **kwargs: [],
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_cli_operations.V4CliOperationService.check",
+        "supernote_module_generator.cli_operations.CliOperationService.check",
         lambda *args, **kwargs: nested,
     )
 
@@ -490,7 +490,7 @@ def _nested_guard_result(status: str) -> CommandResult:
                 if is_success
                 else [
                     {
-                        "code": f"SNV4_GUARD_{status.upper()}",
+                        "code": f"SNMG_GUARD_{status.upper()}",
                         "severity": "error",
                         "scope": "toolchain",
                         "message": f"nested {status}",
@@ -506,7 +506,7 @@ def _nested_guard_result(status: str) -> CommandResult:
         recovery=(
             RecoveryAction(
                 f"nested {status} recovery",
-                ["supernote-module", "check", "--build"],
+                ["sn-module-gen", "check", "--build"],
             )
             if not is_success
             else None
@@ -722,7 +722,7 @@ def test_build_guard_partial_restoration_preserves_authoritative_contract(
                 generation_id="generation-failure-sentinel",
                 issues=(
                     ValidationIssue(
-                        "SNV4_BUILD_FAILED",
+                        "SNMG_BUILD_FAILED",
                         "error",
                         "toolchain",
                         "compiler root cause sentinel",
@@ -772,7 +772,7 @@ def test_build_guard_partial_restoration_preserves_authoritative_contract(
     assert envelope["recovery"] is not None
     assert recovery_paths and lexists(recovery_paths[0])
     assert any(
-        issue["code"] == "SNV4_BUILD_MUTATED_SOURCE"
+        issue["code"] == "SNMG_BUILD_MUTATED_SOURCE"
         for issue in envelope["issues"]
     )
     assert envelope["affected_targets"] == ["alpha"]
@@ -875,7 +875,7 @@ def test_metadata_only_partial_build_restore_uses_exact_residue_scope(
     issue = next(
         item
         for item in envelope["issues"]
-        if item["code"] == "SNV4_BUILD_MUTATED_SOURCE"
+        if item["code"] == "SNMG_BUILD_MUTATED_SOURCE"
     )
     assert issue["scope"] == scope
     assert issue["path"] == relative
@@ -921,8 +921,8 @@ def test_stage_failure_survives_independent_finalization_cancellation(
             raise RuntimeError("frontend root-cause sentinel")
 
         monkeypatch.setattr(
-            "supernote_module_generator.v4_cli_operations."
-            "V4CliOperationService._jvm_frontend_manifests",
+            "supernote_module_generator.cli_operations."
+            "CliOperationService._jvm_frontend_manifests",
             failing_frontend,
         )
     else:
@@ -982,11 +982,11 @@ def test_stage_failure_survives_independent_finalization_cancellation(
         "jvm_frontend_failed" if stage == "frontend" else "validation_failed"
     )
     expected_issue = (
-        "SNV4_FRONTEND_MUTATED_SOURCE"
+        "SNMG_FRONTEND_MUTATED_SOURCE"
         if stage == "frontend"
-        else "SNV4_BUILD_MUTATED_SOURCE"
+        else "SNMG_BUILD_MUTATED_SOURCE"
         if build
-        else "SNV4_VALIDATION_MUTATED_SOURCE"
+        else "SNMG_VALIDATION_MUTATED_SOURCE"
     )
     assert any(issue["code"] == expected_issue for issue in envelope["issues"])
     assert envelope["affected_targets"] == ["alpha"]
@@ -1054,8 +1054,8 @@ def test_preview_stage_failure_survives_independent_finalization_cancellation(
         raise RuntimeError("preview frontend root-cause sentinel")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_cli_operations."
-        "V4CliOperationService._jvm_frontend_manifests",
+        "supernote_module_generator.cli_operations."
+        "CliOperationService._jvm_frontend_manifests",
         failing_frontend,
     )
     recovery_paths: list[Path] = []
@@ -1108,7 +1108,7 @@ def test_preview_stage_failure_survives_independent_finalization_cancellation(
     assert authoritative["error"]["kind"] == "jvm_frontend_failed"
     assert "preview frontend root-cause sentinel" in authoritative["error"]["message"]
     assert any(
-        issue["code"] == "SNV4_FRONTEND_MUTATED_SOURCE"
+        issue["code"] == "SNMG_FRONTEND_MUTATED_SOURCE"
         for issue in envelope["issues"]
     )
     assert envelope["affected_targets"] == ["alpha"]
@@ -1458,8 +1458,8 @@ def test_stage_failure_without_mutation_keeps_cleanup_diagnostics_out_of_residue
             raise RuntimeError("frontend root-cause sentinel")
 
         monkeypatch.setattr(
-            "supernote_module_generator.v4_cli_operations."
-            "V4CliOperationService._jvm_frontend_manifests",
+            "supernote_module_generator.cli_operations."
+            "CliOperationService._jvm_frontend_manifests",
             failing_frontend,
         )
     else:
@@ -1548,8 +1548,8 @@ def test_uninventoried_guard_residue_is_never_treated_as_verified_empty(
             raise RuntimeError("frontend root-cause sentinel")
 
         monkeypatch.setattr(
-            "supernote_module_generator.v4_cli_operations."
-            "V4CliOperationService._jvm_frontend_manifests",
+            "supernote_module_generator.cli_operations."
+            "CliOperationService._jvm_frontend_manifests",
             failing_frontend,
         )
     else:

@@ -111,7 +111,7 @@ def test_overlapping_cli_command_fails_cleanly_before_mutation(tmp_path: Path):
         )
 
     assert code == 2
-    assert "Another supernote-module command is already running" in stderr
+    assert "Another sn-module-gen command is already running" in stderr
     assert (root / "package.json").read_bytes() == before
     assert not (root / "local_modules/blocked").exists()
     assert not (root / JOURNAL_NAME).exists()
@@ -242,7 +242,7 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
     assert not first.is_alive()
     assert first_result and first_result[0][0] == 0
     assert second[0] == 2
-    assert "Another supernote-module command is already running" in second[2]
+    assert "Another sn-module-gen command is already running" in second[2]
     assert (root / "local_modules/first").is_dir()
     assert not (root / "local_modules/second").exists()
     assert not (root / JOURNAL_NAME).exists()
@@ -261,7 +261,7 @@ def test_busy_command_does_not_recover_an_active_transaction(tmp_path: Path):
         code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 2
-    assert "Another supernote-module command is already running" in stderr
+    assert "Another sn-module-gen command is already running" in stderr
     assert package.read_text(encoding="utf-8") == '{"active":true}\n'
     assert (root / JOURNAL_NAME).is_file()
     assert transaction.rollback().status == "completed"

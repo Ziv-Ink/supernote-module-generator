@@ -132,7 +132,7 @@ def test_root_readme_explains_the_v4_public_model():
         in opening
     )
     assert "## Install" in readme
-    assert "pip install supernote-module-generator" in readme
+    assert "pip install sn-module-gen" in readme
     assert "--starter cpp --starter kotlin" in readme
     assert "--type native" not in readme
     assert "SupernotePluginInternal" in readme
@@ -184,7 +184,7 @@ def test_initial_v4_feature_readme_is_package_specific_and_generation_owned(
     assert "C/C++: `android/src/main/cpp/`" in readme
     assert "Kotlin/Java: `android/src/main/java/`" in readme
     assert "No JavaScript-public declarations are currently generated" in readme
-    assert "supernote-module update typed-feature" in readme
+    assert "sn-module-gen update typed-feature" in readme
     assert "replace this README and `index.d.ts`" in readme
     assert "Cross-family native-object proxies" not in readme
 

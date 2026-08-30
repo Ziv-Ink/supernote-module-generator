@@ -252,8 +252,8 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "Kotlin suspend requires explicit SupernotePluginAsync" in processor
     assert "org.jspecify.annotations.Nullable" in processor
     assert "androidx.annotation.Nullable" not in processor
-    assert "SNV4_RESTART_REQUIRED" in module
-    assert "SNV4_GENERATION_STATE_CORRUPT" in module
+    assert "SNMG_RESTART_REQUIRED" in module
+    assert "SNMG_GENERATION_STATE_CORRUPT" in module
     assert "retainedIds.size != retainedGenerations" in module
     assert "MessageDigest.getInstance(\"SHA-256\")" in module
     assert "cachedPublication != null" in module
@@ -941,7 +941,7 @@ def test_retry_worker_allocation_failure_is_restart_required_after_one_invalidat
     assert "if (retained)" in bootstrap
     assert "g_sessions.erase(found);" in bootstrap
     assert (
-        "SNV4_RESTART_REQUIRED: runtime retirement could not be guaranteed"
+        "SNMG_RESTART_REQUIRED: runtime retirement could not be guaranteed"
         in bootstrap
     )
     assert "restart PluginHost" in bootstrap
@@ -1232,7 +1232,7 @@ def test_standalone_common_codegen_runs_without_repository_pythonpath(tmp_path: 
 
     assert not any(path.endswith(".py") for path in ownership["generated_files"])
     assert not list(generated.rglob("*.py"))
-    assert "supernote-module" in (generated / "build.gradle").read_text()
+    assert "sn-module-gen" in (generated / "build.gradle").read_text()
 
 
 def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):

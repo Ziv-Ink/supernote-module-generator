@@ -17,7 +17,7 @@ from .semantic import (
     SemanticApi,
     SemanticObjectDeclaration,
 )
-from .v4_schemas import (
+from .schemas import (
     FEATURE_MANIFEST_KIND,
     FEATURE_MANIFEST_SCHEMA_VERSION,
     PLUGIN_REGISTRY_KIND,

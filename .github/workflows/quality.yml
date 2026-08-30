@@ -261,10 +261,10 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/wheel-smoke"
           "$RUNNER_TEMP/wheel-smoke/bin/python" -m pip install --no-deps dist/*.whl
-          "$RUNNER_TEMP/wheel-smoke/bin/supernote-module" --version
-          "$RUNNER_TEMP/wheel-smoke/bin/supernote-module" --help
+          "$RUNNER_TEMP/wheel-smoke/bin/sn-module-gen" --version
+          "$RUNNER_TEMP/wheel-smoke/bin/sn-module-gen" --help
           "$RUNNER_TEMP/wheel-smoke/bin/python" -c \
-            'import json; from importlib.resources import files; json.loads(files("supernote_module_generator").joinpath("schemas/command-result-v4.schema.json").read_text(encoding="utf-8"))'
+            'import json; from importlib.resources import files; json.loads(files("supernote_module_generator").joinpath("schemas/command-result.schema.json").read_text(encoding="utf-8"))'
       - name: Install and smoke the source distribution
         run: |
           mkdir -p "$RUNNER_TEMP/sdist-smoke"
@@ -346,7 +346,7 @@ jobs:
         run: npm install --ignore-scripts
       - name: Generate C++ and Kotlin release examples
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
           "$SUPERNOTE_MODULE_COMMAND" add readme-cpp \
@@ -365,7 +365,7 @@ jobs:
           "$SUPERNOTE_MODULE_COMMAND" template status
       - name: Prove canonical no-op and generated JavaScript/TypeScript quality
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
           "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
@@ -377,7 +377,7 @@ jobs:
             "$RUNNER_TEMP/update-result.json"
       - name: Compile Gradle KSP Kotlin CMake JNI and JSI read-only
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
           "$SUPERNOTE_MODULE_COMMAND" --json check --build \
@@ -388,7 +388,7 @@ jobs:
       - name: Build and verify the installable plugin package
         working-directory: release-plugin
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -401,7 +401,7 @@ jobs:
           npm install --ignore-scripts
       - name: Execute the exact pinned Wiki command sequence
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           "$RUNNER_TEMP/generator-venv/bin/python" \
             generator/ci/run_wiki_acceptance.py \
@@ -418,7 +418,7 @@ jobs:
           git commit -m 'Wiki acceptance baseline'
       - name: Prove the Wiki project is canonical and source-read-only
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd wiki-plugin
           "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
@@ -436,7 +436,7 @@ jobs:
       - name: Build and verify the Wiki acceptance package
         working-directory: wiki-plugin
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -494,15 +494,15 @@ jobs:
           "$RUNNER_TEMP/generator-venv/bin/python" \
             generator/ci/run_file_reader_acceptance.py \
             file-reader-test \
-            "$RUNNER_TEMP/generator-venv/bin/supernote-module" \
+            "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" \
             "$RUNNER_TEMP/file-reader-acceptance.json" \
             generator/maintainers/device-evidence/v4-device-canary-2026-08-27.md \
             generator/maintainers/device-evidence/v4-bounded-note-doc-2026-08-27
       - name: Require current template capability in the real project
         working-directory: file-reader-test
         run: |
-          "$RUNNER_TEMP/generator-venv/bin/supernote-module" template sync --yes
-          "$RUNNER_TEMP/generator-venv/bin/supernote-module" template status
+          "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" template sync --yes
+          "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" template status
       - name: Create disposable package metadata and freeze the generated baseline
         working-directory: file-reader-test
         run: |
@@ -529,7 +529,7 @@ jobs:
       - name: Prove read-only build and generated-source quality
         working-directory: file-reader-test
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           "$SUPERNOTE_MODULE_COMMAND" --json check --build \
             > "$RUNNER_TEMP/file-reader-check.json"
@@ -541,7 +541,7 @@ jobs:
       - name: Build and verify the real-project package
         working-directory: file-reader-test
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -559,13 +559,13 @@ jobs:
         run: |
           python generator/ci/device_acceptance/materialize.py \
             bounded-note \
-            "$RUNNER_TEMP/generator-venv/bin/supernote-module" \
+            "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" \
             note \
             --identity-suffix Release \
             --output "$RUNNER_TEMP/bounded-note-identity.json"
           python generator/ci/device_acceptance/materialize.py \
             bounded-doc \
-            "$RUNNER_TEMP/generator-venv/bin/supernote-module" \
+            "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" \
             doc \
             --identity-suffix Release \
             --output "$RUNNER_TEMP/bounded-doc-identity.json"
@@ -573,7 +573,7 @@ jobs:
           npm --prefix bounded-doc install --ignore-scripts
       - name: Compile and package both bounded host contexts
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/supernote-module
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           for project in bounded-note bounded-doc; do
             npm --prefix "$project" run lint -- --max-warnings=0

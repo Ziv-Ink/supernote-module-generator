@@ -139,9 +139,9 @@ def test_public_commands_reject_unmanifested_v4_wiring_without_mutation(
     settings = root / "android/settings.gradle"
     settings.write_text(
         settings.read_text()
-        + "// supernote-module-v4-runtime\n"
+        + "// sn-module-gen-v4-runtime\n"
         + "include ':unmanifested-v4-runtime'\n"
-        + "// end supernote-module-v4-runtime\n"
+        + "// end sn-module-gen-v4-runtime\n"
     )
     before = inventory_project(root)
     before_metadata = exact_metadata(root)
@@ -554,8 +554,8 @@ def test_legacy_wiring_without_runtime_is_rejected_without_rewrite(tmp_path: Pat
     settings = root / "android/settings.gradle"
     settings.write_text(
         settings.read_text()
-        + "// supernote-module-v2-runtime\nlegacy\n"
-        + "// end supernote-module-v2-runtime\n"
+        + "// sn-module-gen-v2-runtime\nlegacy\n"
+        + "// end sn-module-gen-v2-runtime\n"
     )
     before = settings.read_bytes()
 

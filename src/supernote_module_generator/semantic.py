@@ -12,7 +12,7 @@ from enum import Enum
 import re
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
-from .v4_schemas import (
+from .schemas import (
     SEMANTIC_MANIFEST_KIND,
     SEMANTIC_MANIFEST_SCHEMA_VERSION,
 )

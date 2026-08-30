@@ -9,8 +9,8 @@ ROOT_HELP = """Supernote Module Generator
 Generate and manage language-neutral V4 features in an existing Supernote plugin.
 
 Usage:
-  supernote-module
-  supernote-module <command> [options]
+  sn-module-gen
+  sn-module-gen <command> [options]
 
 Commands:
   add        Create and link a local feature.
@@ -45,13 +45,13 @@ Global options:
       --debug     Include internal diagnostics and tracebacks.
 
 Examples:
-  supernote-module
-  supernote-module add local-math --starter cpp
-  supernote-module add document --starter cpp --starter kotlin
-  supernote-module validate --all
-  supernote-module doctor
+  sn-module-gen
+  sn-module-gen add local-math --starter cpp
+  sn-module-gen add document --starter cpp --starter kotlin
+  sn-module-gen validate --all
+  sn-module-gen doctor
 
-For command-specific help, run a command such as `supernote-module help add`.
+For command-specific help, run a command such as `sn-module-gen help add`.
 """
 
 ADD_HELP = """Supernote Module Generator
@@ -59,7 +59,7 @@ ADD_HELP = """Supernote Module Generator
 Create and link a language-neutral local feature.
 
 Usage:
-  supernote-module add [PACKAGE] [options]
+  sn-module-gen add [PACKAGE] [options]
 
 Arguments:
   PACKAGE                         npm or Yarn package name and feature folder.
@@ -115,11 +115,11 @@ Name inference:
   options always override inferred values.
 
 Examples:
-  supernote-module add
-  supernote-module add local-math --starter cpp
-  supernote-module add local-math --starter cpp --yes
-  supernote-module add document --starter cpp --starter kotlin --build
-  supernote-module add @acme/stylus --starter kotlin \\
+  sn-module-gen add
+  sn-module-gen add local-math --starter cpp
+  sn-module-gen add local-math --starter cpp --yes
+  sn-module-gen add document --starter cpp --starter kotlin --build
+  sn-module-gen add @acme/stylus --starter kotlin \\
     --javascript-name Stylus \\
     --android-namespace com.acme.stylus \\
     --package-manager yarn --yes
@@ -137,7 +137,7 @@ UPDATE_HELP = """Supernote Module Generator
 Refresh generated parts of one or all managed features while preserving source.
 
 Usage:
-  supernote-module update [MODULE] [options]
+  sn-module-gen update [MODULE] [options]
 
 Arguments:
   MODULE                         Managed feature package name.
@@ -171,11 +171,11 @@ Behavior:
   generation step.
 
 Examples:
-  supernote-module update
-  supernote-module update local-math
-  supernote-module update --all --dry-run
-  supernote-module update local-math --build
-  supernote-module update local-math --yes --json
+  sn-module-gen update
+  sn-module-gen update local-math
+  sn-module-gen update --all --dry-run
+  sn-module-gen update local-math --build
+  sn-module-gen update local-math --yes --json
 
 Exit:
   0 success or user cancellation
@@ -191,7 +191,7 @@ Authoritatively compare semantic inputs, the V4 manifest, wiring, and every
 generator-owned artifact with the current filesystem.
 
 Usage:
-  supernote-module check [--build] [output options]
+  sn-module-gen check [--build] [output options]
 
 Options:
       --build  Add Android compilation after integrity and syntax checks pass.
@@ -207,7 +207,7 @@ REPAIR_HELP = """Supernote Module Generator
 Preview or apply one complete canonical V4 generation transaction.
 
 Usage:
-  supernote-module repair [--dry-run] [--diff] [--yes] [output options]
+  sn-module-gen repair [--dry-run] [--diff] [--yes] [output options]
 
 Behavior:
   Repair is a dry-run unless --yes is supplied. The plan lists requested and
@@ -219,8 +219,8 @@ TEMPLATE_HELP = """Supernote Module Generator
 Compare or explicitly synchronize the versioned official-template launch capability.
 
 Usage:
-  supernote-module template status [output options]
-  supernote-module template sync [--dry-run | --yes] [output options]
+  sn-module-gen template status [output options]
+  sn-module-gen template sync [--dry-run | --yes] [output options]
 
 Behavior:
   status is read-only and reports current, drifted, or missing Bash/PowerShell
@@ -233,8 +233,8 @@ VALIDATE_HELP = """Supernote Module Generator
 Check feature structure, shared-runtime integration, and optionally the Android build.
 
 Usage:
-  supernote-module validate [MODULE] [options]
-  supernote-module validate --all [options]
+  sn-module-gen validate [MODULE] [options]
+  sn-module-gen validate --all [options]
 
 Arguments:
   MODULE       Managed feature package name.
@@ -258,10 +258,10 @@ Behavior:
   --all reports every feature failure before exiting.
 
 Examples:
-  supernote-module validate
-  supernote-module validate local-math
-  supernote-module validate local-math --build
-  supernote-module validate --all --json
+  sn-module-gen validate
+  sn-module-gen validate local-math
+  sn-module-gen validate local-math --build
+  sn-module-gen validate --all --json
 
 Exit:
   0 valid
@@ -275,8 +275,8 @@ REMOVE_HELP = """Supernote Module Generator
 Permanently delete one or all managed features and update the shared runtime.
 
 Usage:
-  supernote-module remove [MODULE] [options]
-  supernote-module remove --all [options]
+  sn-module-gen remove [MODULE] [options]
+  sn-module-gen remove --all [options]
 
 Arguments:
   MODULE                         Managed feature package name.
@@ -311,11 +311,11 @@ Recovery:
   possible.
 
 Examples:
-  supernote-module remove
-  supernote-module remove local-math
-  supernote-module remove local-math --yes
-  supernote-module remove local-math --delete-build-files --yes
-  supernote-module remove --all --yes --json
+  sn-module-gen remove
+  sn-module-gen remove local-math
+  sn-module-gen remove local-math --yes
+  sn-module-gen remove local-math --delete-build-files --yes
+  sn-module-gen remove --all --yes --json
 
 Exit:
   0 success or user cancellation
@@ -330,7 +330,7 @@ DOCTOR_HELP = """Supernote Module Generator
 Verify the development environment selected by this V4 plugin.
 
 Usage:
-  supernote-module doctor [options]
+  sn-module-gen doctor [options]
 
 Options:
   -h, --help  Show help.
@@ -355,9 +355,9 @@ Behavior:
   read-only state check and full Gradle/KSP/Kotlin/CMake/JNI/JSI build probe.
 
 Examples:
-  supernote-module doctor
-  supernote-module doctor --json
-  supernote-module doctor --build --json
+  sn-module-gen doctor
+  sn-module-gen doctor --json
+  sn-module-gen doctor --build --json
 
 Exit:
   0 required checks passed
@@ -371,14 +371,14 @@ HELP_HELP = """Supernote Module Generator
 Show the command overview or help for one command.
 
 Usage:
-  supernote-module help [COMMAND]
+  sn-module-gen help [COMMAND]
 
 Arguments:
   COMMAND  add, update, validate, remove, or doctor.
 
 Examples:
-  supernote-module help
-  supernote-module help add
+  sn-module-gen help
+  sn-module-gen help add
 """
 
 COMMAND_HELP: Dict[str, str] = {

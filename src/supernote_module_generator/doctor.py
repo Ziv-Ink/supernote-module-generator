@@ -893,7 +893,7 @@ class DoctorService:
             rollback=RollbackResult(True, "partial", []),
             recovery=RecoveryAction(
                 recovery_summary,
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
             ),
             error=ErrorInfo(
                 (
@@ -925,7 +925,7 @@ class DoctorService:
         if "android_project_build" in failed_ids:
             return (
                 "Review the Doctor build diagnostics, correct the first integrity or "
-                "compiler failure, then rerun `supernote-module doctor --build`."
+                "compiler failure, then rerun `sn-module-gen doctor --build`."
             )
         if failed_ids in ({"gradle_wrapper"}, {"gradle_wrapper", "gradle_jvm"}):
             wrapper = next(check for check in failed if check.id == "gradle_wrapper")
@@ -938,19 +938,19 @@ class DoctorService:
                 if self.platform_name == "nt":
                     return (
                         f"Restore `{relative}`, then rerun "
-                        "`supernote-module doctor`."
+                        "`sn-module-gen doctor`."
                     )
                 return (
                     f"Restore `{relative}`, make it executable, then rerun "
-                    "`supernote-module doctor`."
+                    "`sn-module-gen doctor`."
                 )
             return (
                 f"Fix `{relative}` so it executes successfully, then rerun "
-                "`supernote-module doctor`."
+                "`sn-module-gen doctor`."
             )
         return (
             "Resolve the required checks listed above, then rerun "
-            "`supernote-module doctor`."
+            "`sn-module-gen doctor`."
         )
 
     def _probe(self, command: Sequence[str], timeout: int = 10) -> Tuple[bool, Optional[str], str]:
@@ -1775,9 +1775,9 @@ class DoctorService:
     ) -> Optional[CommandResult]:
         if not valid_root:
             return None
-        from .v4_cli_operations import V4CliOperationService
+        from .cli_operations import CliOperationService
 
-        return V4CliOperationService(root).check(build=True)
+        return CliOperationService(root).check(build=True)
 
     def _project_build_check(
         self,
@@ -1785,7 +1785,7 @@ class DoctorService:
         valid_root: bool,
         result: Optional[CommandResult],
     ) -> DoctorCheckResult:
-        command = ["supernote-module", "check", "--build"]
+        command = ["sn-module-gen", "check", "--build"]
         if not valid_root:
             return DoctorCheckResult(
                 "android_project_build",

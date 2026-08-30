@@ -345,9 +345,9 @@ def test_wiki_acceptance_commands_are_bounded_and_source_backed(tmp_path: Path) 
         f"""# Getting started
 {START}
 ```bash
-supernote-module add wiki-feature \\
+sn-module-gen add wiki-feature \\
   --starter cpp --starter kotlin --yes
-supernote-module check
+sn-module-gen check
 ```
 {END}
 """,
@@ -356,7 +356,7 @@ supernote-module check
 
     assert read_commands(page) == (
         (
-            "supernote-module",
+            "sn-module-gen",
             "add",
             "wiki-feature",
             "--starter",
@@ -365,14 +365,14 @@ supernote-module check
             "kotlin",
             "--yes",
         ),
-        ("supernote-module", "check"),
+        ("sn-module-gen", "check"),
     )
 
     page.write_text(
         f"{START}\n```bash\nnpm install\n```\n{END}\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="only supernote-module"):
+    with pytest.raises(ValueError, match="only sn-module-gen"):
         read_commands(page)
 
 

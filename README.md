@@ -20,14 +20,14 @@ object retention.
 Python 3.9 or newer is required:
 
 ```bash
-python3 -m pip install supernote-module-generator
+python3 -m pip install sn-module-gen
 ```
 
 Package and command names:
 
 ```text
-Python distribution: supernote-module-generator
-CLI command:         supernote-module
+Python distribution: sn-module-gen
+CLI command:         sn-module-gen
 ```
 
 Run the CLI from an existing Supernote plugin root.
@@ -37,9 +37,9 @@ Run the CLI from an existing Supernote plugin root.
 Choose which starter source families to scaffold:
 
 ```bash
-supernote-module add document --starter cpp --yes
-supernote-module add document --starter kotlin --yes
-supernote-module add document --starter cpp --starter kotlin --yes
+sn-module-gen add document --starter cpp --yes
+sn-module-gen add document --starter kotlin --yes
+sn-module-gen add document --starter cpp --starter kotlin --yes
 ```
 
 The guided command shows the same choices as `C/C++ (native)` and
@@ -53,11 +53,11 @@ small marked C++ boundary.
 Common commands:
 
 ```bash
-supernote-module update document --yes
-supernote-module validate document
-supernote-module validate --all --build
-supernote-module doctor
-supernote-module remove document --yes
+sn-module-gen update document --yes
+sn-module-gen validate document
+sn-module-gen validate --all --build
+sn-module-gen doctor
+sn-module-gen remove document --yes
 ```
 
 The generator uses the plugin root's optional `devconfig.json` for plugin operations
@@ -72,14 +72,14 @@ Doctor reads the literal `compileSdkVersion`, `buildToolsVersion`, and `ndkVersi
 it never substitutes another installed NDK. JSON distinguishes `configured`, `found`,
 `selected`, `executable_probed`, `compiler_probed`, `project_built`, and
 `device_tested`. Plain Doctor never infers a build or device test from file detection.
-Use `supernote-module doctor --build` for the read-only Gradle/KSP/Kotlin/CMake/JNI/JSI
+Use `sn-module-gen doctor --build` for the read-only Gradle/KSP/Kotlin/CMake/JNI/JSI
 gate; `device_tested` stays false until a separate device canary.
 
 Removal preserves plugin build output by default. To remove the three known
 generated build directories as part of an explicit removal:
 
 ```bash
-supernote-module remove document --delete-build-files --yes
+sn-module-gen remove document --delete-build-files --yes
 ```
 
 That option targets only `build/`, `android/build/`, and
@@ -280,21 +280,21 @@ The integrity manifest records the required official-template capability. Compar
 surrounding plugin's Bash and PowerShell launch scripts without writing anything:
 
 ```bash
-supernote-module template status
+sn-module-gen template status
 ```
 
 Preview or explicitly apply the recognized capability update:
 
 ```bash
-supernote-module template sync --dry-run
-supernote-module template sync --yes
+sn-module-gen template sync --dry-run
+sn-module-gen template sync --yes
 ```
 
 Sync is transactional and refuses missing files, unsafe entry kinds, or unrecognized
 script content. A synchronized launch still reports runtime success as unverified
 unless it observes a plugin-correlated marker.
 
-`supernote-module validate` checks generated structure by default; `--build` also
+`sn-module-gen validate` checks generated structure by default; `--build` also
 invokes Android. A local build proves generation and compilation for that environment,
 not that a particular Supernote firmware, PluginHost, linker namespace, or SELinux
 policy will execute the code. Validate target-device behavior on the intended device.

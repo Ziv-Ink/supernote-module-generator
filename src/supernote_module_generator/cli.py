@@ -46,9 +46,9 @@ from .models import (
 from .naming import infer_android_namespace, infer_javascript_name
 from .operation_lock import plugin_operation_lock
 from .project import resolve_plugin_root
-from .project_model import assert_public_v4_project
+from .project_model import assert_public_project
 from .rendering import Renderer, TerminalCapabilities
-from .v4_cli_operations import V4CliOperationService
+from .cli_operations import CliOperationService
 from .template_contract import TemplateContractService
 from .subprocesses import run_process
 from .transaction import JOURNAL_NAME, recover_pending
@@ -148,14 +148,14 @@ def _usage_recovery(command: str, message: str) -> str:
     if message.startswith("unknown command"):
         matches = get_close_matches(command, COMMANDS, n=1, cutoff=0.6)
         suggestion = (
-            f"Did you mean `supernote-module {matches[0]}`?\n"
+            f"Did you mean `sn-module-gen {matches[0]}`?\n"
             if matches
             else ""
         )
-        return suggestion + "Run `supernote-module --help` for available commands."
+        return suggestion + "Run `sn-module-gen --help` for available commands."
     if message.startswith("unknown option"):
         target = f" {command}" if command in {"add", "update", "validate", "remove", "doctor"} else ""
-        return f"Run `supernote-module{target} --help` for valid options."
+        return f"Run `sn-module-gen{target} --help` for valid options."
     if message == "--starter is required without --yes in non-interactive mode":
         return (
             "Provide --starter cpp, --starter kotlin, or both; or use --yes to accept\n"
@@ -194,7 +194,7 @@ def _usage_recovery(command: str, message: str) -> str:
     if message.startswith("could not derive a valid Android namespace"):
         return "Provide one with --android-namespace."
     if message == "package name is required":
-        return "Provide it as `supernote-module add <PACKAGE>`."
+        return "Provide it as `sn-module-gen add <PACKAGE>`."
     if message == "package manager is ambiguous":
         return "Both package-lock.json and yarn.lock were found.\nProvide --package-manager npm or --package-manager yarn."
     if message in {"npm is not available", "yarn is not available"}:
@@ -219,10 +219,10 @@ def _usage_recovery(command: str, message: str) -> str:
     if message == "--yes requires an explicit module or --all":
         return "Provide a module name or --all before using --yes."
     if message.startswith("module ") and message.endswith(" was not found"):
-        return "Run `supernote-module validate --all` to list and check managed features."
+        return "Run `sn-module-gen validate --all` to list and check managed features."
     if message.startswith("module ") and message.endswith(" already exists"):
         module = message[len('module "') : -len('" already exists')]
-        return f"Use `supernote-module update {module}` to refresh it."
+        return f"Use `sn-module-gen update {module}` to refresh it."
     if message.startswith('"') and "exists but is not managed" in message:
         return "Move it, choose another package name, or remove it manually after reviewing its contents."
     if message.startswith("JavaScript name ") and "already used" in message:
@@ -354,7 +354,7 @@ def _recover(root: Path, command: str, renderer: Renderer) -> List[object]:
             rollback=outcome.rollback,
             recovery=RecoveryAction(
                 recovery_summary,
-                outcome.recovery_command or ["supernote-module", "doctor"],
+                outcome.recovery_command or ["sn-module-gen", "doctor"],
             ),
             error=ErrorInfo(
                 "startup_recovery_failed",
@@ -383,7 +383,7 @@ def _startup_failure(command: str, exc: PartialFailure) -> CommandResult:
         rollback=RollbackResult(True, "failed", []),
         recovery=RecoveryAction(
             "Automatic startup recovery is incomplete.",
-            exc.recovery or ["supernote-module", "doctor"],
+            exc.recovery or ["sn-module-gen", "doctor"],
         ),
         error=ErrorInfo(
             "startup_recovery_failed",
@@ -447,7 +447,7 @@ def _run_command(
                 build=parsed.has("build"),
             )
         with plugin_operation_lock(valid_root):
-            assert_public_v4_project(valid_root)
+            assert_public_project(valid_root)
             with _developer_environment(
                 valid_root,
                 renderer,
@@ -470,14 +470,14 @@ def _run_command(
                 return result
 
     root = resolve_plugin_root(cwd)
-    assert_public_v4_project(root)
+    assert_public_project(root)
     if _trusted_parent_build_hook(parsed, root):
         manifest_root = parsed.value("jvm_manifest_root")
-        return V4CliOperationService(root).check(
+        return CliOperationService(root).check(
             jvm_manifest_root=(Path(manifest_root) if manifest_root else None),
         )
     with plugin_operation_lock(root):
-        assert_public_v4_project(root)
+        assert_public_project(root)
         with _developer_environment(
             root,
             renderer,
@@ -563,12 +563,12 @@ def _run_feature_command(
     service = FeatureCliOperationService(root, renderer)
     if command == "check":
         manifest_root = parsed.value("jvm_manifest_root")
-        result = V4CliOperationService(root).check(
+        result = CliOperationService(root).check(
             build=parsed.has("build"),
             jvm_manifest_root=(Path(manifest_root) if manifest_root else None),
         )
     elif command == "repair":
-        result = V4CliOperationService(root).update(
+        result = CliOperationService(root).update(
             (record.manifest.npm_name for record in service.features.records()),
             dry_run=parsed.has("dry_run") or not parsed.has("yes"),
             include_diff=parsed.has("diff"),
@@ -596,7 +596,7 @@ def _run_feature_command(
                 raise ConfigurationError(
                     "non-interactive V4 update execution requires --yes; use --dry-run to preview"
                 )
-            result = V4CliOperationService(root).update(
+            result = CliOperationService(root).update(
                 requested,
                 dry_run=parsed.has("dry_run"),
                 include_diff=parsed.has("diff"),
@@ -611,7 +611,7 @@ def _run_feature_command(
         if decisions is None:
             if renderer.mode == "json":
                 return CommandResult("update", metadata={"empty": True})
-            empty = "No features were found in this plugin.\nAdd one with `supernote-module add`."
+            empty = "No features were found in this plugin.\nAdd one with `sn-module-gen add`."
             if interaction is not None:
                 print(f"\n{empty}", file=renderer.stderr)
             elif interaction is None:
@@ -639,7 +639,7 @@ def _run_feature_command(
             elif interaction is None:
                 print(empty, file=renderer.stdout)
             return CommandResult("validate", metadata={"empty": True, "already_rendered": True})
-        result = V4CliOperationService(root).check(
+        result = CliOperationService(root).check(
             build=decisions.build,
             command="validate",
             requested_targets=decisions.package_names,
@@ -767,7 +767,7 @@ def _interactive_loop(
             rollback=startup.rollback,
             recovery=RecoveryAction(
                 recovery_summary,
-                startup.recovery_command or ["supernote-module", "doctor"],
+                startup.recovery_command or ["sn-module-gen", "doctor"],
             ),
             error=ErrorInfo("startup_recovery_failed", "startup_recovery", "The interrupted operation could not be recovered."),
             next_action=recovery_summary,
@@ -860,7 +860,7 @@ def _main(
         parsed=parsed,
     )
     if parsed.show_version:
-        print(f"supernote-module {__version__}", file=stdout)
+        print(f"sn-module-gen {__version__}", file=stdout)
         return 0
     if parsed.command == "help":
         stdout.write(help_for(parsed.positional))
@@ -878,7 +878,7 @@ def _main(
         result = _usage_result(
             "unknown",
             "no command was provided",
-            recovery="Run `supernote-module --help` for usage.",
+            recovery="Run `sn-module-gen --help` for usage.",
         )
         result.duration_ms = round((time.monotonic() - started) * 1000)
         renderer.render(result)

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-FIXTURE_NAME = "SNV4_Bounded_Acceptance.pdf"
+FIXTURE_NAME = "SNMG_Bounded_Acceptance.pdf"
 FIXTURE_DEVICE_PATH = f"/storage/emulated/0/Document/{FIXTURE_NAME}"
 
 

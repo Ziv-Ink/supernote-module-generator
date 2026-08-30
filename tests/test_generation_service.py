@@ -18,7 +18,7 @@ from supernote_module_generator.generation_plan import GenerationPlanError
 from supernote_module_generator.jvm_manifest import JvmSourceManifest, write_jvm_manifest
 from supernote_module_generator.project_model import ProjectModel
 from supernote_module_generator.transaction import Transaction
-from supernote_module_generator.v4_cli_operations import V4CliOperationService
+from supernote_module_generator.cli_operations import CliOperationService
 from v4_project_inventory import inventory_project
 
 
@@ -508,7 +508,7 @@ def test_mixed_jvm_build_hook_reuses_raw_manifest_and_is_noop(tmp_path: Path):
     manifest_root = tmp_path / "ksp-manifests"
     write_jvm_manifest(manifest_root / "jvm.json", source_manifest)
 
-    result = V4CliOperationService(root).check(jvm_manifest_root=manifest_root)
+    result = CliOperationService(root).check(jvm_manifest_root=manifest_root)
 
     assert result.status == "success"
     assert result.validation is not None

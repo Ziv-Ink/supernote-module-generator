@@ -41,11 +41,11 @@ async function runChecks(): Promise<CheckRecord[]> {
     try {
       const actual = await operation();
       checks.push({id, status: 'pass', actual});
-      emit('SNV4_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-pass', id, actual});
+      emit('SNMG_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-pass', id, actual});
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       checks.push({id, status: 'fail', message});
-      emit('SNV4_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-fail', id, message});
+      emit('SNMG_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-fail', id, message});
     }
   };
 
@@ -146,7 +146,7 @@ async function runChecks(): Promise<CheckRecord[]> {
   await check('permission-status-request-result', async () => {
     const before = await PluginManager.hasPermission(PERMISSION);
     assertThat(before === 0, `permission was not initially denied: ${before}`);
-    emit('SNV4_PERMISSION_REQUEST', {
+    emit('SNMG_PERMISSION_REQUEST', {
       schema: 1,
       host: HOST,
       permission: PERMISSION,
@@ -185,14 +185,14 @@ function App(): React.JSX.Element {
           status: failed.length === 0 ? 'pass' : 'fail',
           checks,
         };
-        emit('SNV4_TEST_RESULT', result);
+        emit('SNMG_TEST_RESULT', result);
         if (active) {
           setSummary(`${result.status}: ${checks.length - failed.length}/${checks.length}`);
         }
       },
       error => {
         const message = error instanceof Error ? error.message : String(error);
-        emit('SNV4_TEST_RESULT', {
+        emit('SNMG_TEST_RESULT', {
           schema: 1,
           suite: 'v4-bounded-note-doc-final',
           host: HOST,

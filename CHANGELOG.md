@@ -2,9 +2,20 @@
 
 This file records user-visible changes to the generator. Documentation on the
 default branch may be newer than the latest published package; released users
-should also check their installed version with `supernote-module --version`.
+should also check their installed version with `sn-module-gen --version`.
 
 ## Unreleased
+
+## 0.1.0 - 2026-08-30
+
+- First public release as the `sn-module-gen` distribution and command.
+- Preserve the qualified pre-public generator behavior while resetting active
+  generated, diagnostic, and structured-result identities to public schema 1.0.
+- No migration or compatibility support is provided for pre-public generated projects.
+
+The entries below record pre-public development history. Their original version
+numbers and evidence identities are retained for provenance; they were not public
+`sn-module-gen` releases.
 
 ## 4.0.0 - 2026-08-27
 

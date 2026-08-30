@@ -31,7 +31,7 @@ def _lock_identity(root: Path) -> str:
 
 def _busy() -> PluginBusyError:
     return PluginBusyError(
-        "Another supernote-module command is already running for this plugin. "
+        "Another sn-module-gen command is already running for this plugin. "
         "Wait for it to finish and try again."
     )
 

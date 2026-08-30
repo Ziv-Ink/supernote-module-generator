@@ -46,8 +46,8 @@ def test_fixture_sources_cover_generated_cpp_jvm_android_and_terminal_results() 
 
     for item in manifest["checks"]:
         assert f"'{item['id']}'" in application
-    assert "SNV4_PERMISSION_REQUEST" in application
-    assert "SNV4_TEST_RESULT" in application
+    assert "SNMG_PERMISSION_REQUEST" in application
+    assert "SNMG_TEST_RESULT" in application
     assert "PluginNoteAPI.saveCurrentNote" in application
     assert "PluginDocAPI.getCurrentTotalPages" in application
     assert "DeviceProbe.jvmEcho(DeviceProbe.nativeEcho('mixed'))" in application
@@ -80,7 +80,7 @@ def test_doc_fixture_pdf_is_deterministic_and_self_contained() -> None:
         ),
         (
             "doc",
-            "/storage/emulated/0/Document/SNV4_Bounded_Acceptance.pdf",
+            "/storage/emulated/0/Document/SNMG_Bounded_Acceptance.pdf",
             1,
         ),
     ),
@@ -107,7 +107,7 @@ def test_device_evidence_requires_all_source_backed_checks_and_permission_flow(
             }
         checks.append({"id": item["id"], "status": "pass", "actual": actual})
         events.append(
-            "prefix SNV4_TEST_EVENT "
+            "prefix SNMG_TEST_EVENT "
             + json.dumps({"schema": 1, "host": host, "id": item["id"]})
         )
     request = {
@@ -127,8 +127,8 @@ def test_device_evidence_requires_all_source_backed_checks_and_permission_flow(
     log = "\n".join(
         [
             *events,
-            "prefix SNV4_PERMISSION_REQUEST " + json.dumps(request),
-            "prefix SNV4_TEST_RESULT " + json.dumps(terminal),
+            "prefix SNMG_PERMISSION_REQUEST " + json.dumps(request),
+            "prefix SNMG_TEST_RESULT " + json.dumps(terminal),
         ]
     )
 

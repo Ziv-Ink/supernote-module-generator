@@ -15,7 +15,7 @@ from .filesystem import _windows_host, read_contained_regular_bytes_no_follow
 from .generation_plan import OwnedArtifact
 from .naming import NPM_NAME
 from .semantic_ir import CPP_FRONTEND_VERSION, JVM_FRONTEND_VERSION
-from .v4_schemas import (
+from .schemas import (
     FEATURE_MANIFEST_KIND,
     FEATURE_MANIFEST_SCHEMA_VERSION,
     GENERATED_OWNERSHIP_KIND,
@@ -803,8 +803,8 @@ def _parse_wiring(raw: object, index: int) -> WiringRecord:
     sha256 = raw.get("sha256")
     _require_canonical_relative(path, f"wiring[{index}].path")
     if marker not in {
-        "supernote-module-v4-runtime",
-        "supernote-module-v4-package",
+        "sn-module-gen-v4-runtime",
+        "sn-module-gen-v4-package",
     }:
         raise IntegrityManifestError(f"wiring[{index}] marker is invalid")
     _require_sha256(sha256, f"wiring[{index}].sha256")

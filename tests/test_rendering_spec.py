@@ -232,7 +232,7 @@ def test_json_contract_normalizes_legacy_issues_to_stable_v4_fields():
         {
             "kind": "parent_dependency",
             "message": "link is stale",
-            "code": "SNV4_PARENT_DEPENDENCY",
+            "code": "SNMG_PARENT_DEPENDENCY",
             "severity": "error",
             "scope": "plugin",
         }

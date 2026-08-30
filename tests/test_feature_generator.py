@@ -80,7 +80,7 @@ def test_initial_feature_readme_explains_import_generation_and_source_ownership(
     assert "import Document from '@local/document';" in readme
     assert "No JavaScript-public declarations are currently generated" in readme
     assert "C/C++: `android/src/main/cpp/`" in readme
-    assert "supernote-module update @local/document" in readme
+    assert "sn-module-gen update @local/document" in readme
     assert "replace this README and `index.d.ts`" in readme
     assert "preserve the C++, Kotlin, and Java implementation source" in readme
     assert "README.md" in package["files"]

@@ -17,7 +17,7 @@ from supernote_module_generator.feature_operations import FeatureOperationServic
 from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.generation_plan import PlanConflictError
 from supernote_module_generator.models import Change, RollbackResult
-from supernote_module_generator.v4_cli_operations import V4CliOperationService
+from supernote_module_generator.cli_operations import CliOperationService
 from supernote_module_generator.v4_validation import (
     V4ValidationResult,
     V4Validator,
@@ -110,7 +110,7 @@ def test_update_all_dry_run_json_exposes_complete_plan_without_writes(tmp_path: 
 
     assert code == 0
     assert stderr == ""
-    assert value["schema_version"] == "4.0"
+    assert value["schema_version"] == "1.0"
     assert value["metadata"]["requested_targets"] == ["alpha"]
     assert set(value["metadata"]["affected_targets"]) >= {
         "alpha",
@@ -194,9 +194,9 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
     canonical = settings.read_text()
     user_line = "include ':user-library'\n"
     if damage == "missing_end":
-        damaged = canonical.replace("// end supernote-module-v4-runtime\n", "")
+        damaged = canonical.replace("// end sn-module-gen-v4-runtime\n", "")
     elif damage == "duplicate":
-        start = canonical.index("// supernote-module-v4-runtime")
+        start = canonical.index("// sn-module-gen-v4-runtime")
         block = canonical[start:]
         damaged = canonical + block
     else:
@@ -212,7 +212,7 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
 
     assert check_code == 1, check_stderr
     assert {issue["code"] for issue in check["issues"]} == {
-        "SNV4_WIRING_INVALID"
+        "SNMG_WIRING_INVALID"
     }
     assert inventory_project(root) == before
 
@@ -241,8 +241,8 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
         for change in repaired["actual_changes"]
     )
     text = settings.read_text()
-    assert text.count("// supernote-module-v4-runtime") == 1
-    assert text.count("// end supernote-module-v4-runtime") == 1
+    assert text.count("// sn-module-gen-v4-runtime") == 1
+    assert text.count("// end sn-module-gen-v4-runtime") == 1
     assert text.count(user_line.strip()) == 1
     assert invoke(root, ["--json", "check"])[0] == 0
 
@@ -261,15 +261,15 @@ def test_repair_restores_every_malformed_wiring_family_atomically(tmp_path: Path
     settings = root / "android/settings.gradle"
     app_build = root / "android/app/build.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
         + "include ':user-library'\n"
     )
     app_build.write_text(
-        app_build.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        app_build.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
         + "dependencies { implementation project(':user-library') }\n"
     )
     application.write_text(
-        application.read_text().replace("// end supernote-module-v4-package\n", "")
+        application.read_text().replace("// end sn-module-gen-v4-package\n", "")
     )
     before = inventory_project(root)
 
@@ -290,9 +290,9 @@ def test_repair_restores_every_malformed_wiring_family_atomically(tmp_path: Path
     assert "include ':user-library'" in settings.read_text()
     assert "implementation project(':user-library')" in app_build.read_text()
     assert "add(UserPackage())" in application.read_text()
-    assert settings.read_text().count("// end supernote-module-v4-runtime") == 1
-    assert app_build.read_text().count("// end supernote-module-v4-runtime") == 1
-    assert application.read_text().count("// end supernote-module-v4-package") == 1
+    assert settings.read_text().count("// end sn-module-gen-v4-runtime") == 1
+    assert app_build.read_text().count("// end sn-module-gen-v4-runtime") == 1
+    assert application.read_text().count("// end sn-module-gen-v4-package") == 1
     assert invoke(root, ["--json", "check"])[0] == 0
 
 
@@ -303,7 +303,7 @@ def test_staged_repair_validation_rejection_rolls_back_with_authoritative_issues
     root = plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
     )
     preview_code, preview_stdout, preview_stderr = invoke(
         root, ["--json", "repair", "--diff"]
@@ -313,7 +313,7 @@ def test_staged_repair_validation_rejection_rolls_back_with_authoritative_issues
     assert preview["changes"]
     before = inventory_project(root)
     issue = ValidationIssue(
-        "SNV4_STAGED_REPAIR_REJECTED",
+        "SNMG_STAGED_REPAIR_REJECTED",
         "error",
         "plugin",
         "staged repair sentinel",
@@ -367,7 +367,7 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
     root = plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-v4-runtime\n", "")
     )
     preview_code, preview_stdout, _ = invoke(
         root, ["--json", "repair", "--diff"]
@@ -375,7 +375,7 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
     preview = json.loads(preview_stdout)
     assert preview_code == 0
     issue = ValidationIssue(
-        "SNV4_STAGED_REPAIR_REJECTED",
+        "SNMG_STAGED_REPAIR_REJECTED",
         "error",
         "plugin",
         "staged repair sentinel",
@@ -388,7 +388,7 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
             "failure", "1" * 64, (issue,)
         ),
     )
-    original = V4CliOperationService._rollback_with_verification
+    original = CliOperationService._rollback_with_verification
     residue = Change("android/settings.gradle", "update", "rollback_residue")
 
     def partial_rollback(self, transaction, baseline, directory_metadata):
@@ -398,7 +398,7 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
         return RollbackResult(True, "partial", rollback.restored), [residue]
 
     monkeypatch.setattr(
-        V4CliOperationService,
+        CliOperationService,
         "_rollback_with_verification",
         partial_rollback,
     )
@@ -459,14 +459,14 @@ def test_repair_structurally_canonicalizes_every_v4_marker_variant(
     text = path.read_text()
     package_marker = wiring_family == "application"
     start = (
-        "// supernote-module-v4-package"
+        "// sn-module-gen-v4-package"
         if package_marker
-        else "// supernote-module-v4-runtime"
+        else "// sn-module-gen-v4-runtime"
     )
     end = (
-        "// end supernote-module-v4-package"
+        "// end sn-module-gen-v4-package"
         if package_marker
-        else "// end supernote-module-v4-runtime"
+        else "// end sn-module-gen-v4-runtime"
     )
     if damage == "reversed":
         text = text.replace(start, "// marker-placeholder", 1)
@@ -676,7 +676,7 @@ def test_check_build_preserves_unattributed_source_writes_with_recovery(
     assert source_tree_inventory(root) != before
     assert generated.read_text().endswith("// build mutation\n")
     assert any(
-        issue["code"] == "SNV4_BUILD_MUTATED_SOURCE"
+        issue["code"] == "SNMG_BUILD_MUTATED_SOURCE"
         for issue in payload["issues"]
     )
     if outcome == "interrupt":
@@ -727,7 +727,7 @@ def test_nonbuild_validator_stage_preserves_live_change_and_retains_backup(
     assert source_tree_inventory(root) != before
     assert source.read_text().endswith("// validation mutation\n")
     assert any(
-        issue["code"] == "SNV4_VALIDATION_MUTATED_SOURCE"
+        issue["code"] == "SNMG_VALIDATION_MUTATED_SOURCE"
         for issue in payload["issues"]
     )
     if outcome == "interrupt":
@@ -798,9 +798,9 @@ def test_validator_guard_finalization_interrupt_is_recovered_or_actionable(
     assert stderr == ""
     assert finish_calls == 3
     expected_issue = (
-        "SNV4_BUILD_MUTATED_SOURCE"
+        "SNMG_BUILD_MUTATED_SOURCE"
         if build
-        else "SNV4_VALIDATION_MUTATED_SOURCE"
+        else "SNMG_VALIDATION_MUTATED_SOURCE"
     )
     assert any(issue["code"] == expected_issue for issue in payload["issues"])
     assert code == 3
@@ -844,7 +844,7 @@ def test_frontend_guard_finalization_interrupt_is_recovered_or_actionable(
         return {}
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", mutating_frontend
+        CliOperationService, "_jvm_frontend_manifests", mutating_frontend
     )
     original_finish = ProtectedSourceGuard.finish
     finish_calls = 0
@@ -868,7 +868,7 @@ def test_frontend_guard_finalization_interrupt_is_recovered_or_actionable(
     assert stderr == ""
     assert finish_calls == 2
     assert any(
-        issue["code"] == "SNV4_FRONTEND_MUTATED_SOURCE"
+        issue["code"] == "SNMG_FRONTEND_MUTATED_SOURCE"
         for issue in payload["issues"]
     )
     assert code == 3
@@ -913,8 +913,8 @@ def test_validate_uses_authoritative_v4_integrity_before_build(
     assert invoked is False
     assert payload["validation"]["build"] == "not_run"
     assert {issue["code"] for issue in payload["issues"]} >= {
-        "SNV4_ARTIFACT_MODIFIED",
-        "SNV4_JAVASCRIPT_INVALID",
+        "SNMG_ARTIFACT_MODIFIED",
+        "SNMG_JAVASCRIPT_INVALID",
     }
     assert payload["requested_targets"] == ["alpha"]
     assert payload["affected_targets"] == ["alpha"]
@@ -944,7 +944,7 @@ def test_read_only_frontend_mutation_preserves_live_bytes_and_backup(
         return {}
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", mutating_frontend
+        CliOperationService, "_jvm_frontend_manifests", mutating_frontend
     )
     monkeypatch.setattr(
         "supernote_module_generator.v4_validation.run_process",
@@ -958,7 +958,7 @@ def test_read_only_frontend_mutation_preserves_live_bytes_and_backup(
 
     assert code == 3, (stderr, payload.get("error"), payload.get("metadata"))
     assert payload["status"] == "partial"
-    assert payload["issues"][0]["code"] == "SNV4_FRONTEND_MUTATED_SOURCE"
+    assert payload["issues"][0]["code"] == "SNMG_FRONTEND_MUTATED_SOURCE"
     assert payload["rollback"]["status"] == "partial"
     assert source.read_bytes() == b"class Mutated\n"
     recovery = Path(payload["metadata"]["recovery_path"])
@@ -983,7 +983,7 @@ def test_update_all_frontend_mutation_preserves_live_bytes_before_noop(
         return {}
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", mutating_frontend
+        CliOperationService, "_jvm_frontend_manifests", mutating_frontend
     )
 
     code, stdout, stderr = invoke(
@@ -1032,7 +1032,7 @@ def test_frontend_interrupt_preserves_source_and_retains_recovery_state(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", interrupting_frontend
+        CliOperationService, "_jvm_frontend_manifests", interrupting_frontend
     )
 
     code, stdout, stderr = invoke(root, arguments)
@@ -1114,7 +1114,7 @@ def test_guard_restore_failure_reports_residue_and_recovery_backup(
         return original_copy(src, dst)
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", mutating_frontend
+        CliOperationService, "_jvm_frontend_manifests", mutating_frontend
     )
     monkeypatch.setattr(filesystem, "copy_entry_no_follow", failing_restore_copy)
 
@@ -1177,7 +1177,7 @@ def test_retained_guard_backup_restores_content_and_directory_metadata_fresh(
             raise OSError("restore unavailable")
         return original_copy(src, dst)
 
-    monkeypatch.setattr(V4CliOperationService, "_jvm_frontend_manifests", mutating_frontend)
+    monkeypatch.setattr(CliOperationService, "_jvm_frontend_manifests", mutating_frontend)
     monkeypatch.setattr(filesystem, "copy_entry_no_follow", failing_restore_copy)
     code, stdout, stderr = invoke(root, ["--json", "check"])
     assert code == 3, stderr
@@ -1341,7 +1341,7 @@ def test_frontend_mutation_scope_and_target_follow_changed_path(
         return {}
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", mutating_frontend
+        CliOperationService, "_jvm_frontend_manifests", mutating_frontend
     )
 
     code, stdout, stderr = invoke(root, ["--json", "check"])
@@ -1388,7 +1388,7 @@ def test_partial_restore_classifies_deleted_feature_from_pre_frontend_model(
         return original_copy(src, dst)
 
     monkeypatch.setattr(
-        V4CliOperationService, "_jvm_frontend_manifests", deleting_frontend
+        CliOperationService, "_jvm_frontend_manifests", deleting_frontend
     )
     monkeypatch.setattr(filesystem, "copy_entry_no_follow", failing_restore_copy)
 

@@ -1097,7 +1097,7 @@ def test_doctor_build_reports_only_a_real_authoritative_build_as_project_built(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_cli_operations.V4CliOperationService.check",
+        "supernote_module_generator.cli_operations.CliOperationService.check",
         check,
     )
 
@@ -1142,7 +1142,7 @@ def test_doctor_build_failure_preserves_validation_and_diagnostics(
                 build="failed",
                 issues=[
                     {
-                        "code": "SNV4_BUILD_FAILED",
+                        "code": "SNMG_BUILD_FAILED",
                         "severity": "error",
                         "scope": "toolchain",
                         "message": "compiler root cause",
@@ -1153,7 +1153,7 @@ def test_doctor_build_failure_preserves_validation_and_diagnostics(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_cli_operations.V4CliOperationService.check",
+        "supernote_module_generator.cli_operations.CliOperationService.check",
         check,
     )
 
@@ -1171,7 +1171,7 @@ def test_doctor_build_failure_preserves_validation_and_diagnostics(
     )
     assert build_check.metadata["project_built"] is False
     assert build_check.metadata["validation"]["build"] == "failed"
-    assert build_check.metadata["issues"][0]["code"] == "SNV4_BUILD_FAILED"
+    assert build_check.metadata["issues"][0]["code"] == "SNMG_BUILD_FAILED"
 
 
 def test_doctor_fails_when_gradle_uses_java_older_than_path_java(
@@ -1417,9 +1417,9 @@ def test_missing_gradle_wrapper_has_specific_diagnosis_and_recovery(
     )
     assert gradle.message == "The project Gradle wrapper is missing."
     expected = (
-        "Restore `android/gradlew.bat`, then rerun `supernote-module doctor`."
+        "Restore `android/gradlew.bat`, then rerun `sn-module-gen doctor`."
         if os.name == "nt"
         else "Restore `android/gradlew`, make it executable, then rerun "
-        "`supernote-module doctor`."
+        "`sn-module-gen doctor`."
     )
     assert result.metadata["next_action"] == expected

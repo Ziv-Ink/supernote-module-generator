@@ -39,7 +39,7 @@ def test_wires_one_plugin_runtime_project_idempotently(tmp_path: Path, kotlin: b
 def test_duplicate_runtime_blocks_are_rejected(tmp_path: Path):
     android = tmp_path / "android"
     (android / "app").mkdir(parents=True)
-    block = "// supernote-module-v4-runtime\nx\n// end supernote-module-v4-runtime\n"
+    block = "// sn-module-gen-v4-runtime\nx\n// end sn-module-gen-v4-runtime\n"
     (android / "settings.gradle").write_text(block + block)
     (android / "app/build.gradle").write_text("plugins {}\n")
     with pytest.raises(ConfigurationError, match="duplicate"):
@@ -88,14 +88,14 @@ def test_complete_stale_v2_wiring_is_rejected_without_touching_user_source(
     (android / "app").mkdir(parents=True)
     (android / "settings.gradle").write_text(
         "rootProject.name = 'fixture'\n"
-        "// supernote-module-v2-runtime\nlegacy\n"
-        "// end supernote-module-v2-runtime\n"
+        "// sn-module-gen-v2-runtime\nlegacy\n"
+        "// end sn-module-gen-v2-runtime\n"
         "include ':user-library'\n"
     )
     (android / "app/build.gradle").write_text(
         "plugins {}\n"
-        "// supernote-module-v2-runtime\nlegacy dependency\n"
-        "// end supernote-module-v2-runtime\n"
+        "// sn-module-gen-v2-runtime\nlegacy dependency\n"
+        "// end sn-module-gen-v2-runtime\n"
         "dependencies { implementation project(':user-library') }\n"
     )
     application = android / "app/src/main/java/com/example/MainApplication.kt"
@@ -103,9 +103,9 @@ def test_complete_stale_v2_wiring_is_rejected_without_touching_user_source(
     application.write_text(
         "fun getPackages() =\n"
         "    PackageList(this).packages.apply {\n"
-        "      // supernote-module-v2-package\n"
+        "      // sn-module-gen-v2-package\n"
         "      add(supernote.generated.runtime.SupernoteV2Package())\n"
-        "      // end supernote-module-v2-package\n"
+        "      // end sn-module-gen-v2-package\n"
         "      add(UserPackage())\n"
         "    }\n"
     )
@@ -129,7 +129,7 @@ def test_malformed_stale_v2_wiring_is_rejected_without_mutation(tmp_path: Path):
     android = tmp_path / "android"
     (android / "app").mkdir(parents=True)
     settings = android / "settings.gradle"
-    settings.write_text("// supernote-module-v2-runtime\nlegacy\n")
+    settings.write_text("// sn-module-gen-v2-runtime\nlegacy\n")
     (android / "app/build.gradle").write_text("plugins {}\n")
     before = settings.read_bytes()
 

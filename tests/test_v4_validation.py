@@ -98,11 +98,11 @@ def test_corrupt_javascript_fails_before_build_with_feature_scope(
     assert result.build == "not_run"
     assert invoked is False
     assert {issue.code for issue in result.issues} >= {
-        "SNV4_ARTIFACT_MODIFIED",
-        "SNV4_JAVASCRIPT_INVALID",
+        "SNMG_ARTIFACT_MODIFIED",
+        "SNMG_JAVASCRIPT_INVALID",
     }
     artifact = next(
-        issue for issue in result.issues if issue.code == "SNV4_ARTIFACT_MODIFIED"
+        issue for issue in result.issues if issue.code == "SNMG_ARTIFACT_MODIFIED"
     )
     assert artifact.scope == "feature"
     assert artifact.feature_id is not None
@@ -164,7 +164,7 @@ def test_javascript_validation_reports_node_launch_failure(
     issue = next(
         item
         for item in result.issues
-        if item.code == "SNV4_JAVASCRIPT_CHECK_FAILED"
+        if item.code == "SNMG_JAVASCRIPT_CHECK_FAILED"
     )
     assert issue.path == "local_modules/alpha/index.js"
     assert issue.message == (
@@ -196,7 +196,7 @@ def test_javascript_validation_rejects_symlink_without_invoking_node(
     issue = next(
         item
         for item in result.issues
-        if item.code == "SNV4_JAVASCRIPT_CHECK_FAILED"
+        if item.code == "SNMG_JAVASCRIPT_CHECK_FAILED"
     )
     assert issue.path == "local_modules/alpha/index.js"
     assert issue.message == (
@@ -230,7 +230,7 @@ def test_javascript_validation_reports_unreadable_artifact_without_node(
     issue = next(
         item
         for item in result.issues
-        if item.code == "SNV4_JAVASCRIPT_CHECK_FAILED"
+        if item.code == "SNMG_JAVASCRIPT_CHECK_FAILED"
     )
     assert issue.path == "local_modules/alpha/index.js"
     assert issue.message == (
@@ -260,7 +260,7 @@ def test_javascript_validation_reports_syntax_error_not_node_version(
     result = V4Validator(root).validate()
 
     issue = next(
-        item for item in result.issues if item.code == "SNV4_JAVASCRIPT_INVALID"
+        item for item in result.issues if item.code == "SNMG_JAVASCRIPT_INVALID"
     )
     assert issue.message == "SyntaxError: Unexpected token '='"
 
@@ -277,7 +277,7 @@ def test_untrusted_feature_generated_path_is_rejected_and_preserved(tmp_path: Pa
     result = V4Validator(root).validate()
 
     assert result.status == "failure"
-    assert {issue.code for issue in result.issues} == {"SNV4_INPUT_INVALID"}
+    assert {issue.code for issue in result.issues} == {"SNMG_INPUT_INVALID"}
     assert "unrecognized generated feature artifact" in result.issues[0].message
     assert stale.read_text() == "// generated stale JNI\n"
 
@@ -290,7 +290,7 @@ def test_missing_owned_artifact_is_classified_as_missing(tmp_path: Path):
     result = V4Validator(root).validate()
 
     issue = next(item for item in result.issues if item.path == "local_modules/alpha/index.js")
-    assert issue.code == "SNV4_ARTIFACT_MISSING"
+    assert issue.code == "SNMG_ARTIFACT_MISSING"
     assert issue.actual == "missing"
 
 
@@ -298,12 +298,12 @@ def test_missing_marker_end_is_a_single_runtime_scoped_issue(tmp_path: Path):
     root = canonical_plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime", "")
+        settings.read_text().replace("// end sn-module-gen-v4-runtime", "")
     )
 
     result = V4Validator(root).validate()
 
-    wiring = [issue for issue in result.issues if issue.code == "SNV4_WIRING_INVALID"]
+    wiring = [issue for issue in result.issues if issue.code == "SNMG_WIRING_INVALID"]
     assert len(wiring) == 1
     assert wiring[0].scope == "runtime"
 
@@ -369,7 +369,7 @@ def test_build_failure_prioritizes_source_cause_and_preserves_full_log(
 
     assert result.status == "failure"
     assert result.build == "failed"
-    assert {issue.code for issue in result.issues} == {"SNV4_BUILD_FAILED"}
+    assert {issue.code for issue in result.issues} == {"SNMG_BUILD_FAILED"}
     assert result.build_error is not None
     assert result.build_error.relevant_lines[0].startswith("src/main/Foo.kt:42:7")
     diagnostics = Path(result.diagnostics[0]).read_text()
@@ -430,7 +430,7 @@ def test_successful_gradle_exit_that_mutates_source_fails_build_validation(
     assert result.status == "failure"
     assert result.build == "failed"
     issue = next(
-        item for item in result.issues if item.code == "SNV4_BUILD_MUTATED_SOURCE"
+        item for item in result.issues if item.code == "SNMG_BUILD_MUTATED_SOURCE"
     )
     assert "modified:local_modules/alpha/index.js" in (issue.actual or "")
 
@@ -461,7 +461,7 @@ def test_build_mutation_detector_includes_cache_named_user_source_directory(
     result = V4Validator(root).validate(build=True)
 
     issue = next(
-        item for item in result.issues if item.code == "SNV4_BUILD_MUTATED_SOURCE"
+        item for item in result.issues if item.code == "SNMG_BUILD_MUTATED_SOURCE"
     )
     assert f"cpp/{directory_name}/sentinel.cpp" in (issue.actual or "")
 
@@ -505,7 +505,7 @@ def test_build_mutation_detector_rejects_touch_only_source_change(
 
     result = V4Validator(root).validate(build=True)
 
-    assert {item.code for item in result.issues} == {"SNV4_BUILD_MUTATED_SOURCE"}
+    assert {item.code for item in result.issues} == {"SNMG_BUILD_MUTATED_SOURCE"}
 
 
 def test_diagnostics_refuse_symlink_ancestor_without_external_write(tmp_path: Path):
@@ -513,7 +513,7 @@ def test_diagnostics_refuse_symlink_ancestor_without_external_write(tmp_path: Pa
     external = tmp_path / "external"
     external.mkdir()
     (root / "android/build").symlink_to(external, target_is_directory=True)
-    sentinel = external / "supernote-module/diagnostics/v4-check-build.log"
+    sentinel = external / "sn-module-gen/diagnostics/v4-check-build.log"
     sentinel.parent.mkdir(parents=True)
     sentinel.write_text("outside\n")
 
@@ -532,7 +532,7 @@ def test_diagnostics_refuse_symlink_ancestor_without_external_write(tmp_path: Pa
 
 def test_diagnostics_refuse_symlink_leaf_without_external_write(tmp_path: Path):
     root = canonical_plugin(tmp_path / "plugin")
-    diagnostic_root = root / "android/build/supernote-module/diagnostics"
+    diagnostic_root = root / "android/build/sn-module-gen/diagnostics"
     diagnostic_root.mkdir(parents=True)
     external = tmp_path / "outside.log"
     external.write_text("outside\n")

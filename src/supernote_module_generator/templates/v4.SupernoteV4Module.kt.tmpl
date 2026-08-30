@@ -140,11 +140,11 @@ class SupernoteV4Module(
         if (cachedPublication != null) {
           val separator = cachedPublication.indexOf(':')
           if (separator <= 0 || separator == cachedPublication.lastIndex) {
-            error("SNV4_GENERATION_STATE_CORRUPT: cached registrar is malformed")
+            error("SNMG_GENERATION_STATE_CORRUPT: cached registrar is malformed")
           }
           val cachedGeneration = cachedPublication.substring(0, separator)
           val cachedAddress = cachedPublication.substring(separator + 1).toLongOrNull()
-              ?: error("SNV4_GENERATION_STATE_CORRUPT: cached registrar address is invalid")
+              ?: error("SNMG_GENERATION_STATE_CORRUPT: cached registrar address is invalid")
           if (cachedAddress == 0L ||
               !SupernoteV4NativeRegistrationBridge.register(
                   File(registrationLibraryPath),
@@ -163,7 +163,7 @@ class SupernoteV4Module(
             } else {
               retainedRaw.toIntOrNull()
                   ?: error(
-                      "SNV4_GENERATION_STATE_CORRUPT: native generation count " +
+                      "SNMG_GENERATION_STATE_CORRUPT: native generation count " +
                           "is not an integer: $retainedRaw",
                   )
             }
@@ -174,14 +174,14 @@ class SupernoteV4Module(
                 ?: emptyList()
         if (retainedIds.size != retainedGenerations) {
           error(
-              "SNV4_GENERATION_STATE_CORRUPT: native generation count " +
+              "SNMG_GENERATION_STATE_CORRUPT: native generation count " +
                   "$retainedGenerations disagrees with loaded IDs " +
                   retainedIds.joinToString(","),
           )
         }
         if (retainedGenerations !in 0 until MAX_RETAINED_GENERATIONS) {
           error(
-              "SNV4_RESTART_REQUIRED: native generation limit reached " +
+              "SNMG_RESTART_REQUIRED: native generation limit reached " +
                   "(count=$retainedGenerations, limit=$MAX_RETAINED_GENERATIONS, " +
                   "loaded=${retainedIds.joinToString(",")}); restart PluginHost",
           )

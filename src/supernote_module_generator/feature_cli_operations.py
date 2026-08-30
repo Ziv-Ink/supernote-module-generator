@@ -66,7 +66,7 @@ from .rendering import ProgressReporter, Renderer
 from .subprocesses import run_process
 from .transaction import Transaction
 from .verification import build_android
-from .v4_cli_operations import V4CliOperationService
+from .cli_operations import CliOperationService
 from .v4_validation import V4Validator
 
 
@@ -275,7 +275,7 @@ class FeatureCliOperationService:
                     ]
                 )
                 transaction.checkpoint("after_dependency_edit")
-                jvm_manifests = V4CliOperationService(
+                jvm_manifests = CliOperationService(
                     self.root
                 )._jvm_frontend_manifests(
                     allow_unmanifested_bootstrap=True
@@ -458,7 +458,7 @@ class FeatureCliOperationService:
         try:
             transaction.snapshot(protected_source_snapshot_roots(self.root))
             if plan is None:
-                jvm_manifests = V4CliOperationService(
+                jvm_manifests = CliOperationService(
                     self.root
                 )._jvm_frontend_manifests()
                 frontend_mutations = source_tree_changes(
@@ -587,7 +587,7 @@ class FeatureCliOperationService:
                     *integration_mutation_files(self.root),
                 ]
             )
-            jvm_manifests = V4CliOperationService(
+            jvm_manifests = CliOperationService(
                 self.root
             )._jvm_frontend_manifests()
             frontend_mutations = source_tree_changes(
@@ -847,15 +847,15 @@ class FeatureCliOperationService:
 
     def _v4_validation_result(self, result) -> ValidationResult:
         structural_failed = any(
-            issue.code.startswith("SNV4_ARTIFACT")
-            or issue.code in {"SNV4_INPUT_INVALID", "SNV4_JAVASCRIPT_INVALID"}
+            issue.code.startswith("SNMG_ARTIFACT")
+            or issue.code in {"SNMG_INPUT_INVALID", "SNMG_JAVASCRIPT_INVALID"}
             for issue in result.issues
         )
         integration_failed = any(
-            issue.code == "SNV4_WIRING_INVALID" for issue in result.issues
+            issue.code == "SNMG_WIRING_INVALID" for issue in result.issues
         )
         dependency_failed = any(
-            issue.code.startswith("SNV4_DEPENDENCY") for issue in result.issues
+            issue.code.startswith("SNMG_DEPENDENCY") for issue in result.issues
         )
         return ValidationResult(
             structural="failed" if structural_failed else "passed",
@@ -941,12 +941,12 @@ class FeatureCliOperationService:
         next_action = (
             "Disable or fix the source-writing build hook, restore affected source, and rerun the command."
             if any(
-                issue.code == "SNV4_BUILD_MUTATED_SOURCE"
+                issue.code == "SNMG_BUILD_MUTATED_SOURCE"
                 for issue in integrity.issues
             )
             else "Review the diagnostics log and correct the Android build failure."
             if build_failed
-            else "Run `supernote-module update --all --dry-run --diff` to preview repair."
+            else "Run `sn-module-gen update --all --dry-run --diff` to preview repair."
         )
         return CommandResult(
             command,
@@ -1173,7 +1173,7 @@ class FeatureCliOperationService:
             next_action=(
                 None
                 if completed
-                else "Run `supernote-module doctor`, resolve dependency reconciliation, then rerun the original command."
+                else "Run `sn-module-gen doctor`, resolve dependency reconciliation, then rerun the original command."
             ),
         )
 
@@ -1219,7 +1219,7 @@ class FeatureCliOperationService:
                             )
                         )
                     ),
-                    ["supernote-module", "doctor"],
+                    ["sn-module-gen", "doctor"],
                 ),
                 error=ErrorInfo("commit_cleanup_failed", "commit", str(exc)),
                 metadata={
@@ -1295,7 +1295,7 @@ class FeatureCliOperationService:
                 affected_targets=(list(plan.affected_targets) if plan is not None else []),
                 recovery=RecoveryAction(
                     "The project changed after this operation had staged visible state. Automatic rollback is blocked to preserve the external edit.",
-                    ["supernote-module", "doctor"],
+                    ["sn-module-gen", "doctor"],
                 ),
                 error=ErrorInfo("plan_conflict", "precommit", str(exc)),
                 metadata={"conflict_retained": True},
@@ -1446,7 +1446,7 @@ class FeatureCliOperationService:
                 ),
                 recovery=RecoveryAction(
                     "The stale add plan could not be removed exactly.",
-                    ["supernote-module", "doctor"],
+                    ["sn-module-gen", "doctor"],
                 ),
                 error=ErrorInfo("plan_conflict_cleanup_failed", "rollback", str(exc)),
                 metadata={
@@ -1505,7 +1505,7 @@ class FeatureCliOperationService:
             affected_targets=(list(plan.affected_targets) if plan is not None else []),
             recovery=RecoveryAction(
                 "Precommit conflict cleanup is incomplete; the durable journal can finish it safely.",
-                ["supernote-module", "doctor"],
+                ["sn-module-gen", "doctor"],
             ),
             error=ErrorInfo("plan_conflict_cleanup_failed", "precommit", str(exc)),
             metadata={

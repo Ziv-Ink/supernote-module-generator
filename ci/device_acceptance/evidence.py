@@ -9,9 +9,14 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-RESULT_MARKER = "SNV4_TEST_RESULT "
-EVENT_MARKER = "SNV4_TEST_EVENT "
-PERMISSION_MARKER = "SNV4_PERMISSION_REQUEST "
+RESULT_MARKER = "SNMG_TEST_RESULT "
+EVENT_MARKER = "SNMG_TEST_EVENT "
+PERMISSION_MARKER = "SNMG_PERMISSION_REQUEST "
+HISTORICAL_MARKERS = {
+    RESULT_MARKER: "SNV4_TEST_RESULT ",
+    EVENT_MARKER: "SNV4_TEST_EVENT ",
+    PERMISSION_MARKER: "SNV4_PERMISSION_REQUEST ",
+}
 
 
 def _payloads(log: str, marker: str) -> list[dict[str, Any]]:
@@ -26,6 +31,11 @@ def _payloads(log: str, marker: str) -> list[dict[str, Any]]:
     return payloads
 
 
+def _current_or_historical_payloads(log: str, marker: str) -> list[dict[str, Any]]:
+    current = _payloads(log, marker)
+    return current if current else _payloads(log, HISTORICAL_MARKERS[marker])
+
+
 def validate_evidence(
     log: str,
     cases: dict[str, Any],
@@ -35,7 +45,7 @@ def validate_evidence(
     if host not in {"note", "doc"}:
         raise ValueError("host must be note or doc")
     expected_checks = [item["id"] for item in cases["checks"]]
-    results = _payloads(log, RESULT_MARKER)
+    results = _current_or_historical_payloads(log, RESULT_MARKER)
     if len(results) != 1:
         raise ValueError(f"expected one terminal result, found {len(results)}")
     result = results[0]
@@ -50,11 +60,11 @@ def validate_evidence(
     if ids != expected_checks or any(item.get("status") != "pass" for item in checks):
         raise ValueError("terminal checks are incomplete, reordered, or failed")
 
-    events = _payloads(log, EVENT_MARKER)
+    events = _current_or_historical_payloads(log, EVENT_MARKER)
     event_ids = [item.get("id") for item in events]
     if event_ids != expected_checks:
         raise ValueError("event sequence does not match the source-backed cases")
-    requests = _payloads(log, PERMISSION_MARKER)
+    requests = _current_or_historical_payloads(log, PERMISSION_MARKER)
     expected_host = cases["hosts"][host]
     expected_request = {
         "schema": 1,

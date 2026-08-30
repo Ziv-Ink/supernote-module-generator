@@ -107,11 +107,11 @@ class V4Validator:
             )
         except Exception as exc:
             issue = ValidationIssue(
-                "SNV4_INPUT_INVALID",
+                "SNMG_INPUT_INVALID",
                 "error",
                 "user source",
                 str(exc),
-                suggested_command="Fix the reported source/configuration issue and rerun supernote-module check.",
+                suggested_command="Fix the reported source/configuration issue and rerun sn-module-gen check.",
             )
             return V4ValidationResult("failure", None, (issue,))
         features_by_path = {
@@ -131,9 +131,9 @@ class V4Validator:
                 else "plugin"
             )
             code = {
-                ArtifactAction.CREATE: "SNV4_ARTIFACT_MISSING",
-                ArtifactAction.UPDATE: "SNV4_ARTIFACT_MODIFIED",
-                ArtifactAction.DELETE: "SNV4_ARTIFACT_STALE",
+                ArtifactAction.CREATE: "SNMG_ARTIFACT_MISSING",
+                ArtifactAction.UPDATE: "SNMG_ARTIFACT_MODIFIED",
+                ArtifactAction.DELETE: "SNMG_ARTIFACT_STALE",
             }[change.action]
             message = {
                 ArtifactAction.CREATE: f"expected generated artifact is missing: {change.path}",
@@ -150,7 +150,7 @@ class V4Validator:
                     path=change.path,
                     expected=(artifact.sha256 if artifact is not None else "absent"),
                     actual="missing" if change.action is ArtifactAction.CREATE else "different",
-                    suggested_command="supernote-module update --all",
+                    suggested_command="sn-module-gen update --all",
                 )
             )
         for action in plan.wiring_actions:
@@ -158,24 +158,24 @@ class V4Validator:
                 continue
             issues.append(
                 ValidationIssue(
-                    "SNV4_WIRING_INVALID",
+                    "SNMG_WIRING_INVALID",
                     "error",
                     "runtime",
                     f"runtime wiring is not canonical: {action.path}",
                     path=action.path,
                     expected="canonical marker block",
                     actual="different",
-                    suggested_command="supernote-module repair --dry-run",
+                    suggested_command="sn-module-gen repair --dry-run",
                 )
             )
         for message in plan.wiring_issues:
             issues.append(
                 ValidationIssue(
-                    "SNV4_WIRING_INVALID",
+                    "SNMG_WIRING_INVALID",
                     "error",
                     "runtime",
                     message,
-                    suggested_command="Fix the malformed marker structure, then run supernote-module repair --dry-run.",
+                    suggested_command="Fix the malformed marker structure, then run sn-module-gen repair --dry-run.",
                 )
             )
         issues.extend(self._javascript_issues(project))
@@ -233,7 +233,7 @@ class V4Validator:
             if actual != expected:
                 issues.append(
                     ValidationIssue(
-                        "SNV4_DEPENDENCY_INVALID",
+                        "SNMG_DEPENDENCY_INVALID",
                         "error",
                         "feature",
                         f"{npm_name} is not linked from package.json",
@@ -241,7 +241,7 @@ class V4Validator:
                         path="package.json",
                         expected=expected,
                         actual=str(actual) if actual is not None else "missing",
-                        suggested_command="supernote-module update --all",
+                        suggested_command="sn-module-gen update --all",
                     )
                 )
             link = dependency_link_path(self.root, npm_name)
@@ -252,7 +252,7 @@ class V4Validator:
             if not linked:
                 issues.append(
                     ValidationIssue(
-                        "SNV4_DEPENDENCY_LINK_MISSING",
+                        "SNMG_DEPENDENCY_LINK_MISSING",
                         "error",
                         "feature",
                         f"{npm_name} is not installed in node_modules",
@@ -278,11 +278,11 @@ class V4Validator:
             command = gradle_wrapper_command(wrapper, [":app:assembleDebug"])
         except Exception as exc:
             issue = ValidationIssue(
-                "SNV4_BUILD_PREFLIGHT_FAILED",
+                "SNMG_BUILD_PREFLIGHT_FAILED",
                 "error",
                 "toolchain",
                 f"Android build preflight failed: {exc}",
-                suggested_command="Restore the Android Gradle wrapper and rerun supernote-module check --build.",
+                suggested_command="Restore the Android Gradle wrapper and rerun sn-module-gen check --build.",
             )
             return _BuildResult("failed", (issue,), None, (), 0)
 
@@ -350,26 +350,26 @@ class V4Validator:
             )
             issues.append(
                 ValidationIssue(
-                    "SNV4_BUILD_FAILED",
+                    "SNMG_BUILD_FAILED",
                     "error",
                     "toolchain",
                     message,
                     expected="exit code 0",
                     actual=f"exit code {exit_code}",
-                    suggested_command="Review the diagnostics log, correct the build error, and rerun supernote-module check --build.",
+                    suggested_command="Review the diagnostics log, correct the build error, and rerun sn-module-gen check --build.",
                 )
             )
         if mutations:
             issues.append(
                 ValidationIssue(
-                    "SNV4_BUILD_MUTATED_SOURCE",
+                    "SNMG_BUILD_MUTATED_SOURCE",
                     "error",
                     "plugin",
                     "Android build changed source-tree state: "
                     + ", ".join(mutations[:8]),
                     expected="source tree unchanged",
                     actual="; ".join(mutations),
-                    suggested_command="Remove source-writing build hooks and run supernote-module update --all before rebuilding.",
+                    suggested_command="Remove source-writing build hooks and run sn-module-gen update --all before rebuilding.",
                 )
             )
         if not issues:
@@ -432,7 +432,7 @@ class V4Validator:
             except OSError as exc:
                 issues.append(
                     ValidationIssue(
-                        "SNV4_JAVASCRIPT_CHECK_FAILED",
+                        "SNMG_JAVASCRIPT_CHECK_FAILED",
                         "error",
                         "generated artifact",
                         f"Node.js syntax validation could not run: {exc}",
@@ -440,7 +440,7 @@ class V4Validator:
                         path=relative,
                         suggested_command=(
                             "Restore a working Node.js installation, then rerun "
-                            "supernote-module check."
+                            "sn-module-gen check."
                         ),
                     )
                 )
@@ -451,13 +451,13 @@ class V4Validator:
                 ).strip().splitlines()
                 issues.append(
                     ValidationIssue(
-                        "SNV4_JAVASCRIPT_INVALID",
+                        "SNMG_JAVASCRIPT_INVALID",
                         "error",
                         "generated artifact",
                         _javascript_diagnostic(diagnostic),
                         feature_id=feature.identity.feature_id,
                         path=relative,
-                        suggested_command="supernote-module update --all",
+                        suggested_command="sn-module-gen update --all",
                     )
                 )
         return tuple(issues)
@@ -469,13 +469,13 @@ class V4Validator:
         detail: str,
     ) -> ValidationIssue:
         return ValidationIssue(
-            "SNV4_JAVASCRIPT_CHECK_FAILED",
+            "SNMG_JAVASCRIPT_CHECK_FAILED",
             "error",
             "generated artifact",
             f"Generated JavaScript is unsafe or unreadable: {detail}",
             feature_id=feature.identity.feature_id,
             path=relative,
-            suggested_command="supernote-module update --all",
+            suggested_command="sn-module-gen update --all",
         )
 
 

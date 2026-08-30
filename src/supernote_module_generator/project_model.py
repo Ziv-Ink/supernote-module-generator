@@ -27,7 +27,7 @@ from .integrity_manifest import (
     load_integrity_manifest,
 )
 from .project import read_parent_package
-from .v4_schemas import FEATURE_MANIFEST_KIND, FEATURE_MANIFEST_SCHEMA_VERSION
+from .schemas import FEATURE_MANIFEST_KIND, FEATURE_MANIFEST_SCHEMA_VERSION
 
 
 class ExistingGeneration(str, Enum):
@@ -270,7 +270,7 @@ def reject_unsupported_project_state(
     )
 
 
-def assert_public_v4_project(root: Path) -> ExistingGeneration:
+def assert_public_project(root: Path) -> ExistingGeneration:
     generation = detect_existing_generation(root)
     reject_unsupported_project_state(root, generation=generation)
     return generation
@@ -303,7 +303,7 @@ def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
         if contained_entry_kind_no_follow(root, path) != "file":
             continue
         content, _metadata = read_contained_regular_bytes_no_follow(root, path)
-        if b"supernote-module-v4-runtime" in content:
+        if b"sn-module-gen-v4-runtime" in content:
             signals.add(
                 f"{path.relative_to(root).as_posix()} (V4 runtime wiring)"
             )
@@ -319,7 +319,7 @@ def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
             if kind != "file" or path.suffix.lower() not in {".java", ".kt"}:
                 continue
             content, _metadata = read_contained_regular_bytes_no_follow(root, path)
-            if b"supernote-module-v4-package" in content:
+            if b"sn-module-gen-v4-package" in content:
                 signals.add(
                     f"{path.relative_to(root).as_posix()} (V4 package wiring)"
                 )
@@ -453,7 +453,7 @@ def _legacy_signals(
                     f"{path.relative_to(root).as_posix()} ({marker[:-1]} wiring)"
                 )
         for version in ("v1", "v2", "v3"):
-            if f"supernote-module-{version}" in text or f"supernote-{version}" in text:
+            if f"sn-module-gen-{version}" in text or f"supernote-{version}" in text:
                 signals.add(f"{path.relative_to(root).as_posix()} ({version} wiring)")
     application_root = root / "android/app/src/main"
     application_kind = contained_entry_kind_no_follow(root, application_root)
@@ -477,7 +477,7 @@ def _legacy_signals(
             ) from exc
         text = content.decode("utf-8", errors="replace")
         for version in ("v1", "v2", "v3"):
-            if f"supernote-module-{version}-package" in text:
+            if f"sn-module-gen-{version}-package" in text:
                 signals.add(
                     f"{path.relative_to(root).as_posix()} ({version} package wiring)"
                 )

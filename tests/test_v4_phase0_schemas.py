@@ -19,7 +19,7 @@ from supernote_module_generator.semantic import (
     SemanticModelError,
     semantic_api_from_manifest,
 )
-from supernote_module_generator.v4_schemas import (
+from supernote_module_generator.schemas import (
     FEATURE_MANIFEST_KIND,
     FEATURE_MANIFEST_SCHEMA_VERSION,
     GENERATED_OWNERSHIP_KIND,
@@ -88,7 +88,7 @@ def test_v2_schema_versions_are_rejected_instead_of_converted(tmp_path):
         replace(registry, schema_version=1)
 
 
-def test_generated_registry_and_ownership_use_only_v4_schemas():
+def test_generated_registry_and_ownership_use_only_schemas():
     registry = PluginRuntimeRegistry.create(
         plugin_id="phase0",
         generator_version="4.0.0.dev0",

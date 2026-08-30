@@ -1,8 +1,9 @@
-"""Canonical V4 generated-artifact schema identities.
+"""Canonical generated-artifact schema identities.
 
-V4 deliberately has no legacy manifest reader or compatibility mode. Every
-generated boundary imports its identity from this module so schema changes are
-explicit, reviewable, and cannot drift independently between frontends.
+The public format deliberately has no legacy manifest reader or compatibility
+mode. Every generated boundary imports its identity from this module so schema
+changes are explicit, reviewable, and cannot drift independently between
+frontends.
 """
 
 SEMANTIC_MANIFEST_SCHEMA_VERSION = 3

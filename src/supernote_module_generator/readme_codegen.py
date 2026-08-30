@@ -117,7 +117,7 @@ def render_feature_readme(
             "marked declarations, run:",
             "",
             "```sh",
-            f"supernote-module update {npm_name}",
+            f"sn-module-gen update {npm_name}",
             "```",
             "",
             "Add, Update, and Android generation replace this README and `index.d.ts`.",

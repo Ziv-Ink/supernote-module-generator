@@ -73,7 +73,7 @@ SCHEMA = Draft202012Validator(
     json.loads(
         (
             Path(__file__).parents[1]
-            / "src/supernote_module_generator/schemas/command-result-v4.schema.json"
+            / "src/supernote_module_generator/schemas/command-result.schema.json"
         ).read_text(encoding="utf-8")
     )
 )
@@ -166,7 +166,7 @@ def test_status_reports_drift_and_explicit_sync_is_transactional(tmp_path: Path)
     code, status = invoke(root, ["template", "status"])
     assert code == 1
     assert status["metadata"]["template"]["state"] == "drifted"
-    assert status["issues"][0]["code"] == "SNV4_TEMPLATE_DRIFT"
+    assert status["issues"][0]["code"] == "SNMG_TEMPLATE_DRIFT"
 
     code, preview = invoke(root, ["template", "sync", "--dry-run"])
     assert code == 0
@@ -1260,7 +1260,7 @@ def test_post_retention_parent_replacement_unwinds_through_retained_descriptor(
     assert result["status"] == "partial"
     assert result["rollback"]["status"] == "partial"
     assert result["actual_changes"] == []
-    assert result["recovery"]["command"] == ["supernote-module", "doctor"]
+    assert result["recovery"]["command"] == ["sn-module-gen", "doctor"]
     assert result["cancellation"]["requested"] is interrupted
     assert result["cancellation"]["status"] == (
         "partial" if interrupted else "not_requested"
@@ -1313,7 +1313,7 @@ def test_post_retention_parent_replacement_unwinds_through_retained_descriptor(
         )
     recovery = recover_pending(root)
     assert recovery.rollback.status == "partial"
-    assert recovery.recovery_command == ["supernote-module", "doctor"]
+    assert recovery.recovery_command == ["sn-module-gen", "doctor"]
 
 
 @pytest.mark.parametrize(
@@ -1405,7 +1405,7 @@ def test_newer_root_metadata_after_conflict_publication_is_preserved(
     assert result["status"] == "partial"
     assert result["rollback"]["status"] == "partial"
     assert result["actual_changes"] == []
-    assert result["recovery"]["command"] == ["supernote-module", "doctor"]
+    assert result["recovery"]["command"] == ["sn-module-gen", "doctor"]
     assert result["cancellation"]["requested"] is interrupted
     assert result["cancellation"]["status"] == (
         "partial" if interrupted else "not_requested"
@@ -1419,7 +1419,7 @@ def test_newer_root_metadata_after_conflict_publication_is_preserved(
     assert transaction_module._conditional_conflict_is_durable(root, raw)
     recovery = recover_pending(root)
     assert recovery.rollback.status == "partial"
-    assert recovery.recovery_command == ["supernote-module", "doctor"]
+    assert recovery.recovery_command == ["sn-module-gen", "doctor"]
 
 
 def test_doctor_finalizes_resolved_conditional_template_conflict(
@@ -2178,7 +2178,7 @@ def test_failed_revocation_republishes_a_valid_conflict_authority_pair(
     assert result["status"] == "partial"
     assert result["rollback"]["status"] == "partial"
     assert result["actual_changes"] == []
-    assert result["recovery"]["command"] == ["supernote-module", "doctor"]
+    assert result["recovery"]["command"] == ["sn-module-gen", "doctor"]
     assert result["cancellation"]["requested"] is interrupted
     assert result["cancellation"]["status"] == (
         "partial" if interrupted else "not_requested"
@@ -2200,7 +2200,7 @@ def test_failed_revocation_republishes_a_valid_conflict_authority_pair(
     assert (authority / persisted["entry_authority"]).is_file()
     recovery = recover_pending(root)
     assert recovery.rollback.status == "partial"
-    assert recovery.recovery_command == ["supernote-module", "doctor"]
+    assert recovery.recovery_command == ["sn-module-gen", "doctor"]
     transaction_module._validate_transaction_entries(root, persisted)
 
 
@@ -2257,7 +2257,7 @@ def test_ambiguous_post_retention_state_keeps_recovery_authority(
     )
     journal = root / ".supernote-module-transaction.json"
     assert Path(result["metadata"]["recovery_path"]) == journal
-    assert result["recovery"]["command"] == ["supernote-module", "doctor"]
+    assert result["recovery"]["command"] == ["sn-module-gen", "doctor"]
     raw = json.loads(journal.read_text(encoding="utf-8"))
     assert raw["phase"] == "conflict"
     restore = Path(raw["entries"][0]["restore"])

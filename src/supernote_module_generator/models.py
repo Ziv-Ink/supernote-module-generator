@@ -13,7 +13,7 @@ def _serialized_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
     kind = str(value.get("kind", "validation_failed"))
     if "code" not in value:
         normalized = re.sub(r"[^A-Za-z0-9]+", "_", kind).strip("_").upper()
-        value["code"] = f"SNV4_{normalized or 'VALIDATION_FAILED'}"
+        value["code"] = f"SNMG_{normalized or 'VALIDATION_FAILED'}"
     value.setdefault("severity", "error")
     value.setdefault(
         "scope",
@@ -317,7 +317,7 @@ class CommandResult:
         ):
             actual_changes = []
         return {
-            "schema_version": "4.0",
+            "schema_version": "1.0",
             "tool_version": __version__,
             "command": self.command,
             "status": self.status,

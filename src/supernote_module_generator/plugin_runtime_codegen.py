@@ -15,7 +15,7 @@ from .conversion_codegen import (
 from .cpp_object_runtime_codegen import render_cpp_object_runtime
 from .feature_model import PluginRuntimeRegistry
 from .templates import render
-from .v4_schemas import (
+from .schemas import (
     GENERATED_OWNERSHIP_KIND,
     GENERATED_OWNERSHIP_SCHEMA_VERSION,
 )
@@ -286,7 +286,7 @@ kotlin {{
     jvmToolchain(17)
 }}
 
-def supernoteModuleCommand = System.getenv('SUPERNOTE_MODULE_COMMAND') ?: 'supernote-module'
+def supernoteModuleCommand = System.getenv('SUPERNOTE_MODULE_COMMAND') ?: 'sn-module-gen'
 
 ['Debug', 'Release'].each {{ buildVariant ->
     def variantName = buildVariant.toLowerCase()
@@ -1279,7 +1279,7 @@ void RuntimeSession::add_feature(
     const std::shared_ptr<FeatureSession> &feature) {
   std::lock_guard lock(mutex_);
   if (!active()) throw std::runtime_error(
-      "SNV4_SESSION_INVALIDATED: runtime session is inactive");
+      "SNMG_SESSION_INVALIDATED: runtime session is inactive");
   features_[feature->id()] = feature;
 }
 
@@ -2223,7 +2223,7 @@ Java_supernote_generated_runtime_SupernoteV4Module_nativeInvalidate(
   }} else {{
     __android_log_print(
         ANDROID_LOG_ERROR, kLogTag,
-        "SNV4_RESTART_REQUIRED: runtime retirement could not be guaranteed "
+        "SNMG_RESTART_REQUIRED: runtime retirement could not be guaranteed "
         "(retained=%zu limit=32); restart PluginHost",
         supernote::runtime::process_services().retired_runtime_count());
   }}

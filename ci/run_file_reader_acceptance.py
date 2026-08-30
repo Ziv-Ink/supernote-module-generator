@@ -184,12 +184,12 @@ def run(
     completed.append("7.3-invalid-cpp-only-rejected")
 
     # Install all local links once after the complete feature set exists.
-    if not os.environ.get("SNV4_ACCEPTANCE_SKIP_NPM_INSTALL"):
+    if not os.environ.get("SNMG_ACCEPTANCE_SKIP_NPM_INSTALL"):
         _run(project, ("npm", "install", "--ignore-scripts"))
 
     # 7.4: targeted update expands to the complete affected closure atomically.
     _add(project, executable, "closure-peer")
-    if not os.environ.get("SNV4_ACCEPTANCE_SKIP_NPM_INSTALL"):
+    if not os.environ.get("SNMG_ACCEPTANCE_SKIP_NPM_INSTALL"):
         _run(project, ("npm", "install", "--ignore-scripts"))
     audit_source = project / "local_modules/auditprobe/android/src/main/cpp/feature.cpp"
     audit_source.write_text(
@@ -298,10 +298,10 @@ def run(
     for host, expected_file in (
         (
             "note",
-            "/storage/emulated/0/Note/SNV4_Bounded_Acceptance/"
-            "SNV4_Bounded_NOTE.note",
+            "/storage/emulated/0/Note/SNMG_Bounded_Acceptance/"
+            "SNMG_Bounded_NOTE.note",
         ),
-        ("doc", "/storage/emulated/0/Document/SNV4_Bounded_Acceptance.pdf"),
+        ("doc", "/storage/emulated/0/Document/SNMG_Bounded_Acceptance.pdf"),
     ):
         log = (bounded_device_evidence / f"{host}-reactnative.log").read_text(
             encoding="utf-8"

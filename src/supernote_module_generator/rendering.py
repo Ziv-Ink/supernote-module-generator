@@ -451,7 +451,7 @@ class Renderer:
             file=self.stderr,
         )
         for issue in result.validation.issues:
-            code = str(issue.get("code", "SNV4_VALIDATION_FAILED"))
+            code = str(issue.get("code", "SNMG_VALIDATION_FAILED"))
             scope = str(issue.get("scope", "plugin"))
             feature = issue.get("feature_id")
             location = f" ({feature})" if feature else ""

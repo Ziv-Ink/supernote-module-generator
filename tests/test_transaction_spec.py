@@ -861,7 +861,7 @@ def test_recovery_registry_rejects_a_forged_shared_directory(
     monkeypatch,
 ):
     identity = str(os.getuid())
-    registry = tmp_path / f"supernote-module-v4-recovery-v2-{identity}"
+    registry = tmp_path / f"sn-module-gen-v4-recovery-v2-{identity}"
     registry.mkdir(mode=0o777)
     registry.chmod(0o777)
     sentinel = registry / "sentinel"
