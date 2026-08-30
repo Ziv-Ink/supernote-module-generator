@@ -202,12 +202,14 @@ def test_windows_descriptor_rename_uses_no_replace_file_rename_info(
     destination = Path("C:/plugin/long 名/value.js")
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
     monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    rename_path = r"\??\C:\plugin\long 名\value.js"
+    monkeypatch.setattr(filesystem, "_windows_rename_path", lambda _path: rename_path)
 
     filesystem._windows_rename_descriptor_no_replace(73, destination)
 
     assert len(windows_api.rename_updates) == 1
     raw = windows_api.rename_updates[0]
-    encoded = filesystem._windows_api_path(destination).encode("utf-16-le")
+    encoded = rename_path.encode("utf-16-le")
     assert raw[:4] == b"\0\0\0\0"
     assert int.from_bytes(raw[16:20], "little") == len(encoded)
     assert raw.endswith(encoded)
@@ -220,11 +222,33 @@ def test_windows_descriptor_rename_surfaces_native_failure(
     windows_api.fail_set = True
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
     monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_rename_path",
+        lambda _path: r"\??\C:\plugin\value.js",
+    )
 
     with pytest.raises(OSError, match="fake Windows error"):
         filesystem._windows_rename_descriptor_no_replace(
             73, Path("C:/plugin/value.js")
         )
+
+
+@pytest.mark.parametrize(
+    ("extended", "expected"),
+    [
+        (r"\\?\C:\plugin\value.js", r"\??\C:\plugin\value.js"),
+        (r"\\?\UNC\server\share\value.js", r"\??\UNC\server\share\value.js"),
+    ],
+)
+def test_windows_rename_path_uses_nt_namespace(
+    extended: str,
+    expected: str,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(filesystem, "_windows_api_path", lambda _path: extended)
+
+    assert filesystem._windows_rename_path(Path("value.js")) == expected
 
 
 def test_windows_conditional_open_closes_registered_handle_on_transfer_failure(
@@ -364,7 +388,7 @@ def test_windows_open_retains_ancestors_and_classifies_leaf(
     assert ancestor_calls
     assert windows_api.create_calls[-1][1] & 0x100
     assert all(access & 0x1 for _path, access, _share in ancestor_calls)
-    assert all(share == 0x1 | 0x2 for _path, _access, share in ancestor_calls)
+    assert all(share == 0x1 for _path, _access, share in ancestor_calls)
 
 
 def test_windows_descriptor_owns_retained_ancestors_until_close(

@@ -1268,7 +1268,7 @@ def _windows_conditional_parent_matches(
         handle = _windows_open_no_follow_handle(
             parent,
             directory=True,
-            share_mode=0x1 | 0x2,
+            share_mode=0x1,
         )
         current = parent.lstat()
         return current.st_dev == expected_dev and current.st_ino == expected_ino

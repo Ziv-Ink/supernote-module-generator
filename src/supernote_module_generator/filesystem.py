@@ -478,7 +478,7 @@ def _windows_rename_descriptor_no_replace(
             ("FileNameLength", wintypes.DWORD),
         )
 
-    filename = _windows_api_path(destination).encode("utf-16-le")
+    filename = _windows_rename_path(destination).encode("utf-16-le")
     filename_offset = (
         FileRenameInfoHeader.FileNameLength.offset + ctypes.sizeof(wintypes.DWORD)
     )
@@ -504,6 +504,17 @@ def _windows_rename_descriptor_no_replace(
         len(buffer),
     ):
         raise _windows_error()
+
+
+def _windows_rename_path(path: Path) -> str:
+    """Return the NT path syntax consumed by ``FILE_RENAME_INFO``."""
+
+    value = _windows_api_path(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\??\\UNC\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return "\\??\\" + value[4:]
+    raise OSError(f"Windows rename path is not extended: {path}")
 
 
 def _windows_descriptor_path_matches(descriptor: int, path: Path) -> bool:
@@ -625,7 +636,7 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             handle = create_file(
                 _windows_api_path(current),
                 0x1 | 0x80,  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
-                0x1 | 0x2,
+                0x1,
                 None,
                 3,
                 0x00200000 | 0x02000000,
