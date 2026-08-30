@@ -289,6 +289,9 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
 
 def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> None:
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
+    runtime_codegen = (
+        ROOT / "src/supernote_module_generator/plugin_runtime_codegen.py"
+    ).read_text(encoding="utf-8")
 
     assert "af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f" in quality
     assert "da2ab8afeb416d2695206d36d3e628cd620420fe" in quality
@@ -316,6 +319,9 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     ).read_text(encoding="utf-8")
     for scenario in ("7.1-7.7", "7.9-7.10"):
         assert scenario in quality
+    assert "SUPERNOTE_MODULE_COMMAND" in runtime_codegen
+    assert "SUPERNOTE_MODULE_COMMAND:" in quality
+    assert "SN_MODULE_GEN_COMMAND" not in quality
 
 
 def test_release_gate_builds_the_bounded_note_doc_acceptance_pack() -> None:

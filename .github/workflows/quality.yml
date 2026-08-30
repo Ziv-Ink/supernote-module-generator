@@ -368,13 +368,13 @@ jobs:
         run: npm install --ignore-scripts
       - name: Generate C++ and Kotlin release examples
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
-          "$SN_MODULE_GEN_COMMAND" add readme-cpp \
+          "$SUPERNOTE_MODULE_COMMAND" add readme-cpp \
             --starter cpp --javascript-name ReadmeCpp \
             --android-namespace com.example.readme_cpp --skip-install --yes
-          "$SN_MODULE_GEN_COMMAND" add readme-jvm \
+          "$SUPERNOTE_MODULE_COMMAND" add readme-jvm \
             --starter kotlin --javascript-name ReadmeJvm \
             --android-namespace com.example.readme_jvm --skip-install --yes
           cd ..
@@ -382,15 +382,15 @@ jobs:
             generator/README.md release-plugin
           cd release-plugin
           npm install --ignore-scripts
-          "$SN_MODULE_GEN_COMMAND" update --all --skip-install --yes
-          "$SN_MODULE_GEN_COMMAND" template sync --yes
-          "$SN_MODULE_GEN_COMMAND" template status
+          "$SUPERNOTE_MODULE_COMMAND" update --all --skip-install --yes
+          "$SUPERNOTE_MODULE_COMMAND" template sync --yes
+          "$SUPERNOTE_MODULE_COMMAND" template status
       - name: Prove canonical no-op and generated JavaScript/TypeScript quality
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
-          "$SN_MODULE_GEN_COMMAND" --json update --all --skip-install --yes \
+          "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
             > "$RUNNER_TEMP/update-result.json"
           npm run lint -- --max-warnings=0
           npx tsc --noEmit
@@ -399,10 +399,10 @@ jobs:
             "$RUNNER_TEMP/update-result.json"
       - name: Compile Gradle KSP Kotlin CMake JNI and JSI read-only
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
-          "$SN_MODULE_GEN_COMMAND" --json check --build \
+          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
             > "$RUNNER_TEMP/check-result.json"
           cd ..
           python generator/ci/verify_command_result.py check-build \
@@ -410,7 +410,7 @@ jobs:
       - name: Build and verify the installable plugin package
         working-directory: release-plugin
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -423,14 +423,14 @@ jobs:
           npm install --ignore-scripts
       - name: Audit pinned Wiki commands and run the public CLI scenario
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           "$RUNNER_TEMP/generator-venv/bin/python" \
             generator/ci/run_wiki_acceptance.py \
             official-wiki \
             generator/README.md \
             wiki-plugin \
-            "$SN_MODULE_GEN_COMMAND" \
+            "$SUPERNOTE_MODULE_COMMAND" \
             "$RUNNER_TEMP/documented-commands.json"
           cd wiki-plugin
           git init
@@ -440,12 +440,12 @@ jobs:
           git commit -m 'Wiki acceptance baseline'
       - name: Prove the Wiki project is canonical and source-read-only
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd wiki-plugin
-          "$SN_MODULE_GEN_COMMAND" --json update --all --skip-install --yes \
+          "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
             > "$RUNNER_TEMP/wiki-update-result.json"
-          "$SN_MODULE_GEN_COMMAND" --json check --build \
+          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
             > "$RUNNER_TEMP/wiki-check-result.json"
           npm run lint -- --max-warnings=0
           npx tsc --noEmit
@@ -458,7 +458,7 @@ jobs:
       - name: Build and verify the Wiki acceptance package
         working-directory: wiki-plugin
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -551,9 +551,9 @@ jobs:
       - name: Prove read-only build and generated-source quality
         working-directory: file-reader-test
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
-          "$SN_MODULE_GEN_COMMAND" --json check --build \
+          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
             > "$RUNNER_TEMP/file-reader-check.json"
           npm run lint -- --max-warnings=0
           npx tsc --noEmit
@@ -563,7 +563,7 @@ jobs:
       - name: Build and verify the real-project package
         working-directory: file-reader-test
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -595,12 +595,12 @@ jobs:
           npm --prefix bounded-doc install --ignore-scripts
       - name: Compile and package both bounded host contexts
         env:
-          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           for project in bounded-note bounded-doc; do
             npm --prefix "$project" run lint -- --max-warnings=0
             (cd "$project" && npx tsc --noEmit)
-            (cd "$project" && "$SN_MODULE_GEN_COMMAND" --json check --build \
+            (cd "$project" && "$SUPERNOTE_MODULE_COMMAND" --json check --build \
               > "$RUNNER_TEMP/${project}-check.json")
             python generator/ci/verify_command_result.py check-build \
               "$RUNNER_TEMP/${project}-check.json"
