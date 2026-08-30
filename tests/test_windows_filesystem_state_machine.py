@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
+import stat
 import sys
 from types import SimpleNamespace
 
@@ -175,6 +176,22 @@ class _Kernel32:
         return 1
 
 
+def _install_fake_ntdll(monkeypatch, *, status: int = 0):
+    updates: list[bytes] = []
+
+    def set_info(_handle, _io_status, pointer, size, info_class):
+        assert info_class == 10
+        updates.append(ctypes.string_at(pointer, size))
+        return status
+
+    library = SimpleNamespace(
+        NtSetInformationFile=_Function(set_info),
+        RtlNtStatusToDosError=_Function(lambda _status: 87),
+    )
+    monkeypatch.setattr(filesystem, "_windows_ntdll", lambda: library)
+    return updates
+
+
 def test_windows_conditional_open_denies_write_and_delete_sharing(monkeypatch):
     observed: dict[str, object] = {}
 
@@ -193,6 +210,58 @@ def test_windows_conditional_open_denies_write_and_delete_sharing(monkeypatch):
     ) == 73
     assert observed["desired_access"] == 0x80000000 | 0x10000 | 0x100 | 0x80
     assert observed["share_mode"] == 0x1
+    assert observed["ancestor_share_mode"] == 0x1 | 0x2 | 0x4
+
+
+def test_windows_conditional_parent_retains_shareable_ancestry(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def open_handle(path, **kwargs):
+        observed["path"] = path
+        observed.update(kwargs)
+        return 91
+
+    monkeypatch.setattr(filesystem, "_windows_open_no_follow_handle", open_handle)
+
+    assert filesystem._windows_open_conditional_parent_handle(
+        Path("C:/plugin")
+    ) == 91
+    assert observed == {
+        "path": Path("C:/plugin"),
+        "directory": True,
+        "desired_access": 0x20 | 0x80,
+        "share_mode": 0x1 | 0x2 | 0x4,
+        "ancestor_share_mode": 0x1 | 0x2 | 0x4,
+    }
+
+
+def test_windows_atomic_regular_creation_retains_delete_authority(
+    tmp_path: Path,
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "root/.journal.tmp"
+    windows_api.attributes[str(tmp_path)] = 0x10
+    windows_api.attributes[str(target.parent)] = 0x10
+    descriptor = 73
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: descriptor),
+    )
+    monkeypatch.setattr(os, "close", lambda _descriptor: None)
+
+    assert filesystem._windows_create_atomic_regular_descriptor(target) == descriptor
+
+    target_call = windows_api.create_calls[-1]
+    assert target_call == (
+        str(target),
+        0x40000000 | 0x10000 | 0x80,
+        0x1 | 0x2 | 0x4,
+    )
+    assert descriptor in filesystem._WINDOWS_AUTHORITY.descriptors
+    filesystem._close_descriptor(descriptor)
+    assert descriptor not in filesystem._WINDOWS_AUTHORITY.descriptors
 
 
 def test_windows_descriptor_rename_uses_no_replace_file_rename_info(
@@ -212,7 +281,7 @@ def test_windows_descriptor_rename_uses_no_replace_file_rename_info(
     encoded = rename_path.encode("utf-16-le")
     assert raw[:4] == b"\0\0\0\0"
     assert int.from_bytes(raw[16:20], "little") == len(encoded)
-    assert raw.endswith(encoded)
+    assert encoded in raw
 
 
 def test_windows_descriptor_rename_surfaces_native_failure(
@@ -231,6 +300,83 @@ def test_windows_descriptor_rename_surfaces_native_failure(
     with pytest.raises(OSError, match="fake Windows error"):
         filesystem._windows_rename_descriptor_no_replace(
             73, Path("C:/plugin/value.js")
+        )
+
+
+def test_windows_descriptor_rename_uses_retained_parent_and_relative_leaf(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    destination = Path("C:/plugin/long 名/value.js")
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    updates = _install_fake_ntdll(monkeypatch)
+
+    filesystem._windows_rename_descriptor_no_replace(
+        73,
+        destination,
+        root_directory=501,
+    )
+
+    raw = updates[0]
+    encoded = destination.name.encode("utf-16-le")
+    assert int.from_bytes(raw[8:16], "little") == 501
+    assert int.from_bytes(raw[16:20], "little") == len(encoded)
+    assert encoded in raw
+
+
+def test_windows_descriptor_replace_sets_relative_replace_flag(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    destination = Path("C:/plugin/journal.json")
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    updates = _install_fake_ntdll(monkeypatch)
+
+    filesystem._windows_rename_descriptor_replace(
+        73,
+        destination,
+        root_directory=501,
+    )
+
+    raw = updates[0]
+    assert raw[0] == 1
+    assert int.from_bytes(raw[8:16], "little") == 501
+    assert destination.name.encode("utf-16-le") in raw
+
+
+def test_windows_descriptor_rename_allocates_aligned_short_leaf_buffer(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    updates = _install_fake_ntdll(monkeypatch)
+
+    filesystem._windows_rename_descriptor_no_replace(
+        73,
+        Path("C:/plugin/1"),
+        root_directory=501,
+    )
+
+    raw = updates[0]
+    assert "1".encode("utf-16-le") in raw
+
+
+def test_windows_descriptor_relative_rename_translates_ntstatus(
+    windows_api: _Kernel32,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(filesystem, "_windows_descriptor_handle", lambda _fd: 91)
+    _install_fake_ntdll(monkeypatch, status=-1)
+
+    with pytest.raises(OSError, match="fake Windows error"):
+        filesystem._windows_rename_descriptor_no_replace(
+            73,
+            Path("C:/plugin/value.js"),
+            root_directory=501,
         )
 
 
@@ -2149,11 +2295,12 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
     restored: list[int] = []
     requested_metadata_access: list[bool] = []
     closed: list[int] = []
+    next_handle = iter((77, 78))
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
 
     def open_read_only(*_args, **kwargs):
         requested_metadata_access.append(kwargs.get("write_metadata", False))
-        return 77
+        return next(next_handle)
 
     monkeypatch.setattr(
         filesystem,
@@ -2165,14 +2312,12 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
         os.utime(directory, ns=(before.st_atime_ns + 1_000_000_000, before.st_mtime_ns))
         return ()
 
-    def restore_atime(path, metadata):
-        assert path == directory
-        restored.append(metadata.st_atime_ns)
+    def restore_atime(_handle, **metadata):
+        restored.append(metadata["atime_ns"])
         os.utime(
             directory,
-            ns=(metadata.st_atime_ns, directory.lstat().st_mtime_ns),
+            ns=(metadata["atime_ns"], directory.lstat().st_mtime_ns),
         )
-        return True
 
     import os
 
@@ -2183,7 +2328,7 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
     )
     monkeypatch.setattr(
         filesystem,
-        "_restore_observed_path_atime",
+        "_windows_apply_handle_metadata_values",
         restore_atime,
     )
     monkeypatch.setattr(filesystem, "_windows_close_handle", closed.append)
@@ -2193,8 +2338,8 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
     assert children == []
     assert observed.st_ino == before.st_ino
     assert restored == [before.st_atime_ns]
-    assert requested_metadata_access == [False]
-    assert closed == [77]
+    assert requested_metadata_access == [False, True]
+    assert closed == [77, 78]
 
 
 def test_windows_observed_directory_rejects_same_handle_mtime_change(
@@ -2479,6 +2624,169 @@ def test_windows_descriptor_metadata_adapters_do_not_require_pathnames(
     ]
 
 
+def test_windows_metadata_verification_reapplies_only_racing_atime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "directory"
+    path.mkdir()
+    actual = path.lstat()
+    metadata = SimpleNamespace(
+        st_mode=actual.st_mode,
+        st_atime_ns=actual.st_atime_ns,
+        st_mtime_ns=actual.st_mtime_ns,
+    )
+    observations = iter(
+        (
+            (0x10, actual.st_atime_ns + 1_000, actual.st_mtime_ns),
+            (0x10, actual.st_atime_ns + 2_000, actual.st_mtime_ns),
+            (0x10, metadata.st_atime_ns, metadata.st_mtime_ns),
+        )
+    )
+    applied: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_metadata_values",
+        lambda _handle: next(observations),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_handle_final_path",
+        lambda _handle: path,
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_apply_handle_metadata_values",
+        lambda _handle, **values: applied.append(values),
+    )
+
+    filesystem._verify_windows_entry_metadata(path, 91, metadata)
+
+    assert applied == [
+        {
+            "mode": None,
+            "regular": False,
+            "atime_ns": metadata.st_atime_ns,
+            "mtime_ns": None,
+        },
+        {
+            "mode": None,
+            "regular": False,
+            "atime_ns": metadata.st_atime_ns,
+            "mtime_ns": None,
+        },
+        {
+            "mode": None,
+            "regular": False,
+            "atime_ns": metadata.st_atime_ns,
+            "mtime_ns": None,
+        },
+    ]
+
+
+def test_windows_directory_atime_restore_reapplies_only_racing_atime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    before = directory.lstat()
+    observations = iter(
+        (
+            SimpleNamespace(
+                st_dev=before.st_dev,
+                st_ino=before.st_ino,
+                st_mode=before.st_mode,
+                st_size=before.st_size,
+                st_atime_ns=before.st_atime_ns + 1_000,
+                st_mtime_ns=before.st_mtime_ns,
+            ),
+            SimpleNamespace(
+                st_dev=before.st_dev,
+                st_ino=before.st_ino,
+                st_mode=before.st_mode,
+                st_size=before.st_size,
+                st_atime_ns=before.st_atime_ns + 2_000,
+                st_mtime_ns=before.st_mtime_ns,
+            ),
+            before,
+        )
+    )
+    original_lstat = Path.lstat
+    applied: list[dict[str, object]] = []
+
+    def lstat(current: Path):
+        return next(observations) if current == directory else original_lstat(current)
+
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_open_no_follow_handle",
+        lambda *_args, **_kwargs: 95,
+    )
+    monkeypatch.setattr(filesystem, "_windows_close_handle", lambda _handle: None)
+    monkeypatch.setattr(
+        filesystem,
+        "_windows_apply_handle_metadata_values",
+        lambda _handle, **values: applied.append(values),
+    )
+
+    assert filesystem._restore_observed_path_atime(directory, before)
+    assert applied == [
+        {
+            "mode": None,
+            "regular": False,
+            "atime_ns": before.st_atime_ns,
+            "mtime_ns": None,
+        },
+        {
+            "mode": None,
+            "regular": False,
+            "atime_ns": before.st_atime_ns,
+            "mtime_ns": None,
+        },
+    ]
+
+
+def test_windows_protected_metadata_republishes_after_atime_only_observation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    metadata = {".": (0o700, 1_000, 2_000)}
+    applied: list[tuple[str, int, int, int]] = []
+    monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        filesystem,
+        "validate_protected_directory_metadata",
+        lambda _root, value: value,
+    )
+    monkeypatch.setattr(filesystem._WINDOWS_AUTHORITY, "reconcile", lambda: None)
+    monkeypatch.setattr(
+        filesystem,
+        "_apply_contained_directory_metadata",
+        lambda _root, relative, mode, atime_ns, mtime_ns: applied.append(
+            (relative, mode, atime_ns, mtime_ns)
+        ),
+    )
+    monkeypatch.setattr(
+        filesystem,
+        "_stat_contained_directory",
+        lambda _root, _relative: SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_atime_ns=9_000,
+            st_mtime_ns=2_000,
+        ),
+    )
+
+    assert filesystem.restore_protected_directory_metadata(tmp_path, metadata) == ()
+    assert applied == [
+        (".", 0o700, 1_000, 2_000),
+        (".", 0o700, 1_000, 2_000),
+    ]
+
+
 def test_windows_finish_observed_atime_updates_only_retained_atime(
     tmp_path: Path,
     monkeypatch,
@@ -2496,10 +2804,12 @@ def test_windows_finish_observed_atime_updates_only_retained_atime(
         "msvcrt",
         SimpleNamespace(get_osfhandle=lambda value: value),
     )
+    handles: list[int] = []
 
     def restore_atime(handle, **values):
-        current = os.fstat(handle)
-        os.utime(handle, ns=(values["atime_ns"], current.st_mtime_ns))
+        handles.append(handle)
+        current = source.lstat()
+        os.utime(source, ns=(values["atime_ns"], current.st_mtime_ns))
 
     monkeypatch.setattr(
         filesystem,
@@ -2510,6 +2820,7 @@ def test_windows_finish_observed_atime_updates_only_retained_atime(
         assert filesystem._finish_observed_atime(source, descriptor, before)
     finally:
         os.close(descriptor)
+    assert handles == [descriptor]
     assert source.lstat().st_atime_ns == before.st_atime_ns
 
 

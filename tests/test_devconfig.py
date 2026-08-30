@@ -347,10 +347,11 @@ def test_add_update_build_and_doctor_share_the_devconfig_environment(
     )
     monkeypatch.setattr("supernote_module_generator.v4_validation.run_process", record)
 
-    assert _invoke(
+    add_code, _, add_error = _invoke(
         root,
         ["add", "document", "--starter", "cpp", "--skip-install", "--yes"],
-    )[0] == 0
+    )
+    assert add_code == 0, add_error
     feature = root / "local_modules/document"
     update_code, _, update_error = _invoke(
         root, ["update", "document", "--skip-install", "--yes"]

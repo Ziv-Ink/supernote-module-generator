@@ -483,6 +483,23 @@ def test_startup_recovery_rejects_directory_metadata_symlink_ancestor(tmp_path: 
 
 def test_restore_directory_metadata_verifies_atime(tmp_path: Path, monkeypatch):
     metadata = protected_directory_metadata(tmp_path)
+    if os.name == "nt":
+        original_apply = filesystem_module._windows_apply_handle_metadata_values
+
+        def wrong_windows_atime(handle, **values):
+            if values["atime_ns"] is not None:
+                values["atime_ns"] += 1_000_000_000
+            original_apply(handle, **values)
+
+        monkeypatch.setattr(
+            filesystem_module,
+            "_windows_apply_handle_metadata_values",
+            wrong_windows_atime,
+        )
+        assert restore_protected_directory_metadata(tmp_path, metadata) == (
+            "modified:.",
+        )
+        return
     original_utime = os.utime
 
     def wrong_atime(path, *, ns, follow_symlinks=None):
@@ -2113,6 +2130,121 @@ def test_exact_entry_state_distinguishes_different_supported_atimes(
     assert first != second
 
 
+def test_exact_entry_state_restores_nested_directory_atimes(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (nested / "value.txt").write_text("stable\n", encoding="utf-8")
+    root_times = (65_000_000_000, 66_000_000_000)
+    nested_times = (67_000_000_000, 68_000_000_000)
+    os.utime(source, ns=root_times)
+    os.utime(nested, ns=nested_times)
+
+    state = transaction_module._exact_entry_state(source)
+
+    precision = 100 if os.name == "nt" else 1
+    rows = {row[0]: row for row in state}
+    assert rows["."][3] == root_times[0] // precision * precision
+    assert rows["nested"][3] == nested_times[0] // precision * precision
+    assert source.lstat().st_atime_ns == root_times[0]
+    assert nested.lstat().st_atime_ns == nested_times[0]
+
+
+def test_matching_content_addressed_entry_authority_is_not_rewritten(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    authority_name = str(transaction.data["entry_authority"])
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_write_json_atomic",
+        lambda *_args, **_kwargs: pytest.fail("matching authority was rewritten"),
+    )
+
+    transaction_module._write_entry_authority(
+        transaction.state_dir,
+        transaction.identifier,
+        transaction.data["entries"],
+        authority_name,
+    )
+
+
+def test_windows_atomic_json_keeps_source_authority_through_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    destination = tmp_path / "journal.json"
+    if os.name == "nt":
+        transaction_module._write_json_atomic(destination, {"value": 1})
+        transaction_module._write_json_atomic(destination, {"value": 2})
+        assert json.loads(destination.read_text(encoding="utf-8")) == {"value": 2}
+        return
+    created: list[Path] = []
+    replaced: list[tuple[Path, Path, int]] = []
+    closed_handles: list[int] = []
+
+    def create(temporary: Path) -> int:
+        created.append(temporary)
+        return os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+
+    def replace(descriptor: int, path: Path, *, root_directory: int) -> None:
+        os.fstat(descriptor)
+        replaced.append((created[0], path, root_directory))
+        os.replace(created[0], path)
+
+    monkeypatch.setattr(transaction_module, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_open_conditional_parent_handle",
+        lambda _path: 91,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_create_atomic_regular_descriptor",
+        create,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_descriptor_path_matches",
+        lambda _descriptor, _path: True,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_rename_descriptor_replace",
+        replace,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_close_handle",
+        closed_handles.append,
+    )
+
+    transaction_module._write_json_atomic(destination, {"value": 1})
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == {"value": 1}
+    assert replaced == [(created[0], destination, 91)]
+    assert closed_handles == [91]
+
+
+def test_content_addressed_entry_authority_rejects_conflicting_payload(
+    tmp_path: Path,
+) -> None:
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    authority_name = str(transaction.data["entry_authority"])
+    authority = transaction.state_dir / authority_name
+    authority.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(FilesystemError, match="authority is inconsistent"):
+        transaction_module._write_entry_authority(
+            transaction.state_dir,
+            transaction.identifier,
+            transaction.data["entries"],
+            authority_name,
+        )
+
+
 def test_recover_pending_reconciles_windows_authority_before_root_resolution(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2277,7 +2409,10 @@ def test_package_baseline_switch_is_recoverable_at_every_durable_boundary(
     outcome = recover_pending(tmp_path)
     metadata = package.lstat()
     assert outcome.rollback.status == "completed"
-    assert metadata.st_mode & 0o7777 == 0o600
+    if os.name == "nt":
+        assert metadata.st_mode & stat.S_IWRITE == 0o600 & stat.S_IWRITE
+    else:
+        assert metadata.st_mode & 0o7777 == 0o600
     assert (metadata.st_atime_ns, metadata.st_mtime_ns) == external_times
     assert package.read_bytes() == external
     assert not transaction.journal_path.exists()
@@ -2314,9 +2449,18 @@ def test_recovery_copy_retries_only_explicit_concurrent_source_mutations(
 
 
 def _install_fake_windows_conditional_io(monkeypatch):
+    native_open_parent = transaction_module._windows_open_conditional_parent_handle
+    native_create_atomic = transaction_module._windows_create_atomic_regular_descriptor
+    native_replace_descriptor = transaction_module._windows_rename_descriptor_replace
+    native_descriptor_matches = transaction_module._windows_descriptor_path_matches
+    native_close_descriptor = transaction_module._close_descriptor
+    native_close_handle = transaction_module._windows_close_handle
     paths: dict[int, Path] = {}
+    parent_paths: dict[int, Path] = {}
+    atomic_descriptors: set[int] = set()
     closed: list[int] = []
     next_descriptor = 70
+    next_handle = 700
 
     def open_descriptor(path: Path) -> int:
         nonlocal next_descriptor
@@ -2329,12 +2473,75 @@ def _install_fake_windows_conditional_io(monkeypatch):
         path = paths[descriptor]
         return path.read_bytes(), path.stat()
 
-    def rename_descriptor(descriptor: int, destination: Path) -> None:
+    def open_parent(path: Path) -> int:
+        nonlocal next_handle
+        if os.name == "nt":
+            handle = native_open_parent(path)
+        else:
+            handle = next_handle
+            next_handle += 1
+        parent_paths[handle] = Path(path)
+        return handle
+
+    def rename_descriptor(
+        descriptor: int,
+        destination: Path,
+        *,
+        root_directory: int | None = None,
+    ) -> None:
+        assert root_directory is not None
+        assert parent_paths[root_directory] == destination.parent
         source = paths[descriptor]
         if destination.exists():
             raise FileExistsError(destination)
         source.rename(destination)
         paths[descriptor] = destination
+
+    def create_atomic(path: Path) -> int:
+        descriptor = (
+            native_create_atomic(path)
+            if os.name == "nt"
+            else os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        )
+        paths[descriptor] = path
+        atomic_descriptors.add(descriptor)
+        return descriptor
+
+    def replace_descriptor(
+        descriptor: int,
+        destination: Path,
+        *,
+        root_directory: int,
+    ) -> None:
+        assert parent_paths[root_directory] == destination.parent
+        if os.name == "nt":
+            native_replace_descriptor(
+                descriptor,
+                destination,
+                root_directory=root_directory,
+            )
+        else:
+            os.replace(paths[descriptor], destination)
+        paths[descriptor] = destination
+
+    def close_descriptor(descriptor: int) -> None:
+        if descriptor in atomic_descriptors:
+            if os.name == "nt":
+                native_close_descriptor(descriptor)
+            else:
+                os.close(descriptor)
+            atomic_descriptors.remove(descriptor)
+            return
+        closed.append(descriptor)
+
+    def descriptor_matches(descriptor: int, path: Path) -> bool:
+        if descriptor in atomic_descriptors and os.name == "nt":
+            return native_descriptor_matches(descriptor, path)
+        return paths[descriptor] == path
+
+    def close_handle(handle: int) -> None:
+        if os.name == "nt":
+            native_close_handle(handle)
 
     monkeypatch.setattr(transaction_module, "_windows_host", lambda: True)
     monkeypatch.setattr(
@@ -2359,23 +2566,44 @@ def _install_fake_windows_conditional_io(monkeypatch):
     )
     monkeypatch.setattr(
         transaction_module,
+        "_windows_open_conditional_parent_handle",
+        open_parent,
+    )
+    monkeypatch.setattr(
+        transaction_module,
         "_windows_rename_descriptor_no_replace",
         rename_descriptor,
     )
     monkeypatch.setattr(
         transaction_module,
+        "_windows_create_atomic_regular_descriptor",
+        create_atomic,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_rename_descriptor_replace",
+        replace_descriptor,
+    )
+    monkeypatch.setattr(
+        transaction_module,
         "_windows_descriptor_path_matches",
-        lambda descriptor, path: paths[descriptor] == path,
+        descriptor_matches,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_conditional_destination_parents_match",
+        lambda *_args: True,
     )
     monkeypatch.setattr(
         transaction_module,
         "_close_descriptor",
-        lambda descriptor: closed.append(descriptor),
+        close_descriptor,
     )
+    monkeypatch.setattr(transaction_module, "_windows_close_handle", close_handle)
     return paths, closed, rename_descriptor
 
 
-def test_windows_conditional_batch_retains_identity_until_durable_commit(
+def test_windows_conditional_batch_releases_identity_after_durable_finalization(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -2393,7 +2621,9 @@ def test_windows_conditional_batch_retains_identity_until_durable_commit(
 
     assert destination.read_bytes() == b"replacement\n"
     assert (transaction.state_dir / "modules" / "0").read_bytes() == b"baseline\n"
-    assert closed == []
+    assert len(closed) == 2
+    assert transaction._windows_conditional_descriptors == []
+    assert transaction._windows_conditional_handles == []
     transaction.commit()
     assert len(closed) == 2
     assert not transaction.journal_path.exists()
@@ -2415,13 +2645,22 @@ def test_windows_conditional_batch_never_clobbers_reappearing_destination(
     )
     injected = False
 
-    def inject_concurrent_destination(descriptor: int, target: Path) -> None:
+    def inject_concurrent_destination(
+        descriptor: int,
+        target: Path,
+        *,
+        root_directory: int | None = None,
+    ) -> None:
         nonlocal injected
         source = paths[descriptor]
         if not injected and source == staged and target == destination:
             injected = True
             destination.write_bytes(b"external\n")
-        rename_descriptor(descriptor, target)
+        rename_descriptor(
+            descriptor,
+            target,
+            root_directory=root_directory,
+        )
 
     monkeypatch.setattr(
         transaction_module,
@@ -2536,17 +2775,26 @@ def test_windows_conditional_descriptor_release_reports_first_close_failure(
 ):
     transaction = Transaction(tmp_path, "update", ["safe"])
     transaction._windows_conditional_descriptors[:] = [71, 72]
-    closed: list[int] = []
+    transaction._windows_conditional_handles[:] = [91, 92]
+    closed_descriptors: list[int] = []
+    closed_handles: list[int] = []
 
     def close(descriptor: int) -> None:
-        closed.append(descriptor)
+        closed_descriptors.append(descriptor)
         if descriptor == 72:
             raise OSError("close failed")
 
     monkeypatch.setattr(transaction_module, "_close_descriptor", close)
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_close_handle",
+        closed_handles.append,
+    )
 
     with pytest.raises(OSError, match="close failed"):
         transaction._release_windows_conditional_descriptors()
 
-    assert closed == [72, 71]
+    assert closed_descriptors == [72, 71]
+    assert closed_handles == [92, 91]
     assert transaction._windows_conditional_descriptors == []
+    assert transaction._windows_conditional_handles == []

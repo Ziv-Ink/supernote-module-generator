@@ -24,10 +24,13 @@ from .filesystem import (
     _windows_host,
     _windows_descriptor_path_matches,
     _windows_close_handle,
+    _windows_create_atomic_regular_descriptor,
+    _windows_open_conditional_parent_handle,
     _windows_open_no_follow_handle,
     _windows_open_conditional_regular_descriptor,
     _windows_path_key,
     _windows_rename_descriptor_no_replace,
+    _windows_rename_descriptor_replace,
     _read_windows_conditional_regular_descriptor,
     _close_descriptor,
     copy_entry_no_follow,
@@ -688,6 +691,9 @@ class _WindowsConditionalReplacement:
     prepared: _PreparedRegularReplacement
     live_descriptor: int
     staged_descriptor: int
+    destination_parent_handle: int
+    staged_parent_handle: int
+    restore_parent_handle: int
     restore: Path
     entry: Dict[str, object]
 
@@ -699,68 +705,93 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
     if kind is None:
         return ((".", None),)
     paths = [path]
+    directory_metadata: dict[Path, os.stat_result] = {}
     if kind == "directory":
-        paths.extend(iter_tree_no_follow(path))
+        directory_metadata = filesystem_ops._capture_directory_tree_metadata(path)
+        try:
+            paths.extend(iter_tree_no_follow(path))
+        finally:
+            _restore_exact_state_directory_atimes(directory_metadata)
     state: list[tuple[object, ...]] = []
-    for current in paths:
-        relative = "." if current == path else current.relative_to(path).as_posix()
-        before = current.lstat()
-        current_kind = entry_kind(current)
-        digest = _hash_path(current) if current_kind != "directory" else None
-        after = current.lstat()
-        if (
-            before.st_dev != after.st_dev
-            or before.st_ino != after.st_ino
-            or (
-                (
-                    stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
-                    or before.st_mode & stat.S_IWRITE != after.st_mode & stat.S_IWRITE
+    try:
+        for current in paths:
+            relative = "." if current == path else current.relative_to(path).as_posix()
+            before = current.lstat()
+            current_kind = entry_kind(current)
+            digest = _hash_path(current) if current_kind != "directory" else None
+            after = current.lstat()
+            if (
+                before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or (
+                    (
+                        stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+                        or before.st_mode & stat.S_IWRITE
+                        != after.st_mode & stat.S_IWRITE
+                    )
+                    if os.name == "nt"
+                    else before.st_mode != after.st_mode
                 )
+                or (
+                    (before.st_mtime_ns // 100 != after.st_mtime_ns // 100)
+                    if os.name == "nt"
+                    else before.st_mtime_ns != after.st_mtime_ns
+                )
+                or (
+                    (before.st_atime_ns // 100 != after.st_atime_ns // 100)
+                    if os.name == "nt"
+                    else before.st_atime_ns != after.st_atime_ns
+                )
+                or before.st_size != after.st_size
+            ):
+                raise ConcurrentSourceMutation(
+                    f"Source entry changed while it was captured: {current}"
+                )
+            mode = (
+                (stat.S_IWRITE if after.st_mode & stat.S_IWRITE else 0) | stat.S_IREAD
                 if os.name == "nt"
-                else before.st_mode != after.st_mode
+                else stat.S_IMODE(after.st_mode)
             )
-            or (
-                (before.st_mtime_ns // 100 != after.st_mtime_ns // 100)
+            mtime_ns = (
+                (after.st_mtime_ns // 100) * 100
                 if os.name == "nt"
-                else before.st_mtime_ns != after.st_mtime_ns
+                else after.st_mtime_ns
             )
-            or (
-                (before.st_atime_ns // 100 != after.st_atime_ns // 100)
+            observed_atime_ns = (
+                directory_metadata[current].st_atime_ns
+                if current_kind == "directory"
+                else after.st_atime_ns
+            )
+            atime_ns = (
+                (observed_atime_ns // 100) * 100
                 if os.name == "nt"
-                else before.st_atime_ns != after.st_atime_ns
+                else observed_atime_ns
             )
-            or before.st_size != after.st_size
-        ):
-            raise ConcurrentSourceMutation(
-                f"Source entry changed while it was captured: {current}"
+            state.append(
+                (
+                    relative,
+                    current_kind,
+                    mode,
+                    atime_ns,
+                    mtime_ns,
+                    after.st_size,
+                    digest,
+                )
             )
-        mode = (
-            (stat.S_IWRITE if after.st_mode & stat.S_IWRITE else 0) | stat.S_IREAD
-            if os.name == "nt"
-            else stat.S_IMODE(after.st_mode)
-        )
-        mtime_ns = (
-            (after.st_mtime_ns // 100) * 100
-            if os.name == "nt"
-            else after.st_mtime_ns
-        )
-        atime_ns = (
-            (after.st_atime_ns // 100) * 100
-            if os.name == "nt"
-            else after.st_atime_ns
-        )
-        state.append(
-            (
-                relative,
-                current_kind,
-                mode,
-                atime_ns,
-                mtime_ns,
-                after.st_size,
-                digest,
-            )
-        )
+    finally:
+        if directory_metadata:
+            _restore_exact_state_directory_atimes(directory_metadata)
     return tuple(state)
+
+
+def _restore_exact_state_directory_atimes(
+    directory_metadata: dict[Path, os.stat_result],
+) -> None:
+    for directory, metadata in reversed(tuple(directory_metadata.items())):
+        if not filesystem_ops._restore_observed_path_atime(directory, metadata):
+            raise ConcurrentSourceMutation(
+                f"Source entry changed while it was captured: {directory}"
+            )
 
 
 def _copy_verified_entry(
@@ -789,6 +820,8 @@ def _copy_verified_entry(
             before = _exact_entry_state(source)
             if before != ((".", None),):
                 copy_entry_no_follow(source, destination)
+                _restore_exact_state_atimes(source, before)
+                _restore_exact_state_atimes(destination, before)
             after = _exact_entry_state(source)
             copied = _exact_entry_state(destination)
             if before != after or copied != after:
@@ -809,12 +842,58 @@ def _copy_verified_entry(
     raise last_error
 
 
+def _restore_exact_state_atimes(
+    root: Path,
+    state: tuple[tuple[object, ...], ...],
+) -> None:
+    if not _windows_host():
+        return
+    rows = sorted(
+        (row for row in state if row[1] in {"directory", "file"}),
+        key=lambda row: len(PurePosixPath(str(row[0])).parts),
+        reverse=True,
+    )
+    for row in rows:
+        relative, kind, mode, atime_ns, mtime_ns, size, _digest = row
+        expected_mode = cast(int, mode)
+        expected_atime_ns = cast(int, atime_ns)
+        expected_mtime_ns = cast(int, mtime_ns)
+        path = root if relative == "." else root.joinpath(
+            *PurePosixPath(str(relative)).parts
+        )
+        current = path.lstat()
+        if (
+            entry_kind(path) != kind
+            or current.st_mode & stat.S_IWRITE
+            != expected_mode & stat.S_IWRITE
+            or current.st_mtime_ns // 100 != expected_mtime_ns // 100
+            or current.st_size != size
+            or not filesystem_ops._restore_observed_path_atime(
+                path,
+                current,
+                atime_ns=expected_atime_ns,
+            )
+        ):
+            raise ConcurrentSourceMutation(
+                f"Source entry changed while exact atime was restored: {path}"
+            )
+
+
 def _write_json_atomic(path: Path, value: Dict[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
+    parent_handle: int | None = None
+    if _windows_host():
+        parent_handle = _windows_open_conditional_parent_handle(path.parent)
+        try:
+            descriptor = _windows_create_atomic_regular_descriptor(temporary)
+        except BaseException:
+            _windows_close_handle(parent_handle)
+            raise
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, 0o600)
     try:
         with os.fdopen(
             descriptor,
@@ -827,9 +906,46 @@ def _write_json_atomic(path: Path, value: Dict[str, object]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        if parent_handle is not None:
+            if not _windows_descriptor_path_matches(descriptor, temporary):
+                raise ConcurrentSourceMutation(
+                    f"Atomic JSON temporary entry changed before publication: {temporary}"
+                )
+            _windows_rename_descriptor_replace(
+                descriptor,
+                path,
+                root_directory=parent_handle,
+            )
+            if not _windows_descriptor_path_matches(descriptor, path):
+                raise ConcurrentSourceMutation(
+                    f"Atomic JSON publication is ambiguous: {path}"
+                )
     finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+        try:
+            _close_descriptor(descriptor)
+        finally:
+            if parent_handle is not None:
+                _windows_close_handle(parent_handle)
+    if parent_handle is None:
+        os.replace(temporary, path)
+
+
+def _apply_snapshot_candidate_metadata(
+    candidate: Path,
+    mode: int,
+    atime_ns: int,
+    mtime_ns: int,
+) -> None:
+    if _windows_host():
+        os.chmod(candidate, mode)
+        os.utime(candidate, ns=(atime_ns, mtime_ns))
+        return
+    os.chmod(candidate, mode, follow_symlinks=False)
+    os.utime(
+        candidate,
+        ns=(atime_ns, mtime_ns),
+        follow_symlinks=False,
+    )
 
 
 def _managed_entry(root: Path, path: Path) -> Path:
@@ -1082,15 +1198,26 @@ def _write_entry_authority(
 ) -> None:
     if entry_kind(state_dir) != "directory":
         raise FilesystemError("Transaction state authority directory is unavailable")
-    _write_json_atomic(
-        state_dir / authority_name,
-        {
-            "schema_version": 1,
-            "transaction_id": identifier,
-            "entries": entries,
-            "sha256": _entry_digest(entries),
-        },
-    )
+    authority_path = state_dir / authority_name
+    value: Dict[str, object] = {
+        "schema_version": 1,
+        "transaction_id": identifier,
+        "entries": entries,
+        "sha256": _entry_digest(entries),
+    }
+    kind = entry_kind(authority_path)
+    if kind is None:
+        _write_json_atomic(authority_path, value)
+        return
+    if kind != "file":
+        raise FilesystemError("Transaction entry authority is unsafe")
+    content, _metadata = read_regular_bytes_no_follow(authority_path)
+    try:
+        existing = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise FilesystemError("Transaction entry authority is unreadable") from exc
+    if existing != value:
+        raise FilesystemError("Transaction entry authority is inconsistent")
 
 
 def _write_conditional_conflict_authority(
@@ -1834,6 +1961,7 @@ class Transaction:
         self._conditional_conflict_durable = False
         self._conditional_batch_activated = False
         self._windows_conditional_descriptors: list[int] = []
+        self._windows_conditional_handles: list[int] = []
         if self.journal_path.exists():
             raise PartialFailure(
                 "An incomplete transaction must be recovered before a new operation begins.",
@@ -2073,11 +2201,11 @@ class Transaction:
                     os.fsync(handle.fileno())
             finally:
                 os.close(descriptor)
-            os.chmod(candidate, mode, follow_symlinks=False)
-            os.utime(
+            _apply_snapshot_candidate_metadata(
                 candidate,
-                ns=(atime_ns, mtime_ns),
-                follow_symlinks=False,
+                mode,
+                atime_ns,
+                mtime_ns,
             )
             copied_content, copied_metadata = read_regular_bytes_no_follow(candidate)
             if (
@@ -2622,6 +2750,7 @@ class Transaction:
         previous_mutated = self.mutated
         entry_count_before = len(self._entries())
         opened: list[int] = []
+        opened_handles: list[int] = []
         prepared: list[_WindowsConditionalReplacement] = []
         parent_authority: dict[str, Dict[str, object]] = {}
         try:
@@ -2630,12 +2759,15 @@ class Transaction:
                 modules,
                 entry_count_before,
                 opened,
+                opened_handles,
                 prepared,
                 parent_authority,
             )
 
             self._windows_conditional_descriptors.extend(opened)
             opened.clear()
+            self._windows_conditional_handles.extend(opened_handles)
+            opened_handles.clear()
             self.data["conditional_destination_parents"] = [
                 parent_authority[key] for key in sorted(parent_authority)
             ]
@@ -2654,13 +2786,20 @@ class Transaction:
                     item.live_descriptor,
                     item.prepared.destination,
                     item.restore,
+                    item.restore_parent_handle,
                 )
             for item in prepared:
                 self._rename_windows_descriptor_checked(
                     item.staged_descriptor,
                     item.prepared.staged,
                     item.prepared.destination,
+                    item.destination_parent_handle,
                 )
+            if not _conditional_destination_parents_match(self.root, self.data):
+                raise ConcurrentSourceMutation(
+                    "Destination parent changed before conditional finalization"
+                )
+            self._release_windows_conditional_descriptors()
         except BaseException as exc:
             restored = self._restore_windows_conditional_batch(prepared)
             if restored:
@@ -2680,6 +2819,8 @@ class Transaction:
             self._release_windows_conditional_descriptors()
             for descriptor in reversed(opened):
                 _close_descriptor(descriptor)
+            for handle in reversed(opened_handles):
+                _windows_close_handle(handle)
             if restored:
                 raise
             raise TransactionCleanupError(
@@ -2695,6 +2836,7 @@ class Transaction:
         modules: Path,
         entry_count_before: int,
         opened: list[int],
+        opened_handles: list[int],
         prepared: list[_WindowsConditionalReplacement],
         parent_authority: dict[str, Dict[str, object]],
     ) -> None:
@@ -2707,6 +2849,16 @@ class Transaction:
             opened.append(live_descriptor)
             staged_descriptor = _windows_open_conditional_regular_descriptor(staged)
             opened.append(staged_descriptor)
+            destination_parent_handle = _windows_open_conditional_parent_handle(
+                destination.parent
+            )
+            opened_handles.append(destination_parent_handle)
+            staged_parent_handle = _windows_open_conditional_parent_handle(
+                staged.parent
+            )
+            opened_handles.append(staged_parent_handle)
+            restore_parent_handle = _windows_open_conditional_parent_handle(modules)
+            opened_handles.append(restore_parent_handle)
             live_content, live_metadata = (
                 _read_windows_conditional_regular_descriptor(live_descriptor)
             )
@@ -2750,6 +2902,9 @@ class Transaction:
                     ),
                     live_descriptor,
                     staged_descriptor,
+                    destination_parent_handle,
+                    staged_parent_handle,
+                    restore_parent_handle,
                     restore,
                     entry,
                 )
@@ -2772,9 +2927,18 @@ class Transaction:
         descriptor: int,
         source: Path,
         destination: Path,
+        destination_parent_handle: int,
     ) -> None:
+        if not _windows_descriptor_path_matches(descriptor, source):
+            raise FilesystemError(
+                "Windows conditional rename source identity changed"
+            )
         try:
-            _windows_rename_descriptor_no_replace(descriptor, destination)
+            _windows_rename_descriptor_no_replace(
+                descriptor,
+                destination,
+                root_directory=destination_parent_handle,
+            )
         except BaseException:
             if _windows_descriptor_path_matches(descriptor, destination):
                 return
@@ -2783,6 +2947,10 @@ class Transaction:
                     "Windows conditional rename has an ambiguous destination"
                 )
             raise
+        if not _windows_descriptor_path_matches(descriptor, destination):
+            raise FilesystemError(
+                "Windows conditional rename destination identity changed"
+            )
 
     def _restore_windows_conditional_batch(
         self,
@@ -2799,6 +2967,7 @@ class Transaction:
                         item.staged_descriptor,
                         item.prepared.destination,
                         item.prepared.staged,
+                        item.staged_parent_handle,
                     )
             except BaseException:
                 restored = False
@@ -2811,6 +2980,7 @@ class Transaction:
                         item.live_descriptor,
                         item.restore,
                         item.prepared.destination,
+                        item.destination_parent_handle,
                     )
                 if not _windows_descriptor_path_matches(
                     item.live_descriptor, item.prepared.destination
@@ -2826,6 +2996,13 @@ class Transaction:
             descriptor = self._windows_conditional_descriptors.pop()
             try:
                 _close_descriptor(descriptor)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        while self._windows_conditional_handles:
+            handle = self._windows_conditional_handles.pop()
+            try:
+                _windows_close_handle(handle)
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc

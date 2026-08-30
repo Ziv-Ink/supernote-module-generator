@@ -72,6 +72,15 @@ def _windows_kernel32() -> Any:
     return loader("kernel32", use_last_error=True)
 
 
+def _windows_ntdll() -> Any:
+    import ctypes
+
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        return None
+    return loader("ntdll")
+
+
 def _windows_last_error() -> int:
     import ctypes
 
@@ -301,12 +310,20 @@ def _windows_open_no_follow_handle(
     allow_reparse_leaf: bool = False,
     desired_access: int | None = None,
     share_mode: int = 0x1 | 0x2 | 0x4,
+    ancestor_share_mode: int = 0x1,
 ) -> int:
     """Open a non-replaceable Windows entry and reject redirected ancestors."""
 
     if not _windows_host():
         raise OSError("Windows handle operations are unavailable")
-    ancestor_handles = _windows_retain_non_reparse_ancestors(path)
+    ancestor_handles = (
+        _windows_retain_non_reparse_ancestors(path)
+        if ancestor_share_mode == 0x1
+        else _windows_retain_non_reparse_ancestors(
+            path,
+            share_mode=ancestor_share_mode,
+        )
+    )
     desired_access = _windows_desired_access(
         directory=directory,
         write_metadata=write_metadata,
@@ -410,6 +427,74 @@ def _windows_create_raw_handle(
     return int(handle)
 
 
+def _windows_create_atomic_regular_descriptor(path: Path) -> int:
+    """Create and retain one fresh regular entry with rename authority."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    ancestor_handles = _windows_retain_non_reparse_ancestors(
+        path,
+        share_mode=0x1 | 0x2 | 0x4,
+    )
+    try:
+        ancestor_generations = _WINDOWS_AUTHORITY.capture_raw_generations(
+            tuple(ancestor_handles)
+        )
+        raw_handle = _windows_create_new_atomic_raw_handle(path)
+    except BaseException:
+        _windows_close_handles(ancestor_handles)
+        raise
+    try:
+        _WINDOWS_AUTHORITY.claim_handle(raw_handle, ancestor_generations)
+        if _windows_handle_attributes(raw_handle) & 0x400:
+            raise OSError(f"Atomic temporary entry is a Windows reparse point: {path}")
+        final_path = _windows_handle_final_path(raw_handle)
+        if _windows_path_key(final_path) != _windows_path_key(path):
+            raise OSError(f"Atomic temporary path was redirected: {path}")
+    except BaseException:
+        registered = _WINDOWS_AUTHORITY.handle_generation(raw_handle)
+        if registered is None:
+            _WINDOWS_AUTHORITY.ensure_handle(
+                raw_handle,
+                _WindowsGenerationAuthority(ancestor_generations),
+            )
+        _windows_close_raw_handle(raw_handle)
+        raise
+    return _windows_handle_to_descriptor(
+        raw_handle,
+        os.O_WRONLY | getattr(os, "O_BINARY", 0),
+    )
+
+
+def _windows_create_new_atomic_raw_handle(path: Path) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = _windows_kernel32().CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        _windows_api_path(path),
+        0x40000000 | 0x10000 | 0x80,  # GENERIC_WRITE | DELETE | READ_ATTRIBUTES
+        0x1 | 0x2 | 0x4,
+        None,
+        1,  # CREATE_NEW
+        0x80 | 0x00200000,  # NORMAL | OPEN_REPARSE_POINT
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise _windows_error()
+    return int(handle)
+
+
 def _windows_handle_attributes(handle: int) -> int:
     import ctypes
     from ctypes import wintypes
@@ -463,11 +548,20 @@ def _windows_handle_final_path(handle: int) -> Path:
 def _windows_rename_descriptor_no_replace(
     descriptor: int,
     destination: Path,
+    *,
+    root_directory: int | None = None,
 ) -> None:
     """Rename the exact open Windows file identity without replacing a peer."""
 
     if not _windows_host():
         raise OSError("Windows handle operations are unavailable")
+    if root_directory is not None:
+        _windows_rename_descriptor_relative_no_replace(
+            descriptor,
+            destination.name,
+            root_directory,
+        )
+        return
     import ctypes
     from ctypes import wintypes
 
@@ -482,7 +576,8 @@ def _windows_rename_descriptor_no_replace(
     filename_offset = (
         FileRenameInfoHeader.FileNameLength.offset + ctypes.sizeof(wintypes.DWORD)
     )
-    buffer = ctypes.create_string_buffer(filename_offset + len(filename))
+    information_size = ctypes.sizeof(FileRenameInfoHeader) + len(filename)
+    buffer = ctypes.create_string_buffer(information_size)
     header = FileRenameInfoHeader.from_buffer(buffer)
     header.ReplaceIfExists = False
     header.RootDirectory = None
@@ -501,9 +596,105 @@ def _windows_rename_descriptor_no_replace(
         wintypes.HANDLE(handle),
         3,  # FileRenameInfo
         ctypes.byref(buffer),
-        len(buffer),
+        information_size,
     ):
         raise _windows_error()
+
+
+def _windows_rename_descriptor_relative_no_replace(
+    descriptor: int,
+    filename_value: str,
+    root_directory: int,
+) -> None:
+    """Rename through the retained parent identity using the native NT API."""
+
+    _windows_rename_descriptor_relative(
+        descriptor,
+        filename_value,
+        root_directory,
+        replace_if_exists=False,
+    )
+
+
+def _windows_rename_descriptor_replace(
+    descriptor: int,
+    destination: Path,
+    *,
+    root_directory: int,
+) -> None:
+    """Replace one leaf through retained source and parent identities."""
+
+    _windows_rename_descriptor_relative(
+        descriptor,
+        destination.name,
+        root_directory,
+        replace_if_exists=True,
+    )
+
+
+def _windows_rename_descriptor_relative(
+    descriptor: int,
+    filename_value: str,
+    root_directory: int,
+    *,
+    replace_if_exists: bool,
+) -> None:
+    """Rename through a retained parent identity using the native NT API."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    class FileRenameInformationHeader(ctypes.Structure):
+        _fields_ = (
+            ("ReplaceIfExists", ctypes.c_ubyte),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.ULONG),
+        )
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = (
+            ("Status", ctypes.c_void_p),
+            ("Information", ctypes.c_size_t),
+        )
+
+    filename = filename_value.encode("utf-16-le")
+    filename_offset = (
+        FileRenameInformationHeader.FileNameLength.offset
+        + ctypes.sizeof(wintypes.ULONG)
+    )
+    information_size = ctypes.sizeof(FileRenameInformationHeader) + len(filename)
+    buffer = ctypes.create_string_buffer(information_size)
+    header = FileRenameInformationHeader.from_buffer(buffer)
+    header.ReplaceIfExists = replace_if_exists
+    header.RootDirectory = root_directory
+    header.FileNameLength = len(filename)
+    ctypes.memmove(ctypes.addressof(buffer) + filename_offset, filename, len(filename))
+    io_status = IoStatusBlock()
+    ntdll = _windows_ntdll()
+    set_info = ntdll.NtSetInformationFile
+    set_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    )
+    set_info.restype = ctypes.c_long
+    handle = _windows_descriptor_handle(descriptor)
+    status = int(
+        set_info(
+            wintypes.HANDLE(handle),
+            ctypes.byref(io_status),
+            ctypes.byref(buffer),
+            information_size,
+            10,  # FileRenameInformation
+        )
+    )
+    if status < 0:
+        translate = ntdll.RtlNtStatusToDosError
+        translate.argtypes = (ctypes.c_long,)
+        translate.restype = wintypes.ULONG
+        raise _windows_error(int(translate(status)))
 
 
 def _windows_rename_path(path: Path) -> str:
@@ -534,6 +725,7 @@ def _windows_open_conditional_regular_descriptor(path: Path) -> int:
         directory=False,
         desired_access=0x80000000 | 0x10000 | 0x100 | 0x80,
         share_mode=0x1,
+        ancestor_share_mode=0x1 | 0x2 | 0x4,
     )
     try:
         return _windows_handle_to_descriptor(handle, os.O_RDONLY)
@@ -541,6 +733,18 @@ def _windows_open_conditional_regular_descriptor(path: Path) -> int:
         if _WINDOWS_AUTHORITY.handle_generation(handle) is not None:
             _windows_close_raw_handle(handle)
         raise
+
+
+def _windows_open_conditional_parent_handle(path: Path) -> int:
+    """Retain one destination parent without blocking durable state updates."""
+
+    return _windows_open_no_follow_handle(
+        path,
+        directory=True,
+        desired_access=0x20 | 0x80,
+        share_mode=0x1 | 0x2 | 0x4,
+        ancestor_share_mode=0x1 | 0x2 | 0x4,
+    )
 
 
 def _read_windows_conditional_regular_descriptor(
@@ -594,7 +798,11 @@ def _windows_close_handles(handles: Iterable[int]) -> None:
         raise first_error
 
 
-def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
+def _windows_retain_non_reparse_ancestors(
+    path: Path,
+    *,
+    share_mode: int = 0x1,
+) -> list[int]:
     if not _windows_host():
         raise OSError("Windows handle operations are unavailable")
     import ctypes
@@ -636,7 +844,7 @@ def _windows_retain_non_reparse_ancestors(path: Path) -> list[int]:
             handle = create_file(
                 _windows_api_path(current),
                 0x1 | 0x80,  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
-                0x1,
+                share_mode,
                 None,
                 3,
                 0x00200000 | 0x02000000,
@@ -820,6 +1028,45 @@ def _windows_apply_handle_metadata_values(
             basic.FileAttributes |= readonly
     if not set_info(native, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
         raise _windows_error()
+
+
+def _windows_handle_metadata_values(handle: int) -> tuple[int, int, int]:
+    """Read attributes and supported timestamps from one retained handle."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = (
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        )
+
+    get_info = _windows_kernel32().GetFileInformationByHandleEx
+    get_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    get_info.restype = wintypes.BOOL
+    basic = FileBasicInfo()
+    if not get_info(
+        wintypes.HANDLE(handle),
+        0,
+        ctypes.byref(basic),
+        ctypes.sizeof(basic),
+    ):
+        raise _windows_error()
+    unix_epoch = 116444736000000000
+    return (
+        int(basic.FileAttributes),
+        (int(basic.LastAccessTime) - unix_epoch) * 100,
+        (int(basic.LastWriteTime) - unix_epoch) * 100,
+    )
 
 
 def _windows_list_directory_entries(
@@ -1037,6 +1284,7 @@ def _observed_directory_entries(
         directory=True,
         write_metadata=False,
     )
+    owns_handle = True
     try:
         before = path.lstat()
         if not stat.S_ISDIR(before.st_mode) or _metadata_is_redirecting_reparse_point(
@@ -1054,22 +1302,42 @@ def _observed_directory_entries(
             raise ConcurrentSourceMutation(
                 f"Source directory changed while it was inspected: {path}"
             )
-        if (
-            (after.st_atime_ns // 100 != before.st_atime_ns // 100)
-            if _windows_host()
-            else after.st_atime_ns != before.st_atime_ns
-        ):
-            # Enumeration itself needs only list/read authority. Acquire a
-            # separate write-attributes handle only when NTFS actually reports
-            # an access-time change; the retained enumeration handle continues
-            # to bind the same directory throughout that repair.
-            if not _restore_observed_path_atime(path, before):
-                raise ConcurrentSourceMutation(
-                    f"Source directory changed while it was inspected: {path}"
-                )
+        # Retain an overlapping write-attributes identity, then close the
+        # enumeration handle before restoring atime. NTFS can defer the access
+        # update until that listing handle closes.
+        owns_handle = False
+        _finish_windows_directory_observation(handle, path, before)
         return children, before
     finally:
-        _windows_close_handle(handle)
+        if owns_handle:
+            _windows_close_handle(handle)
+
+
+def _finish_windows_directory_observation(
+    enumeration_handle: int,
+    path: Path,
+    before: os.stat_result,
+) -> None:
+    """Close a listing handle before neutralizing its deferred atime update."""
+
+    try:
+        authority = _windows_open_no_follow_handle(
+            path,
+            directory=True,
+            write_metadata=True,
+            desired_access=0x100 | 0x80,
+        )
+    except BaseException:
+        _windows_close_handle(enumeration_handle)
+        raise
+    try:
+        _windows_close_handle(enumeration_handle)
+        if not _restore_windows_observed_atime(path, authority, before):
+            raise ConcurrentSourceMutation(
+                f"Source directory changed while it was inspected: {path}"
+            )
+    finally:
+        _windows_close_handle(authority)
 
 
 def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
@@ -1213,37 +1481,31 @@ def _apply_descriptor_atime_only(descriptor: int, atime_ns: int) -> None:
         raise OSError(error, os.strerror(error))
 
 
-def _restore_observed_path_atime(path: Path, before: os.stat_result) -> bool:
-    if _windows_host() and stat.S_ISDIR(before.st_mode):
+def _restore_observed_path_atime(
+    path: Path,
+    before: os.stat_result,
+    *,
+    atime_ns: int | None = None,
+) -> bool:
+    if _windows_host() and (
+        stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode)
+    ):
         try:
             handle = _windows_open_no_follow_handle(
                 path,
-                directory=True,
+                directory=stat.S_ISDIR(before.st_mode),
                 write_metadata=True,
+                desired_access=0x100 | 0x80,
             )
         except OSError:
             return False
         try:
-            current = path.lstat()
-            if not _same_observed_entry(before, current):
-                return False
-            if (
-                (current.st_atime_ns // 100 != before.st_atime_ns // 100)
-                if _windows_host()
-                else current.st_atime_ns != before.st_atime_ns
-            ):
-                _windows_apply_handle_metadata_values(
-                    handle,
-                    mode=None,
-                    regular=False,
-                    atime_ns=before.st_atime_ns,
-                    mtime_ns=None,
-                )
-            restored = path.lstat()
-            return _same_observed_entry(before, restored) and (
-                (restored.st_atime_ns // 100 == before.st_atime_ns // 100)
-                if _windows_host()
-                else restored.st_atime_ns == before.st_atime_ns
+            return _restore_windows_observed_atime(
+                path,
+                handle,
+                before,
+                atime_ns=before.st_atime_ns if atime_ns is None else atime_ns,
+                regular=stat.S_ISREG(before.st_mode),
             )
         except OSError:
             return False
@@ -1259,6 +1521,37 @@ def _restore_observed_path_atime(path: Path, before: os.stat_result) -> bool:
         return _finish_observed_atime(path, descriptor, before)
     finally:
         _close_descriptor(descriptor)
+
+
+def _restore_windows_observed_atime(
+    path: Path,
+    handle: int,
+    before: os.stat_result,
+    *,
+    atime_ns: int | None = None,
+    regular: bool = False,
+) -> bool:
+    """Restore exact Windows atime without replaying concurrent metadata."""
+
+    expected_atime_ns = before.st_atime_ns if atime_ns is None else atime_ns
+    for attempt in range(3):
+        try:
+            current = path.lstat()
+        except OSError:
+            return False
+        if not _same_observed_entry(before, current):
+            return False
+        if current.st_atime_ns // 100 == expected_atime_ns // 100:
+            return True
+        if attempt < 2:
+            _windows_apply_handle_metadata_values(
+                handle,
+                mode=None,
+                regular=regular,
+                atime_ns=expected_atime_ns,
+                mtime_ns=None,
+            )
+    return False
 
 
 def read_regular_bytes_no_follow(path: Path) -> tuple[bytes, os.stat_result]:
@@ -1716,6 +2009,7 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
                 path,
                 directory=directory,
                 write_metadata=True,
+                desired_access=0x100 | 0x80,
             )
         except OSError as exc:
             raise FilesystemError(
@@ -1734,28 +2028,9 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
                     f"Entry changed while preserving metadata: {path}"
                 )
             _windows_apply_handle_metadata(handle, metadata)
-            restored = path.lstat()
+            _verify_windows_entry_metadata(path, handle, metadata)
         finally:
             _windows_close_handle(handle)
-        if (
-            stat.S_IFMT(restored.st_mode) != stat.S_IFMT(metadata.st_mode)
-            or (
-                (restored.st_mode & stat.S_IWRITE != metadata.st_mode & stat.S_IWRITE)
-                if _windows_host()
-                else stat.S_IMODE(restored.st_mode) != desired_mode
-            )
-            or (
-                (restored.st_atime_ns // 100 != metadata.st_atime_ns // 100)
-                if _windows_host()
-                else restored.st_atime_ns != metadata.st_atime_ns
-            )
-            or (
-                (restored.st_mtime_ns // 100 != metadata.st_mtime_ns // 100)
-                if _windows_host()
-                else restored.st_mtime_ns != metadata.st_mtime_ns
-            )
-        ):
-            raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
         return
 
     descriptor: int | None = None
@@ -1787,6 +2062,72 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
     ):
         raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
 
+
+def _verify_windows_entry_metadata(
+    path: Path,
+    handle: int,
+    metadata: os.stat_result,
+) -> None:
+    """Verify exact metadata, neutralizing only racing last-access updates."""
+
+    _verify_windows_metadata_values(
+        path,
+        handle,
+        expected_type=stat.S_IFMT(metadata.st_mode),
+        mode=metadata.st_mode,
+        atime_ns=metadata.st_atime_ns,
+        mtime_ns=metadata.st_mtime_ns,
+        regular=stat.S_ISREG(metadata.st_mode),
+    )
+
+
+def _verify_windows_metadata_values(
+    path: Path,
+    handle: int,
+    *,
+    expected_type: int,
+    mode: int,
+    atime_ns: int,
+    mtime_ns: int,
+    regular: bool,
+) -> None:
+    """Verify Windows metadata while replaying atime and no other field."""
+
+    for attempt in range(3):
+        attributes, restored_atime_ns, restored_mtime_ns = (
+            _windows_handle_metadata_values(handle)
+        )
+        observed_type = stat.S_IFDIR if attributes & 0x10 else stat.S_IFREG
+        if (
+            attributes & 0x400
+            or observed_type != expected_type
+            or (regular and bool(attributes & 0x1) == bool(mode & stat.S_IWRITE))
+            or restored_mtime_ns // 100 != mtime_ns // 100
+            or _windows_path_key(_windows_handle_final_path(handle))
+            != _windows_path_key(path)
+        ):
+            raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
+        if restored_atime_ns // 100 == atime_ns // 100:
+            # Reading FILE_BASIC_INFO can itself leave a deferred access-time
+            # update. Make the publication's final action an atime-only write,
+            # with no later generator observation through this handle.
+            _windows_apply_handle_metadata_values(
+                handle,
+                mode=None,
+                regular=regular,
+                atime_ns=atime_ns,
+                mtime_ns=None,
+            )
+            return
+        if attempt < 2:
+            _windows_apply_handle_metadata_values(
+                handle,
+                mode=None,
+                regular=regular,
+                atime_ns=atime_ns,
+                mtime_ns=None,
+            )
+    raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
 
 def copy_entry_no_follow(source: Path, destination: Path) -> None:
     """Copy one entry recursively while preserving symlinks as symlinks."""
@@ -2251,9 +2592,8 @@ def restore_protected_directory_metadata(
                 else stat.S_IMODE(value.st_mode) != mode
             )
             or (
-                (value.st_atime_ns // 100 != atime_ns // 100)
-                if _windows_host()
-                else value.st_atime_ns != atime_ns
+                not _windows_host()
+                and value.st_atime_ns != atime_ns
             )
             or (
                 (value.st_mtime_ns // 100 != mtime_ns // 100)
@@ -2309,6 +2649,7 @@ def _apply_contained_directory_metadata(
             directory,
             directory=True,
             write_metadata=True,
+            desired_access=0x100 | 0x80,
         )
         try:
             opened = directory.lstat()
@@ -2323,29 +2664,17 @@ def _apply_contained_directory_metadata(
                 atime_ns=atime_ns,
                 mtime_ns=mtime_ns,
             )
-            restored = directory.lstat()
+            _verify_windows_metadata_values(
+                directory,
+                handle,
+                expected_type=stat.S_IFDIR,
+                mode=mode,
+                atime_ns=atime_ns,
+                mtime_ns=mtime_ns,
+                regular=False,
+            )
         finally:
             _windows_close_handle(handle)
-        if (
-            (
-                (restored.st_mode & stat.S_IWRITE != mode & stat.S_IWRITE)
-                if _windows_host()
-                else stat.S_IMODE(restored.st_mode) != mode
-            )
-            or (
-                (restored.st_atime_ns // 100 != atime_ns // 100)
-                if _windows_host()
-                else restored.st_atime_ns != atime_ns
-            )
-            or (
-                (restored.st_mtime_ns // 100 != mtime_ns // 100)
-                if _windows_host()
-                else restored.st_mtime_ns != mtime_ns
-            )
-        ):
-            raise FilesystemError(
-                f"Could not restore exact protected directory metadata: {directory}"
-            )
         return
     os.chmod(directory, mode, follow_symlinks=False)
     os.utime(directory, ns=(atime_ns, mtime_ns), follow_symlinks=False)

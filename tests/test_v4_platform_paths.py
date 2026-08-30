@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import stat
 import subprocess
 
 import pytest
@@ -118,8 +119,6 @@ def test_windows_junction_is_never_traversed_or_observed(tmp_path: Path) -> None
     sentinel.write_text("external remains\n", encoding="utf-8")
     os.utime(external, ns=(11_000_000_000, 12_000_000_000))
     os.utime(sentinel, ns=(13_000_000_000, 14_000_000_000))
-    expected_directory = external.lstat()
-    expected_sentinel = sentinel.lstat()
     observed = tmp_path / "observed"
     observed.mkdir()
     junction = observed / "junction"
@@ -130,6 +129,11 @@ def test_windows_junction_is_never_traversed_or_observed(tmp_path: Path) -> None
     )
     if result.returncode != 0:
         pytest.fail(f"Windows runner could not create the required junction: {result.stderr}")
+    # Creating a junction resolves its target and can itself advance the target
+    # directory's atime when NTFS last-access updates are enabled. Establish the
+    # generator-owned observation boundary only after the OS fixture exists.
+    expected_directory = external.lstat()
+    expected_sentinel = sentinel.lstat()
 
     assert entry_kind(junction) == "symlink"
     assert contained_entry_kind_no_follow(observed, junction) == "symlink"
@@ -292,36 +296,88 @@ def test_windows_copy_destination_cannot_be_replaced_before_metadata_publication
 @pytest.mark.skipif(os.name != "nt", reason="native Windows handle metadata contract")
 def test_windows_copy_preserves_exact_supported_file_and_directory_metadata(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
     file = source / "value.txt"
     file.write_text("value\n", encoding="utf-8")
-    os.utime(file, ns=(21_000_000_000, 22_000_000_000))
-    os.utime(source, ns=(23_000_000_000, 24_000_000_000))
+    os.utime(file, ns=(2_000_000_021_000_000_000, 22_000_000_000))
+    os.utime(source, ns=(2_000_000_023_000_000_000, 24_000_000_000))
     expected_file = file.lstat()
     expected_directory = source.lstat()
+    published: set[Path] = set()
+    published_file = False
+    original_verify = filesystem_module._verify_windows_entry_metadata
+    original_apply_descriptor = filesystem_module._apply_descriptor_metadata
+
+    def verify_published_metadata(path: Path, handle: int, metadata) -> None:
+        original_verify(path, handle, metadata)
+        attributes, atime_ns, mtime_ns = (
+            filesystem_module._windows_handle_metadata_values(handle)
+        )
+        assert atime_ns == metadata.st_atime_ns // 100 * 100
+        assert mtime_ns == metadata.st_mtime_ns // 100 * 100
+        if stat.S_ISREG(metadata.st_mode):
+            assert bool(attributes & 0x1) != bool(metadata.st_mode & stat.S_IWRITE)
+        filesystem_module._windows_apply_handle_metadata_values(
+            handle,
+            mode=None,
+            regular=stat.S_ISREG(metadata.st_mode),
+            atime_ns=metadata.st_atime_ns,
+            mtime_ns=None,
+        )
+        published.add(path)
+
+    def verify_published_file(descriptor: int, metadata) -> None:
+        nonlocal published_file
+        original_apply_descriptor(descriptor, metadata)
+        handle = filesystem_module._windows_descriptor_handle(descriptor)
+        attributes, atime_ns, mtime_ns = (
+            filesystem_module._windows_handle_metadata_values(handle)
+        )
+        assert atime_ns == metadata.st_atime_ns // 100 * 100
+        assert mtime_ns == metadata.st_mtime_ns // 100 * 100
+        assert bool(attributes & 0x1) != bool(metadata.st_mode & stat.S_IWRITE)
+        filesystem_module._windows_apply_handle_metadata_values(
+            handle,
+            mode=None,
+            regular=True,
+            atime_ns=metadata.st_atime_ns,
+            mtime_ns=None,
+        )
+        published_file = True
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_verify_windows_entry_metadata",
+        verify_published_metadata,
+    )
+    monkeypatch.setattr(
+        filesystem_module,
+        "_apply_descriptor_metadata",
+        verify_published_file,
+    )
 
     destination = tmp_path / "destination"
     copy_entry_no_follow(source, destination)
 
-    copied_file = (destination / "value.txt").lstat()
     copied_directory = destination.lstat()
+    copied_file = (destination / "value.txt").lstat()
+    assert published == {destination}
+    assert published_file
     assert (
         copied_file.st_mode,
-        copied_file.st_atime_ns,
         copied_file.st_mtime_ns,
     ) == (
         expected_file.st_mode,
-        expected_file.st_atime_ns,
         expected_file.st_mtime_ns,
     )
     assert (
         copied_directory.st_mode,
-        copied_directory.st_atime_ns,
         copied_directory.st_mtime_ns,
     ) == (
         expected_directory.st_mode,
-        expected_directory.st_atime_ns,
         expected_directory.st_mtime_ns,
     )
+    assert (destination / "value.txt").read_bytes() == file.read_bytes()
