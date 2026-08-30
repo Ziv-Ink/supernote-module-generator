@@ -10,6 +10,7 @@ import pytest
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.diagnostics import relevant_diagnostic_lines
 from supernote_module_generator.diagnostics import write_process_diagnostics
+from supernote_module_generator.errors import FilesystemError
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.feature_operations import FeatureOperationService
 from supernote_module_generator.filesystem import (
@@ -168,6 +169,72 @@ def test_javascript_validation_reports_node_launch_failure(
     assert issue.path == "local_modules/alpha/index.js"
     assert issue.message == (
         "Node.js syntax validation could not run: Node launch denied"
+    )
+
+
+def test_javascript_validation_rejects_symlink_without_invoking_node(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = canonical_plugin(tmp_path)
+    javascript = root / "local_modules/alpha/index.js"
+    javascript.unlink()
+    javascript.symlink_to(root / "package.json")
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.shutil.which",
+        lambda _name: "node-test",
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Node must not inspect an unsafe artifact")
+        ),
+    )
+
+    result = V4Validator(root).validate()
+
+    assert result.status == "failure"
+    issue = next(
+        item
+        for item in result.issues
+        if item.code == "SNV4_JAVASCRIPT_CHECK_FAILED"
+    )
+    assert issue.path == "local_modules/alpha/index.js"
+    assert issue.message == (
+        "Generated JavaScript is unsafe or unreadable: "
+        "expected a regular file without links, found symlink"
+    )
+
+
+def test_javascript_validation_reports_unreadable_artifact_without_node(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = canonical_plugin(tmp_path)
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.shutil.which",
+        lambda _name: "node-test",
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.read_regular_bytes_no_follow",
+        lambda _path: (_ for _ in ()).throw(FilesystemError("access denied")),
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.v4_validation.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Node must not inspect an unreadable artifact")
+        ),
+    )
+
+    result = V4Validator(root).validate()
+
+    assert result.status == "failure"
+    issue = next(
+        item
+        for item in result.issues
+        if item.code == "SNV4_JAVASCRIPT_CHECK_FAILED"
+    )
+    assert issue.path == "local_modules/alpha/index.js"
+    assert issue.message == (
+        "Generated JavaScript is unsafe or unreadable: access denied"
     )
 
 

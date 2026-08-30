@@ -8,9 +8,10 @@ import shutil
 import stat
 import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable, Dict, Iterable, List, Optional, cast
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, cast
 
 from . import filesystem as filesystem_ops
 from .errors import ConcurrentSourceMutation, FilesystemError, PartialFailure
@@ -86,6 +87,7 @@ class TransactionCleanupError(FilesystemError):
         super().__init__(message)
         self.recovery_path = recovery_path
         self.interrupted = interrupted
+        self.cleanup_failures: tuple[BaseException, ...] = ()
 
 
 def _hash_path(path: Path) -> Optional[str]:
@@ -2753,82 +2755,78 @@ class Transaction:
         opened_handles: list[int] = []
         prepared: list[_WindowsConditionalReplacement] = []
         parent_authority: dict[str, Dict[str, object]] = {}
-        try:
-            self._prepare_windows_conditional_replacements(
-                replacements,
-                modules,
-                entry_count_before,
-                opened,
-                opened_handles,
-                prepared,
-                parent_authority,
-            )
+        with self._windows_conditional_identity_scope(opened, opened_handles):
+            try:
+                self._prepare_windows_conditional_replacements(
+                    replacements,
+                    modules,
+                    entry_count_before,
+                    opened,
+                    opened_handles,
+                    prepared,
+                    parent_authority,
+                )
 
-            self._windows_conditional_descriptors.extend(opened)
-            opened.clear()
-            self._windows_conditional_handles.extend(opened_handles)
-            opened_handles.clear()
-            self.data["conditional_destination_parents"] = [
-                parent_authority[key] for key in sorted(parent_authority)
-            ]
-            self._entries().extend(item.entry for item in prepared)
-            self.data["mutated"] = True
-            self._authorize_entries()
-            _write_windows_conditional_retention_authority(
-                modules,
-                self.identifier,
-                self.data["conditional_destination_parents"],
-            )
-
-            for item in prepared:
-                self._conditional_batch_activated = True
-                self._rename_windows_descriptor_checked(
-                    item.live_descriptor,
-                    item.prepared.destination,
-                    item.restore,
-                    item.restore_parent_handle,
-                )
-            for item in prepared:
-                self._rename_windows_descriptor_checked(
-                    item.staged_descriptor,
-                    item.prepared.staged,
-                    item.prepared.destination,
-                    item.destination_parent_handle,
-                )
-            if not _conditional_destination_parents_match(self.root, self.data):
-                raise ConcurrentSourceMutation(
-                    "Destination parent changed before conditional finalization"
-                )
-            self._release_windows_conditional_descriptors()
-        except BaseException as exc:
-            restored = self._restore_windows_conditional_batch(prepared)
-            if restored:
-                del self._entries()[entry_count_before:]
-                self.data["mutated"] = previous_mutated
-                self.data["conditional_destination_parents"] = []
-                self._conditional_batch_activated = False
+                self._windows_conditional_descriptors.extend(opened)
+                opened.clear()
+                self._windows_conditional_handles.extend(opened_handles)
+                opened_handles.clear()
+                self.data["conditional_destination_parents"] = [
+                    parent_authority[key] for key in sorted(parent_authority)
+                ]
+                self._entries().extend(item.entry for item in prepared)
+                self.data["mutated"] = True
                 self._authorize_entries()
-                try:
-                    (modules / PurePosixPath(
-                        CONDITIONAL_RETENTION_AUTHORITY_NAME
-                    ).name).unlink()
-                except FileNotFoundError:
-                    pass
-            else:
-                self.retain_conflict()
-            self._release_windows_conditional_descriptors()
-            for descriptor in reversed(opened):
-                _close_descriptor(descriptor)
-            for handle in reversed(opened_handles):
-                _windows_close_handle(handle)
-            if restored:
-                raise
-            raise TransactionCleanupError(
-                "Windows conditional replacement could not restore its exact "
-                "retained identities",
-                recovery_path=self.journal_path,
-                interrupted=isinstance(exc, KeyboardInterrupt),
-            ) from exc
+                _write_windows_conditional_retention_authority(
+                    modules,
+                    self.identifier,
+                    self.data["conditional_destination_parents"],
+                )
+
+                for item in prepared:
+                    self._conditional_batch_activated = True
+                    self._rename_windows_descriptor_checked(
+                        item.live_descriptor,
+                        item.prepared.destination,
+                        item.restore,
+                        item.restore_parent_handle,
+                    )
+                for item in prepared:
+                    self._rename_windows_descriptor_checked(
+                        item.staged_descriptor,
+                        item.prepared.staged,
+                        item.prepared.destination,
+                        item.destination_parent_handle,
+                    )
+                if not _conditional_destination_parents_match(self.root, self.data):
+                    raise ConcurrentSourceMutation(
+                        "Destination parent changed before conditional finalization"
+                    )
+                self._release_windows_conditional_descriptors()
+            except BaseException as exc:
+                restored = self._restore_windows_conditional_batch(prepared)
+                if restored:
+                    del self._entries()[entry_count_before:]
+                    self.data["mutated"] = previous_mutated
+                    self.data["conditional_destination_parents"] = []
+                    self._conditional_batch_activated = False
+                    self._authorize_entries()
+                    try:
+                        (modules / PurePosixPath(
+                            CONDITIONAL_RETENTION_AUTHORITY_NAME
+                        ).name).unlink()
+                    except FileNotFoundError:
+                        pass
+                else:
+                    self.retain_conflict()
+                if restored:
+                    raise
+                raise TransactionCleanupError(
+                    "Windows conditional replacement could not restore its exact "
+                    "retained identities",
+                    recovery_path=self.journal_path,
+                    interrupted=isinstance(exc, KeyboardInterrupt),
+                ) from exc
 
     def _prepare_windows_conditional_replacements(
         self,
@@ -2991,23 +2989,81 @@ class Transaction:
         return restored
 
     def _release_windows_conditional_descriptors(self) -> None:
-        first_error: BaseException | None = None
-        while self._windows_conditional_descriptors:
-            descriptor = self._windows_conditional_descriptors.pop()
-            try:
-                _close_descriptor(descriptor)
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
-        while self._windows_conditional_handles:
-            handle = self._windows_conditional_handles.pop()
-            try:
-                _windows_close_handle(handle)
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
+        failures = self._drain_windows_conditional_identities([], [])
+        if failures:
+            primary = failures[0]
+            self._record_windows_cleanup_failures(primary, failures[1:])
+            raise primary
+
+    @contextmanager
+    def _windows_conditional_identity_scope(
+        self,
+        opened: list[int],
+        opened_handles: list[int],
+    ) -> Iterator[None]:
+        """Unconditionally drain every conditional identity without masking failure."""
+
+        primary: BaseException | None = None
+        try:
+            yield
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            failures = self._drain_windows_conditional_identities(
+                opened,
+                opened_handles,
+            )
+            if failures:
+                if primary is not None:
+                    self._record_windows_cleanup_failures(primary, failures)
+                else:
+                    cleanup = TransactionCleanupError(
+                        "Windows conditional identity cleanup failed: "
+                        + "; ".join(
+                            f"{type(item).__name__}: {item}" for item in failures
+                        ),
+                        recovery_path=self.journal_path,
+                    )
+                    cleanup.cleanup_failures = failures
+                    raise cleanup from failures[0]
+
+    def _drain_windows_conditional_identities(
+        self,
+        opened: list[int],
+        opened_handles: list[int],
+    ) -> tuple[BaseException, ...]:
+        """Close transaction-owned and local identities, attempting every close."""
+
+        failures: list[BaseException] = []
+        collections = (
+            (self._windows_conditional_descriptors, _close_descriptor),
+            (self._windows_conditional_handles, _windows_close_handle),
+            (opened, _close_descriptor),
+            (opened_handles, _windows_close_handle),
+        )
+        for identities, close in collections:
+            while identities:
+                identity = identities.pop()
+                try:
+                    close(identity)
+                except BaseException as exc:
+                    failures.append(exc)
+        return tuple(failures)
+
+    @staticmethod
+    def _record_windows_cleanup_failures(
+        primary: BaseException,
+        failures: Iterable[BaseException],
+    ) -> None:
+        """Attach secondary close failures while preserving the active exception."""
+
+        combined = (
+            *getattr(primary, "cleanup_failures", ()),
+            *tuple(failures),
+        )
+        if combined:
+            setattr(primary, "cleanup_failures", combined)
 
     def _prepare_regular_replacements(
         self,

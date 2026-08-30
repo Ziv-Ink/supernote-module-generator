@@ -2798,3 +2798,186 @@ def test_windows_conditional_descriptor_release_reports_first_close_failure(
     assert closed_handles == [92, 91]
     assert transaction._windows_conditional_descriptors == []
     assert transaction._windows_conditional_handles == []
+
+
+def test_windows_conditional_reset_failure_still_drains_owned_identities(
+    tmp_path: Path,
+    monkeypatch,
+):
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    closed_descriptors: list[int] = []
+    closed_handles: list[int] = []
+    authorization_calls = 0
+
+    def prepare(
+        _replacements,
+        _modules,
+        _entry_count,
+        opened,
+        opened_handles,
+        _prepared,
+        _parent_authority,
+    ) -> None:
+        opened.extend((70, 71))
+        opened_handles.extend((700, 701, 702))
+
+    def authorize() -> None:
+        nonlocal authorization_calls
+        authorization_calls += 1
+        if authorization_calls == 2:
+            raise OSError("journal reset failed")
+
+    monkeypatch.setattr(
+        transaction,
+        "_prepare_windows_conditional_replacements",
+        prepare,
+    )
+    monkeypatch.setattr(transaction, "_authorize_entries", authorize)
+    monkeypatch.setattr(
+        transaction_module,
+        "_write_windows_conditional_retention_authority",
+        lambda *_args: (_ for _ in ()).throw(OSError("publication failed")),
+    )
+    monkeypatch.setattr(
+        transaction,
+        "_restore_windows_conditional_batch",
+        lambda _prepared: True,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_close_descriptor",
+        closed_descriptors.append,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_close_handle",
+        closed_handles.append,
+    )
+
+    with pytest.raises(OSError, match="journal reset failed"):
+        transaction._replace_windows_regular_batch_if_matches(())
+
+    assert closed_descriptors == [71, 70]
+    assert closed_handles == [702, 701, 700]
+    assert transaction._windows_conditional_descriptors == []
+    assert transaction._windows_conditional_handles == []
+
+
+def test_windows_conditional_conflict_retention_failure_drains_owned_identities(
+    tmp_path: Path,
+    monkeypatch,
+):
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    closed_descriptors: list[int] = []
+    closed_handles: list[int] = []
+
+    def prepare(
+        _replacements,
+        _modules,
+        _entry_count,
+        opened,
+        opened_handles,
+        _prepared,
+        _parent_authority,
+    ) -> None:
+        opened.extend((70, 71))
+        opened_handles.extend((700, 701, 702))
+
+    monkeypatch.setattr(
+        transaction,
+        "_prepare_windows_conditional_replacements",
+        prepare,
+    )
+    monkeypatch.setattr(transaction, "_authorize_entries", lambda: None)
+    monkeypatch.setattr(
+        transaction_module,
+        "_write_windows_conditional_retention_authority",
+        lambda *_args: (_ for _ in ()).throw(OSError("publication failed")),
+    )
+    monkeypatch.setattr(
+        transaction,
+        "_restore_windows_conditional_batch",
+        lambda _prepared: False,
+    )
+    monkeypatch.setattr(
+        transaction,
+        "retain_conflict",
+        lambda: (_ for _ in ()).throw(OSError("conflict retention failed")),
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_close_descriptor",
+        closed_descriptors.append,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_close_handle",
+        closed_handles.append,
+    )
+
+    with pytest.raises(OSError, match="conflict retention failed"):
+        transaction._replace_windows_regular_batch_if_matches(())
+
+    assert closed_descriptors == [71, 70]
+    assert closed_handles == [702, 701, 700]
+    assert transaction._windows_conditional_descriptors == []
+    assert transaction._windows_conditional_handles == []
+
+
+def test_windows_conditional_local_close_failure_preserves_primary_and_drains_all(
+    tmp_path: Path,
+    monkeypatch,
+):
+    transaction = Transaction(tmp_path, "update", ["safe"])
+    closed_descriptors: list[int] = []
+    closed_handles: list[int] = []
+
+    def prepare(
+        _replacements,
+        _modules,
+        _entry_count,
+        opened,
+        opened_handles,
+        _prepared,
+        _parent_authority,
+    ) -> None:
+        opened.extend((70, 71))
+        opened_handles.extend((700, 701, 702))
+        raise OSError("prepare failed")
+
+    def close_descriptor(descriptor: int) -> None:
+        closed_descriptors.append(descriptor)
+        if descriptor == 71:
+            raise OSError("descriptor close failed")
+
+    monkeypatch.setattr(
+        transaction,
+        "_prepare_windows_conditional_replacements",
+        prepare,
+    )
+    monkeypatch.setattr(transaction, "_authorize_entries", lambda: None)
+    monkeypatch.setattr(
+        transaction,
+        "_restore_windows_conditional_batch",
+        lambda _prepared: True,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_close_descriptor",
+        close_descriptor,
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_windows_close_handle",
+        closed_handles.append,
+    )
+
+    with pytest.raises(OSError, match="prepare failed") as caught:
+        transaction._replace_windows_regular_batch_if_matches(())
+
+    assert closed_descriptors == [71, 70]
+    assert closed_handles == [702, 701, 700]
+    assert len(caught.value.cleanup_failures) == 1
+    assert str(caught.value.cleanup_failures[0]) == "descriptor close failed"
+    assert transaction._windows_conditional_descriptors == []
+    assert transaction._windows_conditional_handles == []

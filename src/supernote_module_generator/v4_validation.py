@@ -10,7 +10,9 @@ import time
 from typing import Dict, Iterable, Mapping, Tuple
 
 from .diagnostics import relevant_diagnostic_lines, write_process_diagnostics
+from .errors import FilesystemError
 from .filesystem import (
+    contained_entry_kind_no_follow,
     protected_directory_metadata,
     read_regular_bytes_no_follow,
     restore_protected_directory_metadata,
@@ -22,7 +24,7 @@ from .generation_service import GenerationService
 from .jvm_manifest import JvmSourceManifest
 from .models import SubprocessError
 from .platform_tools import gradle_wrapper_command, gradle_wrapper_path
-from .project_model import ProjectModel
+from .project_model import ProjectFeature, ProjectModel
 from .project import dependency_link_path, dependency_value, read_parent_package
 from .semantic import SemanticApi
 from .subprocesses import run_process
@@ -394,10 +396,33 @@ class V4Validator:
         issues = []
         for feature in project.features:
             path = feature.root / "index.js"
-            if not path.is_file():
+            relative = path.relative_to(self.root).as_posix()
+            try:
+                kind = contained_entry_kind_no_follow(self.root, path)
+            except FilesystemError as exc:
+                issues.append(
+                    self._javascript_access_issue(feature, relative, str(exc))
+                )
+                continue
+            if kind is None:
+                continue
+            if kind != "file":
+                issues.append(
+                    self._javascript_access_issue(
+                        feature,
+                        relative,
+                        f"expected a regular file without links, found {kind}",
+                    )
+                )
                 continue
             try:
                 content, _metadata = read_regular_bytes_no_follow(path)
+            except FilesystemError as exc:
+                issues.append(
+                    self._javascript_access_issue(feature, relative, str(exc))
+                )
+                continue
+            try:
                 result = subprocess.run(
                     [node, "--input-type=module", "--check", "-"],
                     input=content,
@@ -412,7 +437,7 @@ class V4Validator:
                         "generated artifact",
                         f"Node.js syntax validation could not run: {exc}",
                         feature_id=feature.identity.feature_id,
-                        path=path.relative_to(self.root).as_posix(),
+                        path=relative,
                         suggested_command=(
                             "Restore a working Node.js installation, then rerun "
                             "supernote-module check."
@@ -431,11 +456,27 @@ class V4Validator:
                         "generated artifact",
                         _javascript_diagnostic(diagnostic),
                         feature_id=feature.identity.feature_id,
-                        path=path.relative_to(self.root).as_posix(),
+                        path=relative,
                         suggested_command="supernote-module update --all",
                     )
                 )
         return tuple(issues)
+
+    @staticmethod
+    def _javascript_access_issue(
+        feature: ProjectFeature,
+        relative: str,
+        detail: str,
+    ) -> ValidationIssue:
+        return ValidationIssue(
+            "SNV4_JAVASCRIPT_CHECK_FAILED",
+            "error",
+            "generated artifact",
+            f"Generated JavaScript is unsafe or unreadable: {detail}",
+            feature_id=feature.identity.feature_id,
+            path=relative,
+            suggested_command="supernote-module update --all",
+        )
 
 
 def _feature_for_path(features: Mapping[str, object], path: str):
