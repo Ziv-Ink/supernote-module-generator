@@ -299,11 +299,9 @@ def _windows_open_no_follow_handle(
         raise OSError("Windows handle operations are unavailable")
     ancestor_handles = _windows_retain_non_reparse_ancestors(path)
     if directory:
-        desired_access = 0x1 | 0x80  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
+        desired_access = 0x80 | (0x100 if write_metadata else 0x1)
     else:
-        desired_access = 0x80000000 | 0x80  # GENERIC_READ | FILE_READ_ATTRIBUTES
-    if write_metadata:
-        desired_access |= 0x100  # FILE_WRITE_ATTRIBUTES
+        desired_access = 0x80000000 | 0x80 | (0x100 if write_metadata else 0)
     try:
         ancestor_generations = _WINDOWS_AUTHORITY.capture_raw_generations(
             tuple(ancestor_handles)

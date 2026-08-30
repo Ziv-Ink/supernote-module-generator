@@ -11,6 +11,8 @@ from typing import Dict, Iterable, Mapping, Tuple
 
 from .diagnostics import relevant_diagnostic_lines, write_process_diagnostics
 from .filesystem import (
+    _windows_api_path,
+    _windows_host,
     protected_directory_metadata,
     restore_protected_directory_metadata,
     source_tree_changes,
@@ -395,13 +397,16 @@ class V4Validator:
             path = feature.root / "index.js"
             if not path.is_file():
                 continue
-            result = subprocess.run(
-                [node, "--check", path.relative_to(self.root).as_posix()],
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            target_path = _windows_api_path(path) if _windows_host() else str(path)
+            try:
+                result = subprocess.run(
+                    [node, "--check", target_path],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError:
+                continue
             if result.returncode:
                 diagnostic = (result.stderr or result.stdout).strip().splitlines()
                 issues.append(
