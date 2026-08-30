@@ -141,12 +141,41 @@ For the initial publisher configuration, use:
 
 The workflow uses OpenID Connect and a short-lived credential.
 
+For the first publication, when the PyPI project does not exist yet, configure
+those exact values as a pending publisher from the PyPI account publishing
+page. The GitHub `pypi` environment must already exist. Keep repository and
+environment secret lists free of `PYPI_TOKEN`, passwords, and other long-lived
+publication credentials.
+
+Immediately before configuring the pending publisher, verify that the project
+name is still unclaimed:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://pypi.org/pypi/sn-module-gen/json
+```
+
+For the initial release the expected response is `404`. Stop if the response is
+anything else until project ownership and contents have been reviewed.
+
+## GitHub presentation
+
+Keep the repository URL and the `main` default branch. Before release, confirm
+that the public description names `sn-module-gen` and that the topics include
+`sn-module-gen`, `supernote`, `code-generator`, `python`, `android`, `cpp`,
+`kotlin`, `jni`, `jsi`, `react-native`, and `pypi`. The default-branch README
+and the live Wiki must describe the same public `0.1.0` contract before the tag
+is created.
+
 ## Publish
 
-Confirm `main` CI is green and the version is not already present on PyPI. Run
+Confirm `main` CI is green and `0.1.0` is not already present on PyPI. Run
 any required device canary for loader or lifecycle changes and link its evidence
-from the release notes. Then create a GitHub release whose tag exactly matches
-the package version:
+from the release notes. Review `maintainers/release-notes-v0.1.0.md`; it must
+continue to identify this as the first public release and must not promise
+pre-public migration. Create the signed or annotated `v0.1.0` tag from the
+approved release SHA, push that exact tag, and then create the GitHub release
+from the existing tag:
 
 The dated pre-public V4 qualification baseline is retained in
 [`device-evidence/v4-device-canary-2026-08-27.md`](device-evidence/v4-device-canary-2026-08-27.md).
@@ -154,18 +183,25 @@ A later loader, lifecycle, PluginHost, or firmware change requires new evidence;
 do not reuse this record as proof for a different candidate or target.
 
 ```bash
-gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
+git tag --annotate v0.1.0 "$RELEASE_SHA" --message 'sn-module-gen 0.1.0'
+git push origin v0.1.0
+gh release create v0.1.0 --verify-tag \
+  --title 'sn-module-gen 0.1.0' \
+  --notes-file maintainers/release-notes-v0.1.0.md
 ```
 
-Set `VERSION` to the version being released. The workflow rejects a release tag
-that does not exactly match the version embedded in the package.
+Set `RELEASE_SHA` to the independently approved exact commit. The workflow
+rejects every tag except `v0.1.0`, verifies that it matches the embedded package
+version, and refuses prerelease publication.
 
 Publishing the release runs `.github/workflows/publish.yml`. The reusable
 quality workflow checks out `github.sha`, verifies that exact checkout, runs the
 complete Python/static/package/generated-Android matrix, and builds the release
 artifacts once. Only after every job passes does the isolated publishing job
-download the SHA-named artifact, obtain the PyPI credential, and upload it.
-The publishing job never rebuilds an unqualified artifact.
+download the SHA-named artifact and its SHA-256 provenance, verify both again,
+obtain the PyPI credential, and upload it. A separate least-privilege job attaches
+the same qualified wheel, source distribution, checksums, and provenance JSON to
+the GitHub release. The publishing job never rebuilds an unqualified artifact.
 
 ## Verify the public release
 
@@ -184,3 +220,22 @@ Set `VERSION` to the version being verified.
 PyPI does not permit replacing a file or reusing a published version. If an
 artifact is wrong, increment the version, rebuild from a clean checkout, and
 publish a new release with corrective notes.
+
+## Retire the pre-public PyPI distribution
+
+Do this only after `sn-module-gen==0.1.0` installs from production PyPI and the
+public CLI and generated-plugin smoke checks pass. Until then, leave
+`supernote-module-generator` unchanged.
+
+In the PyPI management UI for `supernote-module-generator`, yank every release
+with this exact reason:
+
+```text
+Pre-public development package; replaced by sn-module-gen
+```
+
+Do not delete the project or its files, and do not upload a redirect package.
+After yanking, use a fresh environment and verify that an ordinary unpinned
+`pip install supernote-module-generator` no longer selects an unyanked release.
+An explicit pin may still select a yanked file; that does not justify deleting
+the retained provenance history.

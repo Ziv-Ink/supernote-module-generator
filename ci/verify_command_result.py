@@ -32,7 +32,7 @@ def verify(path: Path, expectation: str) -> None:
         if not isinstance(validation, dict) or validation.get("build") != "passed":
             raise ValueError("check did not report a passed Android build")
         if value.get("issues") != []:
-            raise ValueError("check reported V4 validation issues")
+            raise ValueError("check reported public validation issues")
     else:
         raise ValueError(f"unknown command-result expectation: {expectation}")
 

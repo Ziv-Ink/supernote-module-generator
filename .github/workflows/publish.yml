@@ -1,34 +1,112 @@
-name: Publish to PyPI
+name: Publish sn-module-gen to PyPI
 
 on:
   release:
     types: [published]
 
+permissions: {}
+
 jobs:
+  release-contract:
+    name: Verify first-public release event
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the exact stable release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          test "$RELEASE_TAG" = "v0.1.0"
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$RELEASE_PRERELEASE" = "false"
+
   qualify:
     name: Qualify exact release commit
+    needs: release-contract
     uses: ./.github/workflows/quality.yml
     with:
       release_tag: ${{ github.event.release.tag_name }}
     permissions:
       contents: read
 
-  publish:
-    name: Publish release to PyPI
+  release-assets:
+    name: Attach qualified release assets
     needs: qualify
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/supernote-module-generator/
     permissions:
-      id-token: write
+      contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify exact source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
       - name: Retrieve release distributions
         uses: actions/download-artifact@v8
         with:
           name: python-package-distributions-${{ github.sha }}
           path: dist/
-      - name: Publish release distributions
+      - name: Retrieve release provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-provenance-${{ github.sha }}
+          path: provenance/
+      - name: Verify qualified release provenance
+        run: >-
+          python ci/release_provenance.py verify
+          dist provenance
+          --repository "$GITHUB_REPOSITORY"
+          --commit "$GITHUB_SHA"
+      - name: Attach qualified distributions and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload "$RELEASE_TAG"
+          dist/*.whl dist/*.tar.gz
+          provenance/SHA256SUMS provenance/release-provenance.json
+          --repo "$GITHUB_REPOSITORY"
+          --clobber
+
+  publish:
+    name: Publish qualified release to PyPI
+    needs: [qualify, release-assets]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/sn-module-gen/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify exact source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions-${{ github.sha }}
+          path: dist/
+      - name: Retrieve release provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-provenance-${{ github.sha }}
+          path: provenance/
+      - name: Verify qualified release provenance
+        run: >-
+          python ci/release_provenance.py verify
+          dist provenance
+          --repository "$GITHUB_REPOSITORY"
+          --commit "$GITHUB_SHA"
+      - name: Publish qualified release distributions
         uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           packages-dir: dist/

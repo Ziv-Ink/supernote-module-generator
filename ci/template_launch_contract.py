@@ -39,7 +39,7 @@ def verify_template(template_root: Path) -> None:
 
 
 def sync_template(template_root: Path) -> None:
-    """Apply the packaged V4 capability to one disposable template checkout."""
+    """Apply the packaged capability to one disposable template checkout."""
 
     for relative in TEMPLATE_SCRIPT_PATHS:
         path = template_root / relative

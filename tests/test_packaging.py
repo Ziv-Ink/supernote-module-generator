@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import os
 import shutil
@@ -164,7 +166,13 @@ def test_pypi_release_uses_scoped_trusted_publishing():
 
     assert "release:" in workflow
     assert "types: [published]" in workflow
+    assert "permissions: {}" in workflow
+    assert "Require the exact stable release tag" in workflow
+    assert 'test "$RELEASE_TAG" = "v0.1.0"' in workflow
+    assert 'test "$RELEASE_PRERELEASE" = "false"' in workflow
     assert "name: pypi" in workflow
+    assert "url: https://pypi.org/project/sn-module-gen/" in workflow
+    assert "https://pypi.org/project/supernote-module-generator/" not in workflow
     assert "id-token: write" in workflow
     assert "pypa/gh-action-pypi-publish@v1.14.2" in workflow
     assert "password:" not in workflow
@@ -173,11 +181,21 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "release_tag: ${{ github.event.release.tag_name }}" in workflow
     assert "needs: qualify" in workflow
     assert "python-package-distributions-${{ github.sha }}" in workflow
+    assert "python-package-provenance-${{ github.sha }}" in workflow
+    assert "release_provenance.py verify" in workflow
+    assert "gh release upload" in workflow
+    assert "--clobber" in workflow
+    assert "provenance/SHA256SUMS" in workflow
+    assert "provenance/release-provenance.json" in workflow
     assert "Build wheel and source distribution" not in workflow
     assert "uses: ./.github/workflows/quality.yml" in ci
     assert "ref: ${{ github.sha }}" in quality
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in quality
     assert "Release tag ${RELEASE_TAG} does not match package version" in quality
+    assert "EXPECTED_RELEASE_TAG: v0.1.0" in quality
+    assert "release_provenance.py record" in quality
+    assert "ci/release_provenance.py" in quality
+    assert "python-package-provenance-${{ github.sha }}" in quality
     assert "Install wheel in a clean environment" in quality
     assert "Install and smoke the source distribution" in quality
     assert "pip install --no-deps --no-build-isolation" in quality
@@ -192,6 +210,130 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "npm run build" in quality
     assert "npm run verify" in quality
     assert "Stable 2.0.0 is blocked" not in workflow
+
+
+def test_release_provenance_records_and_reverifies_built_distributions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(
+        ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".pytest_cache",
+            "__pycache__",
+            "*.pyc",
+            "build",
+            "dist",
+            "*.egg-info",
+        ),
+    )
+    dist = tmp_path / "dist"
+    subprocess.run(
+        (sys.executable, "-m", "build", "--no-isolation", "--outdir", str(dist)),
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    provenance = tmp_path / "provenance"
+    commit = "a" * 40
+    command = (
+        sys.executable,
+        str(source / "ci/release_provenance.py"),
+        "record",
+        str(dist),
+        str(provenance),
+        "--repository",
+        "Ziv-Ink/supernote-module-generator",
+        "--commit",
+        commit,
+    )
+    subprocess.run(command, cwd=source, check=True)
+
+    manifest = json.loads(
+        (provenance / "release-provenance.json").read_text(encoding="utf-8")
+    )
+    assert manifest["schema_version"] == "1.0"
+    assert manifest["repository"] == "Ziv-Ink/supernote-module-generator"
+    assert manifest["source_commit"] == commit
+    assert manifest["distribution"] == "sn-module-gen"
+    assert manifest["version"] == "0.1.0"
+    assert manifest["release_tag"] == "v0.1.0"
+    assert {artifact["filename"] for artifact in manifest["artifacts"]} == {
+        "sn_module_gen-0.1.0-py3-none-any.whl",
+        "sn_module_gen-0.1.0.tar.gz",
+    }
+    for artifact in manifest["artifacts"]:
+        path = dist / artifact["filename"]
+        assert artifact["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert artifact["size"] == path.stat().st_size
+
+    subprocess.run(
+        (
+            sys.executable,
+            str(source / "ci/release_provenance.py"),
+            "verify",
+            str(dist),
+            str(provenance),
+            "--repository",
+            "Ziv-Ink/supernote-module-generator",
+            "--commit",
+            commit,
+        ),
+        cwd=source,
+        check=True,
+    )
+    (provenance / "SHA256SUMS").write_text("tampered\n", encoding="utf-8")
+    failed = subprocess.run(
+        (
+            sys.executable,
+            str(source / "ci/release_provenance.py"),
+            "verify",
+            str(dist),
+            str(provenance),
+            "--repository",
+            "Ziv-Ink/supernote-module-generator",
+            "--commit",
+            commit,
+        ),
+        cwd=source,
+        capture_output=True,
+        text=True,
+    )
+    assert failed.returncode != 0
+    assert "checksum manifest does not match" in failed.stderr
+
+
+def test_initial_release_notes_and_old_distribution_retirement_are_bounded():
+    notes = (ROOT / "maintainers/release-notes-v0.1.0.md").read_text(
+        encoding="utf-8"
+    )
+    guide = (ROOT / "maintainers/releasing.md").read_text(encoding="utf-8")
+
+    assert "first public release" in notes
+    assert "does not provide migration or compatibility" in " ".join(notes.split())
+    assert "--notes-file maintainers/release-notes-v0.1.0.md" in guide
+    assert "only after `sn-module-gen==0.1.0` installs" in guide
+    assert "Pre-public development package; replaced by sn-module-gen" in guide
+    assert "Do not delete the project" in guide
+    assert "do not upload a redirect package" in guide
+    for topic in (
+        "sn-module-gen",
+        "supernote",
+        "code-generator",
+        "python",
+        "android",
+        "cpp",
+        "kotlin",
+        "jni",
+        "jsi",
+        "react-native",
+        "pypi",
+    ):
+        assert f"`{topic}`" in guide
 
 
 def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(

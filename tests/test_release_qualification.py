@@ -295,7 +295,7 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     assert "supernote-module-generator-wiki.bundle" in quality
     assert "file_reader_test-9f626ed.bundle" in quality
     assert "9f626ed39be82b43ff74eb735d10b7de61f51508" in quality
-    assert "Verify pinned V4 Wiki commit" in quality
+    assert "Verify pinned Wiki commit" in quality
     assert "run_wiki_acceptance.py" in quality
     wiki_runner = quality.index("generator/ci/run_wiki_acceptance.py")
     assert '"$RUNNER_TEMP/generator-venv/bin/python"' in quality[

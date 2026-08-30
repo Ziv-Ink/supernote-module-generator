@@ -1,4 +1,4 @@
-name: V4 quality gates
+name: Public release quality gates
 
 on:
   workflow_call:
@@ -15,7 +15,9 @@ permissions:
 env:
   SUPERNOTE_TEMPLATE_COMMIT: af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f
   SUPERNOTE_WIKI_COMMIT: da2ab8afeb416d2695206d36d3e628cd620420fe
+  EXPECTED_RELEASE_TAG: v0.1.0
   DISTRIBUTION_ARTIFACT: python-package-distributions-${{ github.sha }}
+  PROVENANCE_ARTIFACT: python-package-provenance-${{ github.sha }}
 
 jobs:
   test:
@@ -60,12 +62,13 @@ jobs:
             src/supernote_module_generator/binding_codegen.py \
             src/supernote_module_generator/template_contract.py \
             src/supernote_module_generator/windows_authority.py \
+            ci/release_provenance.py \
             --select C901
       - name: Ratchet filesystem safety-boundary complexity
         run: python ci/check_filesystem_complexity.py
       - name: Ratchet transaction and generation orchestration complexity
         run: python ci/check_transaction_complexity.py
-      - name: Run gradual V4 boundary typing checks
+      - name: Run gradual public boundary typing checks
         run: python -m mypy
       - name: Compile every Python source and test module
         run: python -m compileall -q src tests ci
@@ -143,7 +146,7 @@ jobs:
           python ci/scaffold_release_fixture.py
           official-template/@supernote-plugin/sn-plugin-template/template
           platform-plugin
-      - name: Apply the packaged V4 template capability
+      - name: Apply the packaged template capability
         run: >-
           python ci/template_launch_contract.py sync platform-plugin
       - name: Verify Bash and PowerShell launch-contract parity
@@ -250,6 +253,10 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           version="$(PYTHONPATH=src python -c 'from supernote_module_generator import __version__; print(__version__)')"
+          test "$RELEASE_TAG" = "$EXPECTED_RELEASE_TAG" || {
+            echo "Release tag ${RELEASE_TAG} is not the approved first-public tag ${EXPECTED_RELEASE_TAG}." >&2
+            exit 1
+          }
           test "$RELEASE_TAG" = "v${version}" || {
             echo "Release tag ${RELEASE_TAG} does not match package version v${version}." >&2
             exit 1
@@ -258,6 +265,13 @@ jobs:
         run: python -m build
       - name: Validate package metadata
         run: python -m twine check dist/*
+      - name: Record exact release provenance
+        run: >-
+          python ci/release_provenance.py record
+          dist
+          "${{ runner.temp }}/release-provenance"
+          --repository "$GITHUB_REPOSITORY"
+          --commit "$GITHUB_SHA"
       - name: Install wheel in a clean environment
         run: |
           python -m venv "$RUNNER_TEMP/wheel-smoke"
@@ -282,6 +296,13 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 1
+      - name: Store exact-commit release provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PROVENANCE_ARTIFACT }}
+          path: ${{ runner.temp }}/release-provenance/
+          if-no-files-found: error
+          retention-days: 7
 
   android-fixture:
     name: Generated Android plugin
@@ -307,7 +328,7 @@ jobs:
         run: >-
           git clone generator/ci/fixtures/supernote-module-generator-wiki.bundle
           official-wiki
-      - name: Verify pinned V4 Wiki commit
+      - name: Verify pinned Wiki commit
         working-directory: official-wiki
         run: test "$(git rev-parse HEAD)" = "$SUPERNOTE_WIKI_COMMIT"
       - uses: actions/setup-python@v7
@@ -347,13 +368,13 @@ jobs:
         run: npm install --ignore-scripts
       - name: Generate C++ and Kotlin release examples
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
-          "$SUPERNOTE_MODULE_COMMAND" add readme-cpp \
+          "$SN_MODULE_GEN_COMMAND" add readme-cpp \
             --starter cpp --javascript-name ReadmeCpp \
             --android-namespace com.example.readme_cpp --skip-install --yes
-          "$SUPERNOTE_MODULE_COMMAND" add readme-jvm \
+          "$SN_MODULE_GEN_COMMAND" add readme-jvm \
             --starter kotlin --javascript-name ReadmeJvm \
             --android-namespace com.example.readme_jvm --skip-install --yes
           cd ..
@@ -361,15 +382,15 @@ jobs:
             generator/README.md release-plugin
           cd release-plugin
           npm install --ignore-scripts
-          "$SUPERNOTE_MODULE_COMMAND" update --all --skip-install --yes
-          "$SUPERNOTE_MODULE_COMMAND" template sync --yes
-          "$SUPERNOTE_MODULE_COMMAND" template status
+          "$SN_MODULE_GEN_COMMAND" update --all --skip-install --yes
+          "$SN_MODULE_GEN_COMMAND" template sync --yes
+          "$SN_MODULE_GEN_COMMAND" template status
       - name: Prove canonical no-op and generated JavaScript/TypeScript quality
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
-          "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
+          "$SN_MODULE_GEN_COMMAND" --json update --all --skip-install --yes \
             > "$RUNNER_TEMP/update-result.json"
           npm run lint -- --max-warnings=0
           npx tsc --noEmit
@@ -378,10 +399,10 @@ jobs:
             "$RUNNER_TEMP/update-result.json"
       - name: Compile Gradle KSP Kotlin CMake JNI and JSI read-only
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd release-plugin
-          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
+          "$SN_MODULE_GEN_COMMAND" --json check --build \
             > "$RUNNER_TEMP/check-result.json"
           cd ..
           python generator/ci/verify_command_result.py check-build \
@@ -389,7 +410,7 @@ jobs:
       - name: Build and verify the installable plugin package
         working-directory: release-plugin
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -402,29 +423,29 @@ jobs:
           npm install --ignore-scripts
       - name: Audit pinned Wiki commands and run the public CLI scenario
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           "$RUNNER_TEMP/generator-venv/bin/python" \
             generator/ci/run_wiki_acceptance.py \
             official-wiki \
             generator/README.md \
             wiki-plugin \
-            "$SUPERNOTE_MODULE_COMMAND" \
+            "$SN_MODULE_GEN_COMMAND" \
             "$RUNNER_TEMP/documented-commands.json"
           cd wiki-plugin
           git init
-          git config user.name 'V4 release qualification'
+          git config user.name 'Public release qualification'
           git config user.email 'release-qualification@example.invalid'
           git add -A
           git commit -m 'Wiki acceptance baseline'
       - name: Prove the Wiki project is canonical and source-read-only
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           cd wiki-plugin
-          "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
+          "$SN_MODULE_GEN_COMMAND" --json update --all --skip-install --yes \
             > "$RUNNER_TEMP/wiki-update-result.json"
-          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
+          "$SN_MODULE_GEN_COMMAND" --json check --build \
             > "$RUNNER_TEMP/wiki-check-result.json"
           npm run lint -- --max-warnings=0
           npx tsc --noEmit
@@ -437,7 +458,7 @@ jobs:
       - name: Build and verify the Wiki acceptance package
         working-directory: wiki-plugin
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -523,16 +544,16 @@ jobs:
               encoding="utf-8",
           )
           PY
-          git config user.name 'V4 real-project qualification'
+          git config user.name 'Public real-project qualification'
           git config user.email 'release-qualification@example.invalid'
           git add -A
-          git commit -m 'V4 disposable acceptance baseline'
+          git commit -m 'Disposable public acceptance baseline'
       - name: Prove read-only build and generated-source quality
         working-directory: file-reader-test
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
-          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
+          "$SN_MODULE_GEN_COMMAND" --json check --build \
             > "$RUNNER_TEMP/file-reader-check.json"
           npm run lint -- --max-warnings=0
           npx tsc --noEmit
@@ -542,7 +563,7 @@ jobs:
       - name: Build and verify the real-project package
         working-directory: file-reader-test
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           npm run build
           npm run verify
@@ -574,12 +595,12 @@ jobs:
           npm --prefix bounded-doc install --ignore-scripts
       - name: Compile and package both bounded host contexts
         env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+          SN_MODULE_GEN_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
         run: |
           for project in bounded-note bounded-doc; do
             npm --prefix "$project" run lint -- --max-warnings=0
             (cd "$project" && npx tsc --noEmit)
-            (cd "$project" && "$SUPERNOTE_MODULE_COMMAND" --json check --build \
+            (cd "$project" && "$SN_MODULE_GEN_COMMAND" --json check --build \
               > "$RUNNER_TEMP/${project}-check.json")
             python generator/ci/verify_command_result.py check-build \
               "$RUNNER_TEMP/${project}-check.json"

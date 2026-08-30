@@ -130,7 +130,7 @@ def materialize(
         json.dumps(
             {
                 "name": label,
-                "desc": "Bounded V4 NOTE/DOC final acceptance fixture",
+                "desc": "Bounded public NOTE/DOC final acceptance fixture",
                 "iconPath": "",
                 "versionName": "1.0.0",
                 "versionCode": "1",

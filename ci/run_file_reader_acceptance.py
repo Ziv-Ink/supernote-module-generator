@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run non-migration V4 scenarios against the pinned file_reader_test clone."""
+"""Run public non-migration scenarios against the pinned file_reader_test clone."""
 from __future__ import annotations
 
 import argparse
@@ -146,10 +146,10 @@ def run(
 
     completed: list[str] = []
 
-    # 7.1: clean V4 generation from the exact real-project revision.
+    # 7.1: clean public generation from the exact real-project revision.
     _add(project, executable, "auditprobe")
     _generator(project, executable, ("update", "--all", "--skip-install", "--yes"))
-    completed.append("7.1-clean-v4-generation")
+    completed.append("7.1-clean-public-generation")
 
     # 7.2: both supported native object implementation styles.
     _add(project, executable, "header-split")
