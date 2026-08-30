@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit every public CLI example and execute the bounded Wiki scenario."""
+"""Audit every public command/output record and execute the bounded Wiki scenario."""
 from __future__ import annotations
 
 import argparse
@@ -9,32 +9,70 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 from supernote_module_generator.arguments import parse_arguments
 
 
 START = "<!-- sn-module-gen-release-commands:start -->"
 END = "<!-- sn-module-gen-release-commands:end -->"
-SHELL_FENCE = re.compile(r"^```(?:bash|sh|shell|powershell|pwsh)?\s*$", re.I)
+FENCE_START = re.compile(r"^```([a-z0-9_+-]*)\s*$", re.I)
+# Source-language fences are code examples. Shell and text/console fences are
+# the command/output records that this documentation gate inventories.
+SHELL_FENCES = {"", "bash", "sh", "shell", "powershell", "pwsh"}
+OUTPUT_FENCES = {"text", "console"}
 PLACEHOLDER = re.compile(r"(?:<[^>]+>|\[[^]]+\]|\{\{[^}]+\}\})")
 MARKDOWN_LINK = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
+
+HOST_COMMAND_GATES = {
+    "python": "manual-host-setup",
+    "python3": "manual-host-setup",
+    "py": "manual-host-setup",
+    "pip": "manual-host-setup",
+    "pip3": "manual-host-setup",
+    "pwd": "manual-host-inspection",
+    "ls": "manual-host-inspection",
+    "get-location": "manual-host-inspection",
+    "get-item": "manual-host-inspection",
+    "git": "manual-source-inspection",
+    "npm": "generated-and-real-project-dependency-gates",
+    "yarn": "generated-and-real-project-dependency-gates",
+    "npx": "generated-and-real-project-dependency-gates",
+    "node": "generated-and-real-project-javascript-gates",
+    "java": "manual-host-toolchain-diagnostics",
+    "echo": "manual-host-toolchain-diagnostics",
+    "export": "manual-host-toolchain-configuration",
+    "find": "manual-generated-source-inspection",
+}
+ANDROID_DEVICE_COMMANDS = {
+    "adb",
+    "./android/gradlew",
+    ".androidgradlew.bat",
+    "bash",
+    "powershell",
+}
 
 
 @dataclass(frozen=True)
 class DocumentedCommand:
     source: str
     line: int
+    fence: str
+    text: str
     argv: tuple[str, ...]
     classification: str
+    execution_gate: Optional[str]
     reason: str
 
     def manifest(self) -> dict[str, object]:
         return {
             "source": self.source,
             "line": self.line,
+            "fence": self.fence,
+            "text": self.text,
             "argv": list(self.argv),
             "classification": self.classification,
+            "execution_gate": self.execution_gate,
             "reason": self.reason,
         }
 
@@ -45,7 +83,7 @@ def _logical_commands(lines: Sequence[tuple[int, str]]) -> tuple[tuple[int, str]
     pending_line = 0
     for line_number, raw in lines:
         line = raw.strip()
-        if not line or line.startswith("#"):
+        if not line:
             continue
         if not pending:
             pending_line = line_number
@@ -60,64 +98,245 @@ def _logical_commands(lines: Sequence[tuple[int, str]]) -> tuple[tuple[int, str]
     return tuple(commands)
 
 
-def _fenced_shell_lines(page: Path) -> tuple[tuple[int, str], ...]:
-    selected: list[tuple[int, str]] = []
+def _audited_fences(
+    page: Path,
+) -> tuple[tuple[str, tuple[tuple[int, str], ...]], ...]:
+    selected: list[tuple[str, tuple[tuple[int, str], ...]]] = []
     in_fence = False
-    active = False
+    active_language = ""
+    audited = False
+    active_lines: list[tuple[int, str]] = []
     for line_number, raw in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
         stripped = raw.strip()
-        if stripped.startswith("```"):
-            if in_fence:
+        if in_fence:
+            if stripped == "```":
+                if audited:
+                    selected.append((active_language, tuple(active_lines)))
                 in_fence = False
-                active = False
-            else:
-                in_fence = True
-                active = SHELL_FENCE.fullmatch(stripped) is not None
+                active_language = ""
+                audited = False
+                active_lines = []
+            elif audited:
+                active_lines.append((line_number, raw))
             continue
-        if active:
-            selected.append((line_number, raw))
+        match = FENCE_START.fullmatch(stripped)
+        if match:
+            in_fence = True
+            active_language = match.group(1).lower()
+            audited = active_language in SHELL_FENCES | OUTPUT_FENCES
+    if in_fence:
+        raise ValueError(f"{page.name}: unclosed {active_language or 'shell'} fence")
     return tuple(selected)
 
 
-def _classification(source: str, argv: tuple[str, ...]) -> tuple[str, str]:
-    joined = " ".join(argv)
-    if PLACEHOLDER.search(joined):
-        return "placeholder", "contains a documented value placeholder"
-    if len(argv) == 1:
-        return "interactive", "opens the guided interface"
-    if argv[1] in {"--version", "--help", "help"} or "--help" in argv[2:]:
-        return "smoke", "safe exact command executed by the documentation gate"
-    if "--build" in argv:
-        return "android", "executed by the generated and real-project Android gates"
-    if argv[1] == "doctor":
-        return "environment", "host-dependent capability probe"
-    if argv[1] in {"add", "update", "remove"} and not any(
-        flag in argv for flag in ("--yes", "-y", "--dry-run")
+def _generator_gate(source: str, argv: tuple[str, ...]) -> str:
+    if len(argv) > 1 and (
+        argv[1] in {"--version", "--help", "help"} or "--help" in argv[2:]
     ):
-        return "interactive", "requires an explicit decision in documentation use"
+        return "documentation-smoke"
+    if "--build" in argv:
+        return "generated-and-real-project-android-gates"
+    if len(argv) > 1 and argv[1] == "doctor":
+        return "host-environment-qualification"
     if source.endswith("Getting-Started.md") and "wiki-feature" in argv:
-        return "scenario", "executed in order by the bounded Wiki acceptance scenario"
-    return "project", "grammar-checked here and exercised by disposable project gates"
+        return "bounded-wiki-scenario"
+    if len(argv) == 1 or (
+        len(argv) > 1
+        and argv[1] in {"add", "update", "remove"}
+        and not any(flag in argv for flag in ("--yes", "-y", "--dry-run"))
+    ):
+        return "manual-interactive-workflow"
+    return "disposable-project-gates"
+
+
+def _documented_record(
+    page: Path,
+    fence: str,
+    line: int,
+    source: str,
+    argv: tuple[str, ...],
+    classification: str,
+    execution_gate: Optional[str],
+    reason: str,
+) -> DocumentedCommand:
+    return DocumentedCommand(
+        page.name,
+        line,
+        fence or "shell",
+        source,
+        argv,
+        classification,
+        execution_gate,
+        reason,
+    )
+
+
+def _generator_record(
+    page: Path,
+    fence: str,
+    line: int,
+    source: str,
+    argv: tuple[str, ...],
+) -> DocumentedCommand:
+    if PLACEHOLDER.search(source):
+        return _documented_record(
+            page,
+            fence,
+            line,
+            source,
+            argv,
+            "placeholder",
+            None,
+            "generator example contains a documented value placeholder",
+        )
+    gate = _generator_gate(page.name, argv)
+    classification = "android_device" if "--build" in argv else "executable"
+    return _documented_record(
+        page,
+        fence,
+        line,
+        source,
+        argv,
+        classification,
+        gate,
+        "generator command is grammar-checked and assigned to its qualification gate",
+    )
+
+
+def _adb_record(
+    page: Path,
+    fence: str,
+    line: int,
+    source: str,
+    argv: tuple[str, ...],
+) -> DocumentedCommand:
+    reason = "device diagnostic is manual and requires an authorized connected device"
+    if PLACEHOLDER.search(source):
+        reason += "; the documented command also contains a value placeholder"
+    return _documented_record(
+        page,
+        fence,
+        line,
+        source,
+        argv,
+        "android_device",
+        "authorized-device-diagnostic",
+        reason,
+    )
+
+
+def _host_record(
+    page: Path,
+    fence: str,
+    line: int,
+    source: str,
+    argv: tuple[str, ...],
+) -> DocumentedCommand:
+    normalized_head = argv[0].lower()
+    gate = (
+        "manual-host-toolchain-diagnostics"
+        if normalized_head.startswith("$env:")
+        else HOST_COMMAND_GATES.get(normalized_head)
+    )
+    if gate is None:
+        raise ValueError(
+            f"{page.name}:{line}: unclassified {fence or 'shell'} fenced command: "
+            f"{argv[0]}"
+        )
+    if PLACEHOLDER.search(source):
+        return _documented_record(
+            page,
+            fence,
+            line,
+            source,
+            argv,
+            "placeholder",
+            None,
+            "host command contains a documented value placeholder",
+        )
+    return _documented_record(
+        page,
+        fence,
+        line,
+        source,
+        argv,
+        "executable",
+        gate,
+        "allowlisted host command is assigned to an explicit execution gate",
+    )
+
+
+def _shell_record(
+    page: Path,
+    fence: str,
+    line: int,
+    source: str,
+) -> DocumentedCommand:
+    stripped = source.removeprefix("$ ").strip()
+    if stripped.startswith("#"):
+        return _documented_record(
+            page,
+            fence,
+            line,
+            stripped,
+            (),
+            "explanatory_output",
+            None,
+            "shell-fence comment is explanatory and not runnable",
+        )
+    try:
+        argv = tuple(shlex.split(stripped, posix=True))
+    except ValueError as error:
+        raise ValueError(f"{page.name}:{line}: cannot parse fenced record: {error}") from error
+    if not argv:
+        raise ValueError(f"{page.name}:{line}: empty fenced record is not classified")
+    head = argv[0]
+    normalized_head = head.lower()
+    if head == "supernote-module":
+        raise ValueError(f"{page.name}:{line}: pre-public CLI command is not allowed")
+    if head == "sn-module-gen":
+        return _generator_record(page, fence, line, stripped, argv)
+    if normalized_head == "adb":
+        return _adb_record(page, fence, line, stripped, argv)
+    if normalized_head in ANDROID_DEVICE_COMMANDS:
+        return _documented_record(
+            page,
+            fence,
+            line,
+            stripped,
+            argv,
+            "android_device",
+            "generated-and-real-project-android-gates",
+            "Android build or packaging command is covered by exact-SHA project gates",
+        )
+    return _host_record(page, fence, line, stripped, argv)
 
 
 def scan_documented_commands(paths: Iterable[Path]) -> tuple[DocumentedCommand, ...]:
     commands: list[DocumentedCommand] = []
     for page in sorted(paths):
-        for line, source in _logical_commands(_fenced_shell_lines(page)):
-            stripped = source.removeprefix("$ ").strip()
-            argv = tuple(shlex.split(stripped, posix=True))
-            if not argv:
-                continue
-            if argv[0] == "supernote-module":
-                raise ValueError(
-                    f"{page.name}:{line}: pre-public CLI command is not allowed"
-                )
-            if argv[0] != "sn-module-gen":
-                continue
-            classification, reason = _classification(page.name, argv)
-            commands.append(
-                DocumentedCommand(page.name, line, argv, classification, reason)
+        for fence, lines in _audited_fences(page):
+            records = (
+                tuple((line, source.strip()) for line, source in lines if source.strip())
+                if fence in OUTPUT_FENCES
+                else _logical_commands(lines)
             )
+            for line, source in records:
+                if fence in OUTPUT_FENCES:
+                    commands.append(
+                        DocumentedCommand(
+                            page.name,
+                            line,
+                            fence,
+                            source.strip(),
+                            (),
+                            "explanatory_output",
+                            None,
+                            "text fence documents output or structure and is not runnable",
+                        )
+                    )
+                else:
+                    commands.append(_shell_record(page, fence, line, source))
     return tuple(commands)
 
 
@@ -176,12 +395,23 @@ def audit_commands(
     validate_wiki_links(wiki_root)
     commands = scan_documented_commands([readme, *wiki_root.glob("*.md")])
     if not commands:
-        raise ValueError("No public sn-module-gen examples were found")
+        raise ValueError("No public fenced command/output records were found")
     for command in commands:
-        if command.classification == "placeholder":
+        if not command.reason or (
+            command.classification in {"executable", "android_device"}
+            and not command.execution_gate
+        ):
+            raise ValueError(
+                f"{command.source}:{command.line}: classified record lacks gate or reason"
+            )
+        if (
+            command.classification == "placeholder"
+            or not command.argv
+            or command.argv[0] != "sn-module-gen"
+        ):
             continue
         parse_arguments(_grammar_arguments(command))
-        if command.classification == "smoke":
+        if command.execution_gate == "documentation-smoke":
             subprocess.run(
                 (generator_command, *command.argv[1:]),
                 check=True,
@@ -195,10 +425,10 @@ def audit_commands(
     output.write_text(
         json.dumps(
             {
-                "schema_version": "1.0",
-                "command_count": len(commands),
+                "schema_version": "1.1",
+                "record_count": len(commands),
                 "classifications": classifications,
-                "commands": [command.manifest() for command in commands],
+                "records": [command.manifest() for command in commands],
             },
             indent=2,
             sort_keys=True,

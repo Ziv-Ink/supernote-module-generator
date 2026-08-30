@@ -74,12 +74,14 @@ syntax, and the exact `npm run run` outcome against a fake ADB device. A tap is
 not runtime proof: without a plugin-specific marker the scripts must say that
 launch was attempted but runtime success was not verified.
 
-Every root README and Wiki CLI example is inventoried directly from its source,
-grammar-checked, and classified. Non-runnable placeholders and environment,
-Android, or device commands state the gate that covers them. The pinned Wiki's
-bounded stateful release-command block is additionally executed against a second
-disposable official-template project. That project must be a true generator
-no-op after generation, remain source-identical through `check --build`, pass
+Every root README and Wiki command/output record is inventoried directly from
+its source and classified. Only `sn-module-gen` arguments are grammar-checked;
+each executable or Android/device command names its execution gate, while each
+placeholder or explanatory-output record states why it is not runnable. The
+pinned Wiki's bounded stateful release-command block is additionally executed
+against a second disposable official-template project. That project must be a
+true generator no-op after generation, remain source-identical through
+`check --build`, pass
 lint and TypeScript, compile Gradle/KSP/Kotlin/CMake/JNI/JSI, and produce a
 package accepted by the official verifier.
 

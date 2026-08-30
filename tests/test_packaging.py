@@ -242,6 +242,7 @@ def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(
         "ci/device_acceptance/DeviceCounter.hpp",
         "ci/device_acceptance/FeatureApi.kt",
         "ci/device_acceptance/device_probe.cpp",
+        "maintainers/device-evidence/README.md",
         "maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/note-reactnative.log",
         "maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/doc-evidence.json",
         "maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/doc-allow-dialog.png",

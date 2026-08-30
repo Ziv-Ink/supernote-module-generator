@@ -52,14 +52,14 @@ contract.
 
 | Fact | Authoritative source | Secondary representation |
 | --- | --- | --- |
-| CLI grammar | `arguments.py` and tests | `helptext.py`, Wiki CLI and Automation page |
+| CLI grammar | `arguments.py` and tests | `helptext.py`, Wiki [Using the CLI](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Using-the-CLI) page |
 | Exact installed help | `helptext.py` | CLI route tests |
 | Generated paths/ownership | feature/runtime generators and `.supernote-module.json` | generated feature README |
 | Source signatures/types | C++ source projection and KSP JVM manifest frontend | root README examples |
 | Common API meaning | semantic model and its projection tests | generated TypeScript |
 | Runtime routes/lifetime | typed lowering plans and plugin runtime generator | architecture history summary |
-| Tool/device support | Wiki Requirements and Compatibility page with dated evidence | README summary |
-| First generated module | Wiki Add a Module page | concise README example and generated package links |
+| Tool/device support | Wiki [Getting Started](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Getting-Started) and [Troubleshooting](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting) pages with dated evidence | README summary |
+| First generated module | Wiki [Getting Started](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Getting-Started) page | concise README example and generated package links |
 | Release procedure | `maintainers/releasing.md` | publish workflow |
 
 Tests should assert observable behavior or a necessary safety invariant. They
@@ -104,8 +104,9 @@ build integration, or device compatibility:
       the available environment; label anything not run.
 - [ ] Check repository and Wiki links, page slugs, and stale moved-file
       references.
-- [ ] Update the Wiki Requirements and Compatibility page with evidence and date when a tool,
-      host, device, or policy claim changes.
+- [ ] Update the Wiki [Getting Started](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Getting-Started)
+      or [Troubleshooting](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)
+      page with evidence and date when a tool, host, device, or policy claim changes.
 - [ ] Add a user-visible note to `CHANGELOG.md` when released behavior changes.
 - [ ] Confirm that the change does not accidentally add V1 compatibility,
       conversion, migration-analysis, or source-rewriting behavior.

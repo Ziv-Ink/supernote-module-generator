@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -23,6 +24,7 @@ from supernote_module_generator.binding_codegen import scan_cpp_semantic_model
 from supernote_module_generator.arguments import parse_arguments
 from supernote_module_generator.feature_generator import FeatureConfig, stage_feature
 from supernote_module_generator.feature_model import StarterFamily
+from supernote_module_generator.helptext import COMMAND_HELP
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -287,7 +289,7 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
 
     assert "af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f" in quality
-    assert "caa8cead41427c4a0f19a602cafa361f22e9dcb0" in quality
+    assert "da2ab8afeb416d2695206d36d3e628cd620420fe" in quality
     assert "supernote-module-generator-wiki.bundle" in quality
     assert "file_reader_test-9f626ed.bundle" in quality
     assert "9f626ed39be82b43ff74eb735d10b7de61f51508" in quality
@@ -344,35 +346,99 @@ def test_self_contained_release_inputs_resolve_exact_revisions(tmp_path: Path) -
     subprocess.run(("git", "clone", str(project), str(tmp_path / "project")), check=True)
     assert subprocess.check_output(
         ("git", "-C", str(tmp_path / "wiki"), "rev-parse", "HEAD"), text=True
-    ).strip() == "caa8cead41427c4a0f19a602cafa361f22e9dcb0"
+    ).strip() == "da2ab8afeb416d2695206d36d3e628cd620420fe"
     assert subprocess.check_output(
         ("git", "-C", str(tmp_path / "project"), "rev-parse", "HEAD"), text=True
     ).strip() == "9f626ed39be82b43ff74eb735d10b7de61f51508"
 
 
-def test_every_readme_and_wiki_cli_example_is_source_classified(tmp_path: Path) -> None:
+def test_every_readme_and_wiki_command_output_record_is_source_classified(
+    tmp_path: Path,
+) -> None:
     bundle = ROOT / "ci/fixtures/supernote-module-generator-wiki.bundle"
     wiki = tmp_path / "wiki"
     subprocess.run(("git", "clone", str(bundle), str(wiki)), check=True)
-    commands = scan_documented_commands([ROOT / "README.md", *wiki.glob("*.md")])
+    records = scan_documented_commands([ROOT / "README.md", *wiki.glob("*.md")])
 
-    assert len(commands) >= 100
-    classifications = {command.classification for command in commands}
-    assert {"android", "project", "smoke"} <= classifications
-    assert all(command.reason for command in commands)
-    for command in commands:
-        if command.classification != "placeholder":
-            parse_arguments(list(command.argv[1:]))
+    assert len(records) >= 300
+    assert {record.classification for record in records} == {
+        "android_device",
+        "executable",
+        "explanatory_output",
+        "placeholder",
+    }
+    assert all(record.reason for record in records)
+    assert all(
+        record.execution_gate
+        for record in records
+        if record.classification in {"android_device", "executable"}
+    )
+    assert all(
+        record.execution_gate is None
+        for record in records
+        if record.classification in {"explanatory_output", "placeholder"}
+    )
+    for record in records:
+        if (
+            record.argv
+            and record.argv[0] == "sn-module-gen"
+            and record.classification != "placeholder"
+        ):
+            parse_arguments(list(record.argv[1:]))
+
+    by_source_and_text = {(record.source, record.text): record for record in records}
+    expected = {
+        ("Getting-Started.md", "python3 -m pip install --upgrade sn-module-gen"): (
+            "executable",
+            "manual-host-setup",
+        ),
+        ("Getting-Started.md", "Get-Location"): (
+            "executable",
+            "manual-host-inspection",
+        ),
+        ("Using-the-CLI.md", "npm install"): (
+            "executable",
+            "generated-and-real-project-dependency-gates",
+        ),
+        ("Troubleshooting.md", "./android/gradlew -version"): (
+            "android_device",
+            "generated-and-real-project-android-gates",
+        ),
+        (
+            "Troubleshooting.md",
+            "adb shell pidof com.ratta.supernote.pluginhost",
+        ): ("android_device", "authorized-device-diagnostic"),
+        ("Getting-Started.md", "PluginConfig.json"): (
+            "explanatory_output",
+            None,
+        ),
+        ("Troubleshooting.md", "# Linux"): (
+            "explanatory_output",
+            None,
+        ),
+        ("Using-the-CLI.md", "sn-module-gen add [PACKAGE] [options]"): (
+            "placeholder",
+            None,
+        ),
+    }
+    for key, classification in expected.items():
+        record = by_source_and_text[key]
+        assert (record.classification, record.execution_gate) == classification
 
 
-def test_pinned_wiki_audit_requires_public_source_argv(tmp_path: Path) -> None:
+def test_pinned_wiki_audit_inventories_commands_and_explanatory_output(
+    tmp_path: Path,
+) -> None:
     bundle = ROOT / "ci/fixtures/supernote-module-generator-wiki.bundle"
     wiki = tmp_path / "wiki"
     subprocess.run(("git", "clone", str(bundle), str(wiki)), check=True)
 
-    commands = scan_documented_commands([wiki / "Getting-Started.md"])
-    assert commands
-    assert all(command.argv[0] == "sn-module-gen" for command in commands)
+    records = scan_documented_commands([wiki / "Getting-Started.md"])
+    assert len(records) > 30
+    assert any(record.argv[:1] == ("sn-module-gen",) for record in records)
+    assert any(record.argv[:1] == ("python3",) for record in records)
+    assert any(record.fence == "powershell" for record in records)
+    assert any(record.classification == "explanatory_output" for record in records)
     assert read_commands(wiki / "Getting-Started.md")[0][0] == "sn-module-gen"
 
     output = tmp_path / "documented-commands.json"
@@ -388,8 +454,74 @@ def test_pinned_wiki_audit_requires_public_source_argv(tmp_path: Path) -> None:
     generator.chmod(0o755)
     audit_commands(wiki, ROOT / "README.md", str(generator), output)
     manifest = json.loads(output.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "1.0"
-    assert all(command["argv"][0] == "sn-module-gen" for command in manifest["commands"])
+    assert manifest["schema_version"] == "1.1"
+    assert manifest["record_count"] == len(manifest["records"])
+    assert {
+        record["classification"] for record in manifest["records"]
+    } == {"android_device", "executable", "explanatory_output", "placeholder"}
+    assert any(record["argv"][:1] == ["python3"] for record in manifest["records"])
+    assert any(
+        record["classification"] == "explanatory_output"
+        for record in manifest["records"]
+    )
+
+
+def test_pinned_wiki_doctor_adb_claim_matches_source_and_installed_help(
+    tmp_path: Path,
+) -> None:
+    bundle = ROOT / "ci/fixtures/supernote-module-generator-wiki.bundle"
+    wiki = tmp_path / "wiki"
+    subprocess.run(("git", "clone", str(bundle), str(wiki)), check=True)
+    expected = (
+        "Doctor selects an ADB executable and runs `adb version` as an advisory "
+        "host-tool probe. It does not connect to a device or certify PluginHost or "
+        "tablet behavior."
+    )
+    for name in ("Getting-Started.md", "Using-the-CLI.md", "Troubleshooting.md"):
+        normalized = " ".join((wiki / name).read_text(encoding="utf-8").split())
+        assert expected in normalized
+
+    doctor_source = (
+        ROOT / "src/supernote_module_generator/doctor.py"
+    ).read_text(encoding="utf-8")
+    assert 'command = [str(candidate), "version"]' in doctor_source
+    assert "passed, version, _ = self._probe(command)" in doctor_source
+    assert "configured ADB" in COMMAND_HELP["doctor"]
+    assert "device-tested states" in COMMAND_HELP["doctor"]
+
+
+def test_contributor_wiki_links_resolve_against_the_pinned_bundle(tmp_path: Path) -> None:
+    bundle = ROOT / "ci/fixtures/supernote-module-generator-wiki.bundle"
+    wiki = tmp_path / "wiki"
+    subprocess.run(("git", "clone", str(bundle), str(wiki)), check=True)
+    pages = {page.stem for page in wiki.glob("*.md")}
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    links = re.findall(
+        r"https://github\.com/Ziv-Ink/supernote-module-generator/wiki/([^\s)#]+)",
+        contributing,
+    )
+
+    assert links
+    assert set(links) <= pages
+    for stale_name in (
+        "CLI and Automation",
+        "Requirements and Compatibility",
+        "Add a Module",
+    ):
+        assert stale_name not in contributing
+
+
+def test_historical_device_evidence_index_maps_pre_public_v4_to_0_1_0() -> None:
+    index = (ROOT / "maintainers/device-evidence/README.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(index.split())
+
+    assert "V4 was that implementation's internal pre-public qualification codename" in normalized
+    assert "released publicly as `sn-module-gen` 0.1.0" in normalized
+    assert "Do not rewrite those records" in index
+    assert "v4-device-canary-2026-08-27.md" in index
+    assert "v4-bounded-note-doc-2026-08-27/" in index
 
 
 def test_wiki_acceptance_commands_are_bounded_and_source_backed(tmp_path: Path) -> None:
@@ -433,6 +565,13 @@ sn-module-gen check
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="pre-public CLI command"):
+        scan_documented_commands([page])
+
+    page.write_text(
+        "# Unknown command\n\n```bash\nmystery-tool audit\n```\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unclassified bash fenced command"):
         scan_documented_commands([page])
 
 
