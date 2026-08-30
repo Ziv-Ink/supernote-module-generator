@@ -123,6 +123,12 @@ def render_feature_readme(
             "Add, Update, and Android generation replace this README and `index.d.ts`.",
             "They preserve the C++, Kotlin, and Java implementation source.",
             "",
+            "Generator guides:",
+            "",
+            "- [Managing modules](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Managing-Modules)",
+            "- [Error handling](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Error-Handling)",
+            "- [Troubleshooting](https://github.com/Ziv-Ink/supernote-module-generator/wiki/Troubleshooting)",
+            "",
         )
     )
     return "\n".join(lines)

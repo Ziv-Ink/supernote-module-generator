@@ -1,12 +1,13 @@
-# ADR 0002: Preserve user-owned source symlinks in V4
+# ADR 0002: Preserve user-owned source symlinks
 
 - Status: Accepted
-- Scope: V4 discovery, staging, update, transaction rollback, and validation
+- Scope: Public generator discovery, staging, update, transaction rollback, and validation
 - Audit findings: CB-05, DR-03
 
 ## Decision
 
-V4 preserves POSIX file and directory symlinks in user-owned source trees.
+The generator preserves POSIX file and directory symlinks in user-owned source
+trees.
 
 - The link is preserved as a link; its target contents are not copied.
 - The exact target text returned by `readlink` is retained, including relative,
@@ -20,9 +21,9 @@ V4 preserves POSIX file and directory symlinks in user-owned source trees.
   managed parent cannot redirect a write outside the plugin.
 
 Windows support is capability-based. When the environment can create the
-required symlink kinds, V4 preserves them. When it cannot, preflight reports a
-platform-specific error. V4 never dereferences links as a compatibility
-fallback.
+required symlink kinds, the generator preserves them. When it cannot, preflight
+reports a platform-specific error. The generator never dereferences links as a
+compatibility fallback.
 
 ## Consequences
 

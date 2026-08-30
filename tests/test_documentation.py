@@ -15,18 +15,17 @@ from supernote_module_generator.helptext import COMMAND_HELP, ROOT_HELP
 ROOT = Path(__file__).resolve().parents[1]
 WIKI_ROOT = "https://github.com/Ziv-Ink/supernote-module-generator/wiki"
 WIKI_PAGES = {
-    "Add-a-Module",
-    "CLI-and-Automation",
-    "Choosing-a-Module",
-    "Compatibility",
-    "Export-Functions",
-    "Generated-Files-and-Integration",
+    "Error-Handling",
+    "Getting-Started",
     "Home",
-    "JNI-Modules",
     "JSI-Modules",
     "Kotlin-and-Java-Modules",
     "Managing-Modules",
+    "Native-JNI-Modules",
+    "Native-Objects-and-Values",
+    "Performance-and-Benchmarks",
     "Troubleshooting",
+    "Using-the-CLI",
 }
 
 
@@ -120,7 +119,7 @@ def test_wiki_links_use_known_task_pages():
             assert page in WIKI_PAGES
 
 
-def test_root_readme_explains_the_v4_public_model():
+def test_root_readme_explains_the_public_model():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     normalized_readme = " ".join(readme.split())
     opening = "\n".join(readme.splitlines()[:12])
@@ -159,7 +158,7 @@ def test_root_readme_explains_the_v4_public_model():
     assert len(readme.splitlines()) < 320
 
 
-def test_initial_v4_feature_readme_is_package_specific_and_generation_owned(
+def test_initial_feature_readme_is_package_specific_and_generation_owned(
     tmp_path: Path,
 ):
     from supernote_module_generator.feature_generator import (
@@ -187,13 +186,20 @@ def test_initial_v4_feature_readme_is_package_specific_and_generation_owned(
     assert "sn-module-gen update typed-feature" in readme
     assert "replace this README and `index.d.ts`" in readme
     assert "Cross-family native-object proxies" not in readme
+    assert "/wiki/Managing-Modules" in readme
+    assert "/wiki/Error-Handling" in readme
+    assert "/wiki/Troubleshooting" in readme
 
 
-def test_repository_docs_define_v4_architecture_without_migration_tooling():
-    architecture = (ROOT / "docs/V4-ARCHITECTURE.md").read_text()
-    assert "V4 architecture" in architecture
-    assert "V1, V2, and V3" in architecture
-    assert "provides no converter, migrator, compatibility mode, or downgrade" in architecture
+def test_repository_docs_define_public_architecture_without_migration_tooling():
+    architecture = (ROOT / "docs/ARCHITECTURE.md").read_text()
+    assert "public `sn-module-gen` architecture" in architecture
+    assert "Pre-public V1 through V4" in architecture
+    assert (
+        "provides no converter, migrator, compatibility mode, or downgrade"
+        in " ".join(architecture.split())
+    )
+    assert not (ROOT / "docs/V4-ARCHITECTURE.md").exists()
     assert "Cross-family object proxies" in architecture
     assert not (ROOT / "docs/V1-TO-V2-ARCHITECTURE.md").exists()
     assert not (ROOT / "docs/Add-a-Feature.md").exists()
@@ -204,15 +210,15 @@ def test_repository_docs_define_v4_architecture_without_migration_tooling():
     )
 
 
-def test_accepted_v4_policies_forbid_positive_legacy_migration_claims():
+def test_accepted_policies_forbid_positive_legacy_migration_claims():
     policies = (
-        ROOT / "architecture/decisions/0003-v4-owner-confirmed-policies.md"
+        ROOT / "architecture/decisions/0003-owner-confirmed-policies.md"
     ).read_text(encoding="utf-8")
     transactions = (
         ROOT / "architecture/decisions/0001-generated-ownership-and-transactions.md"
     ).read_text(encoding="utf-8")
 
-    assert "V1, V2, and V3 layouts are unsupported" in policies
+    assert "Pre-public V1 through V4 layouts are unsupported" in policies
     assert "does not provide migration" in policies
     assert "supports previewable transactional migration" not in policies
     assert "migration tests" not in transactions

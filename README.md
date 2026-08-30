@@ -93,7 +93,7 @@ with a Supernote marker.
 
 In C++, markers are exact source comments:
 
-<!-- snv4-release-example: readme-cpp android/src/main/cpp/feature.cpp -->
+<!-- sn-module-gen-release-example: readme-cpp android/src/main/cpp/feature.cpp -->
 ```cpp
 #include <cstddef>
 #include <cstdint>
@@ -119,7 +119,7 @@ void ordinaryHelper() {} // ignored
 
 For Kotlin and Java, use the generated annotations with the same names:
 
-<!-- snv4-release-example: readme-jvm android/src/main/java/com/example/readme_jvm/FeatureApi.kt -->
+<!-- sn-module-gen-release-example: readme-jvm android/src/main/java/com/example/readme_jvm/FeatureApi.kt -->
 ```kotlin
 package com.example.readme_jvm
 
@@ -148,7 +148,7 @@ code do not change the public API on their own.
 publishes members or construction by itself. Every JavaScript-visible function,
 method, field, and constructor requires its own explicit marker:
 
-<!-- snv4-release-example: readme-cpp android/src/main/cpp/FeatureTypes.hpp -->
+<!-- sn-module-gen-release-example: readme-cpp android/src/main/cpp/FeatureTypes.hpp -->
 ```cpp
 #pragma once
 
@@ -208,7 +208,7 @@ annotation.
 
 ## Supported types and copied values
 
-V4 supports these JavaScript and TypeScript mappings:
+The generator supports these JavaScript and TypeScript mappings:
 
 | Supernote value | JavaScript/TypeScript |
 | --- | --- |
@@ -311,7 +311,7 @@ installation, and device debugging are covered by the
 
 See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md)
 for development and validation rules and
-[V4 architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/V4-ARCHITECTURE.md)
+[Architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/ARCHITECTURE.md)
 for the runtime and type model.
 
 ## License

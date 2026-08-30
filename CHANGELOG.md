@@ -11,8 +11,8 @@ should also check their installed version with `sn-module-gen --version`.
 - First public release as the `sn-module-gen` distribution and command.
 - Rename the structured command-result resource to `command-result.schema.json`,
   reset that public envelope to schema `1.0`, and use `SNMG_*` diagnostics.
-- Generated runtime and persisted-project identities remain at their qualified
-  pre-public spellings until their separately reviewed transition.
+- Use neutral generated-runtime and persisted-project identities with public
+  schema version `1.0` throughout newly generated 0.1.0 projects.
 - No migration or compatibility support is provided for pre-public generated projects.
 
 The entries below record pre-public development history. Their original version

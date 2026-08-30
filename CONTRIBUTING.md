@@ -74,7 +74,7 @@ copyability, stream separation, machine output, keyboard safety, or recovery.
 - Integration tests cover CLI lifecycle behavior against temporary plugin
   roots, parent wiring, source preservation, rollback, and documentation
   artifacts.
-- Android fixture tests must compile the single plugin-level V4 runtime with
+- Android fixture tests must compile the single plugin-level generated runtime with
   mixed C/C++ and Kotlin/Java feature input. Do not describe Python-only tests
   or generated-text checks as Android compilation proof.
 - Device tests are relevant only when qualifying generated runtime integration,
@@ -160,7 +160,7 @@ global-function detection, source-family routing, and type/parameter syntax
 decisions have the same independent ceiling. The JSI binding-mode decision and
 complete binding frontend are also ratcheted now that all active binding phases
 are below the ceiling. Mypy is intentionally gradual: its checked-in file list
-covers the V4 identity, semantic types/IR, artifact-plan, integrity-manifest,
+covers the public identity, semantic types/IR, artifact-plan, integrity-manifest,
 C++ lexical, declaration, member-segmentation, member-decision, member-shape,
 class-definition, free-function, global-function, source-family, and type-syntax
 source models, JSI binding decisions, transaction, command-result, and public CLI
@@ -176,8 +176,8 @@ validation tier completed.
 - `README.md` is a short product entry point; the separate GitHub Wiki contains
   generator-specific user guidance.
 - `CONTRIBUTING.md` is contributor documentation.
-- `docs/V4-ARCHITECTURE.md` records the contributor-facing V4 model and the
-  deliberate rejection of V1, V2, and V3 generated layouts.
+- `docs/ARCHITECTURE.md` records the contributor-facing public model and the
+  deliberate rejection of pre-public V1 through V4 generated layouts.
 - `maintainers/` contains release/operation procedures.
 - Historical tags and Git history preserve earlier implementation baselines.
   They create no legacy maintenance, migration, or compatibility contract.

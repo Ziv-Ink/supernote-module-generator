@@ -9,7 +9,7 @@ import re
 
 
 MARKER = re.compile(
-    r"<!-- snv4-release-example: (?P<feature>[a-z0-9-]+) "
+    r"<!-- sn-module-gen-release-example: (?P<feature>[a-z0-9-]+) "
     r"(?P<path>[^ ]+) -->\n"
     r"```(?P<language>[a-z0-9+.-]+)\n(?P<source>.*?)```",
     re.DOTALL,

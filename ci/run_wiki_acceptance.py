@@ -14,10 +14,11 @@ from typing import Iterable, Sequence
 from supernote_module_generator.arguments import parse_arguments
 
 
-START = "<!-- snv4-release-commands:start -->"
-END = "<!-- snv4-release-commands:end -->"
+START = "<!-- sn-module-gen-release-commands:start -->"
+END = "<!-- sn-module-gen-release-commands:end -->"
 SHELL_FENCE = re.compile(r"^```(?:bash|sh|shell|powershell|pwsh)?\s*$", re.I)
 PLACEHOLDER = re.compile(r"(?:<[^>]+>|\[[^]]+\]|\{\{[^}]+\}\})")
+MARKDOWN_LINK = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 
 
 @dataclass(frozen=True)
@@ -79,11 +80,6 @@ def _fenced_shell_lines(page: Path) -> tuple[tuple[int, str], ...]:
 
 
 def _classification(source: str, argv: tuple[str, ...]) -> tuple[str, str]:
-    if argv[0] == "supernote-module":
-        return (
-            "legacy-documentation-deferred",
-            "pinned pre-public Wiki command preserved verbatim until Checkpoint 3",
-        )
     joined = " ".join(argv)
     if PLACEHOLDER.search(joined):
         return "placeholder", "contains a documented value placeholder"
@@ -109,14 +105,55 @@ def scan_documented_commands(paths: Iterable[Path]) -> tuple[DocumentedCommand, 
     for page in sorted(paths):
         for line, source in _logical_commands(_fenced_shell_lines(page)):
             stripped = source.removeprefix("$ ").strip()
-            if not stripped.startswith(("sn-module-gen", "supernote-module")):
-                continue
             argv = tuple(shlex.split(stripped, posix=True))
+            if not argv:
+                continue
+            if argv[0] == "supernote-module":
+                raise ValueError(
+                    f"{page.name}:{line}: pre-public CLI command is not allowed"
+                )
+            if argv[0] != "sn-module-gen":
+                continue
             classification, reason = _classification(page.name, argv)
             commands.append(
                 DocumentedCommand(page.name, line, argv, classification, reason)
             )
     return tuple(commands)
+
+
+def _heading_anchors(page: Path) -> set[str]:
+    anchors: set[str] = set()
+    duplicates: dict[str, int] = {}
+    for raw in page.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^#{1,6}\s+(.+?)\s*#*$", raw)
+        if not match:
+            continue
+        heading = re.sub(r"[`*_]", "", match.group(1)).lower()
+        heading = re.sub(r"[^\w\s-]", "", heading)
+        base = re.sub(r"\s+", "-", heading.strip())
+        count = duplicates.get(base, 0)
+        duplicates[base] = count + 1
+        anchors.add(base if count == 0 else f"{base}-{count}")
+    return anchors
+
+
+def validate_wiki_links(wiki_root: Path) -> None:
+    pages = {page.stem: page for page in wiki_root.glob("*.md")}
+    for source in pages.values():
+        for raw_target in MARKDOWN_LINK.findall(source.read_text(encoding="utf-8")):
+            target = raw_target.strip().strip("<>")
+            if not target or "://" in target or target.startswith("mailto:"):
+                continue
+            page_name, separator, anchor = target.partition("#")
+            target_page = source if not page_name else pages.get(
+                page_name.removesuffix(".md")
+            )
+            if target_page is None:
+                raise ValueError(f"{source.name}: broken Wiki link to {raw_target}")
+            if separator and anchor not in _heading_anchors(target_page):
+                raise ValueError(
+                    f"{source.name}: broken Wiki heading link to {raw_target}"
+                )
 
 
 def _grammar_arguments(command: DocumentedCommand) -> list[str]:
@@ -136,11 +173,12 @@ def audit_commands(
     generator_command: str,
     output: Path,
 ) -> tuple[DocumentedCommand, ...]:
+    validate_wiki_links(wiki_root)
     commands = scan_documented_commands([readme, *wiki_root.glob("*.md")])
     if not commands:
         raise ValueError("No public sn-module-gen examples were found")
     for command in commands:
-        if command.classification == "legacy-documentation-deferred":
+        if command.classification == "placeholder":
             continue
         parse_arguments(_grammar_arguments(command))
         if command.classification == "smoke":
@@ -157,7 +195,7 @@ def audit_commands(
     output.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": "1.0",
                 "command_count": len(commands),
                 "classifications": classifications,
                 "commands": [command.manifest() for command in commands],
@@ -189,7 +227,7 @@ def read_commands(page: Path) -> tuple[tuple[str, ...], ...]:
     if not commands:
         raise ValueError("Wiki release command block is empty")
     for command in commands:
-        if not command or command[0] not in {"sn-module-gen", "supernote-module"}:
+        if not command or command[0] != "sn-module-gen":
             raise ValueError("Wiki release commands may invoke only a documented generator CLI")
     return commands
 

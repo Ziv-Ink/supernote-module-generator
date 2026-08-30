@@ -1,21 +1,22 @@
-# V4 architecture
+# Architecture
 
-This document summarizes the V4 architecture for contributors. V1, V2, and V3
-generated layouts are unsupported; V4 rejects recognizable legacy state before
-mutation and provides no converter, migrator, compatibility mode, or downgrade.
+This document summarizes the public `sn-module-gen` architecture for
+contributors. Pre-public V1 through V4 generated layouts are unsupported; the
+generator rejects recognizable legacy state before mutation and provides no
+converter, migrator, compatibility mode, or downgrade.
 
-## Deliberate clean V4 boundary
+## Deliberate clean public boundary
 
-V4 uses the existing Python distribution (`supernote-module-generator`) and CLI
-command (`supernote-module`). Historical tags preserve earlier development
+The public product uses the Python distribution and CLI command
+`sn-module-gen`. Historical tags preserve earlier development
 baselines, but no prior implementation, schema, template, generated layout, or
 runtime contract remains active solely for compatibility. Create or regenerate
-a clean V4 project when legacy state is detected.
+a clean 0.1.0 project when legacy state is detected.
 
 ## Logical features replace backend-specific modules
 
-Earlier generators asked developers to create backend-specific module types. V4 asks
-which starter source families to scaffold:
+Earlier generators asked developers to create backend-specific module types.
+The public generator asks which starter source families to scaffold:
 
 ```text
 C/C++ (native)
@@ -32,7 +33,7 @@ second React Native bridge frontend.
 
 ## Source facts, API meaning, and routes are separate
 
-The V4 pipeline is:
+The generation pipeline is:
 
 ```text
 language source model
@@ -48,12 +49,12 @@ C++, or Kotlin backend fields.
 
 ## First-class objects and explicit intent
 
-V4 represents declared native instances as nominal, runtime-local JavaScript
-objects with stable identity, automatic lifetime management, and live marked
-fields. Declared value types are validated copied data. Arbitrary JavaScript
-object graphs are not accepted.
+The generator represents declared native instances as nominal, runtime-local
+JavaScript objects with stable identity, automatic lifetime management, and
+live marked fields. Declared value types are validated copied data. Arbitrary
+JavaScript object graphs are not accepted.
 
-V4 ignores ordinary code regardless of language visibility.
+The generator ignores ordinary code regardless of language visibility.
 `SupernotePluginExport` publishes a declaration to JavaScript,
 `SupernotePluginInternal` creates hidden generated routing,
 `SupernotePluginAsync` selects async Supernote semantics, and
@@ -65,10 +66,10 @@ types are valid. There is no automatic-member compatibility mode.
 
 ## One generated runtime per plugin
 
-V4 generates one plugin-level native build component containing shared runtime services and
-all generated feature bindings. Logical features remain independent ownership
-units, but they do not compile separate worker pools, JVM services, or runtime
-singletons.
+The generator creates one plugin-level native build component containing
+shared runtime services and all generated feature bindings. Logical features
+remain independent ownership units, but they do not compile separate worker
+pools, JVM services, or runtime singletons.
 
 Each installed JavaScript runtime gets a generation-identified RuntimeSession;
 each feature gets a child FeatureSession. Background work never stores a
@@ -141,12 +142,13 @@ are deferred without changing the public JavaScript or TypeScript model.
 
 Earlier parsers, code generation, JSI HostFunction/HostObject patterns, shared
 ownership, transactions, diagnostics, build knowledge, KSP/JNI machinery,
-tests, and regression history remain useful only when they satisfy V4 decisions.
+tests, and regression history remain useful only when they satisfy the current
+public decisions.
 
 ## Static contract boundaries
 
 The checked-in Ruff gate applies Python correctness checks to all active source
-and tests. The gradual mypy boundary covers the public CLI grammar, canonical V4
+and tests. The gradual mypy boundary covers the public CLI grammar and identity,
 identity, semantic IR, artifact plan, integrity manifest, descriptor-bound
 filesystem observation, generation-bound Windows handle authority,
 recovery-registry schema, transaction engine, template
@@ -204,7 +206,7 @@ ordered header/source parser handoff. The routing module is independently typed
 and complexity-ratcheted.
 
 C/C++ declaration intent is a separate typed phase over that lexical model. It
-recognizes the exact V4 marker grammar, groups adjacent marker stacks, validates
+recognizes the exact public marker grammar, groups adjacent marker stacks, validates
 marker combinations and source locations, and resolves the named namespace at
 each declaration. Source-path and module formatting remain in the binding
 frontend, so this low-level parser has no command, rendering, or filesystem
@@ -317,8 +319,8 @@ the binding frontend.
 The active class path is the versioned declaration/member pipeline described
 above. There is no parallel legacy object parser behind the public scanner:
 the obsolete disconnected object-export/member parser was removed after its
-call graph was proven unreachable. V1, V2, and V3 layouts are rejected at the
-project boundary rather than kept alive as alternate source parsers.
+call graph was proven unreachable. Pre-public V1 through V4 layouts are rejected
+at the project boundary rather than kept alive as alternate source parsers.
 
 C++ type-token normalization and named-parameter validation are another shared
 typed decision phase. Free functions, object members, constructors, and methods
@@ -335,7 +337,7 @@ work around a type error.
 
 ## Release qualification boundary
 
-Every V4 integrity manifest records the required official-template capability.
+Every public integrity manifest records the required official-template capability.
 `template status` compares the live Bash/PowerShell launch scripts without
 mutation and reports current, drifted, or missing state. `template sync`
 previews by default and, only with `--yes`, transactionally applies a recognized

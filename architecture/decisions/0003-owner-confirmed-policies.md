@@ -1,13 +1,13 @@
-# ADR 0003: Owner-confirmed V4 policies
+# ADR 0003: Owner-confirmed public policies
 
 - Status: Accepted
 - Scope: Generation ownership, updates, runtime lifecycle, legacy rejection, and source control
 
 ## Generation ownership
 
-The installed external `supernote-module` tool is the sole owner of committed
+The installed external `sn-module-gen` tool is the sole owner of committed
 generated source. Gradle and KSP may write intermediate semantic data only below
-build or staging directories. Builds perform a read-only external V4 state check
+build or staging directories. Builds perform a read-only external state check
 before compilation and never copy the Python generator into a plugin.
 
 ## Targeted updates
@@ -27,17 +27,18 @@ actionable restart-required result; process restart resets the accounting.
 
 ## Legacy projects
 
-V1, V2, and V3 layouts are unsupported and are rejected before mutation. V4
-does not provide migration, downgrade, compatibility aliases, or partial
-reinterpretation. The diagnostic directs users to create a clean V4 project
-and copy only reviewed user-owned source files.
+Pre-public V1 through V4 layouts are unsupported and are rejected before
+mutation. The public generator does not provide migration, downgrade,
+compatibility aliases, or partial reinterpretation. The diagnostic directs
+users to create a clean 0.1.0 project and copy only reviewed user-owned source
+files.
 
 ## Generated output in source control
 
-Canonical generated output remains checked in and inspectable. The V4 integrity
-manifest and external generator are authoritative. Generated files are clearly
-marked and fully content-validated; compilation neither regenerates them nor
-embeds the generator.
+Canonical generated output remains checked in and inspectable. The public
+integrity manifest and external generator are authoritative. Generated files
+are clearly marked and fully content-validated; compilation neither regenerates
+them nor embeds the generator.
 
 The separately accepted POSIX/Windows symlink policy remains defined by ADR
 0002.

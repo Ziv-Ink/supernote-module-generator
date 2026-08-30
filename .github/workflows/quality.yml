@@ -14,7 +14,7 @@ permissions:
 
 env:
   SUPERNOTE_TEMPLATE_COMMIT: af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f
-  SUPERNOTE_WIKI_COMMIT: d20c7714e66b7dd2a4a7fbee7997d1b6e0e94320
+  SUPERNOTE_WIKI_COMMIT: caa8cead41427c4a0f19a602cafa361f22e9dcb0
   DISTRIBUTION_ARTIFACT: python-package-distributions-${{ github.sha }}
 
 jobs:
