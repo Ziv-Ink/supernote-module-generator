@@ -1,4 +1,4 @@
-"""Pure source-family decisions for the V4 C++ binding frontend."""
+"""Pure source-family decisions for the C++ binding frontend."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -58,7 +58,7 @@ def forbidden_marker_message(route: CppSourceRoute) -> str | None:
 
     if route.marker_policy is CppMarkerPolicy.REJECT_C:
         return (
-            "direct marked C bindings are unsupported in initial V4; use "
+            "direct marked C bindings are unsupported; use "
             "ordinary C23 implementation code behind a canonical marked C++ "
             "boundary"
         )

@@ -1,4 +1,4 @@
-"""Complete, deterministic V4 artifact planning contracts."""
+"""Complete, deterministic artifact planning contracts."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -476,7 +476,7 @@ def _canonical_tree_removal_path(owner: str) -> str:
     if owner.startswith("feature:"):
         return f"local_modules/{owner.removeprefix('feature:')}"
     if owner == "shared-runtime":
-        return "android/.supernote-module/v4-runtime"
+        return "android/.supernote-module/runtime"
     raise GenerationPlanError(f"managed-tree removal owner is invalid: {owner!r}")
 
 

@@ -84,7 +84,7 @@ FORBIDDEN_HIGH_LEVEL_IMPORTS = {
     "rendering",
     "subprocesses",
     "cli_operations",
-    "v4_validation",
+    "validation",
 }
 
 
@@ -239,5 +239,5 @@ def test_binding_frontend_has_no_disconnected_legacy_object_parser():
 
     assert "_parse_object_members" not in functions
     assert "_parse_object_export" not in functions
-    assert "_parse_v4_class_source" in functions
+    assert "_parse_generated_class_source" in functions
     assert "scan_cpp_class_source_model" in functions

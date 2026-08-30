@@ -25,7 +25,7 @@ from supernote_module_generator.cpp_source_routing import (
             True,
             CppMarkerPolicy.REJECT_C,
             False,
-            "direct marked C bindings are unsupported in initial V4; use "
+            "direct marked C bindings are unsupported; use "
             "ordinary C23 implementation code behind a canonical marked C++ "
             "boundary",
         ),

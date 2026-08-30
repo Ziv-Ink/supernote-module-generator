@@ -115,29 +115,30 @@ def test_release_license_and_manifest_are_present():
     )
 
 
-def test_package_contains_only_the_active_v4_workflow_and_runtime_templates():
+def test_package_contains_only_the_active_workflow_and_runtime_templates():
     package = ROOT / "src/supernote_module_generator"
     for obsolete in (
         "config.py",
         "generator.py",
         "operations.py",
-        "validation.py",
-        "workflows.py",
+            "workflows.py",
     ):
         assert not (package / obsolete).exists()
+    assert not (package / "v4_validation.py").exists()
+    assert (package / "validation.py").is_file()
 
     templates = {path.name for path in (package / "templates").iterdir()}
     assert templates == {
-        "v4.SupernoteConstructor.java.tmpl",
-        "v4.SupernoteCoroutineBridge.kt.tmpl",
-        "v4.SupernotePluginAsync.java.tmpl",
-        "v4.SupernotePluginExport.java.tmpl",
-        "v4.SupernotePluginInternal.java.tmpl",
-        "v4.SupernoteV4Module.kt.tmpl",
-        "v4.SupernoteV4Processor.kt.tmpl",
-        "v4.processor.provider.tmpl",
-        "v4.SupernotePluginObject.java.tmpl",
-        "v4.SupernotePluginValue.java.tmpl",
+        "runtime.SupernoteConstructor.java.tmpl",
+        "runtime.SupernoteCoroutineBridge.kt.tmpl",
+        "runtime.SupernotePluginAsync.java.tmpl",
+        "runtime.SupernotePluginExport.java.tmpl",
+        "runtime.SupernotePluginInternal.java.tmpl",
+        "runtime.SupernoteModule.kt.tmpl",
+        "runtime.SupernoteModuleProcessor.kt.tmpl",
+        "runtime.processor.provider.tmpl",
+        "runtime.SupernotePluginObject.java.tmpl",
+        "runtime.SupernotePluginValue.java.tmpl",
     }
 
 

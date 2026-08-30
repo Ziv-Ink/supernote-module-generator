@@ -19,7 +19,7 @@ from supernote_module_generator.filesystem import (
 )
 from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.transaction import Transaction
-from supernote_module_generator.v4_validation import V4Validator
+from supernote_module_generator.validation import GeneratedProjectValidator
 
 
 def canonical_plugin(tmp_path: Path) -> Path:
@@ -69,7 +69,7 @@ def test_gradle_diagnostics_prioritize_actionable_task_cause():
 def test_authoritative_validation_accepts_one_canonical_generation(tmp_path: Path):
     root = canonical_plugin(tmp_path)
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     assert result.status == "success"
     assert result.issues == ()
@@ -88,11 +88,11 @@ def test_corrupt_javascript_fails_before_build_with_feature_scope(
         raise AssertionError("build must not run before integrity succeeds")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         unexpected_build,
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     assert result.status == "failure"
     assert result.build == "not_run"
@@ -120,15 +120,15 @@ def test_javascript_validation_uses_module_stdin_without_a_filename_boundary(
         return subprocess.CompletedProcess(command, 0, b"", b"")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.shutil.which",
+        "supernote_module_generator.validation.shutil.which",
         lambda _name: "node-test",
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.subprocess.run",
+        "supernote_module_generator.validation.subprocess.run",
         check,
     )
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     assert result.status == "success"
     assert observed["command"] == [
@@ -148,17 +148,17 @@ def test_javascript_validation_reports_node_launch_failure(
 ) -> None:
     root = canonical_plugin(tmp_path)
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.shutil.which",
+        "supernote_module_generator.validation.shutil.which",
         lambda _name: "node-test",
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.subprocess.run",
+        "supernote_module_generator.validation.subprocess.run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             OSError("Node launch denied")
         ),
     )
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     assert result.status == "failure"
     issue = next(
@@ -180,17 +180,17 @@ def test_javascript_validation_rejects_symlink_without_invoking_node(
     javascript.unlink()
     javascript.symlink_to(root / "package.json")
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.shutil.which",
+        "supernote_module_generator.validation.shutil.which",
         lambda _name: "node-test",
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.subprocess.run",
+        "supernote_module_generator.validation.subprocess.run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("Node must not inspect an unsafe artifact")
         ),
     )
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     assert result.status == "failure"
     issue = next(
@@ -210,21 +210,21 @@ def test_javascript_validation_reports_unreadable_artifact_without_node(
 ) -> None:
     root = canonical_plugin(tmp_path)
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.shutil.which",
+        "supernote_module_generator.validation.shutil.which",
         lambda _name: "node-test",
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.read_regular_bytes_no_follow",
+        "supernote_module_generator.validation.read_regular_bytes_no_follow",
         lambda _path: (_ for _ in ()).throw(FilesystemError("access denied")),
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.subprocess.run",
+        "supernote_module_generator.validation.subprocess.run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("Node must not inspect an unreadable artifact")
         ),
     )
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     assert result.status == "failure"
     issue = next(
@@ -243,7 +243,7 @@ def test_javascript_validation_reports_syntax_error_not_node_version(
 ) -> None:
     root = canonical_plugin(tmp_path)
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.shutil.which",
+        "supernote_module_generator.validation.shutil.which",
         lambda _name: "node-test",
     )
     stderr = (
@@ -251,13 +251,13 @@ def test_javascript_validation_reports_syntax_error_not_node_version(
         b"SyntaxError: Unexpected token '='\n\nNode.js v22.23.2\n"
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.subprocess.run",
+        "supernote_module_generator.validation.subprocess.run",
         lambda command, **_kwargs: subprocess.CompletedProcess(
             command, 1, b"", stderr
         ),
     )
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     issue = next(
         item for item in result.issues if item.code == "SNMG_JAVASCRIPT_INVALID"
@@ -274,7 +274,7 @@ def test_untrusted_feature_generated_path_is_rejected_and_preserved(tmp_path: Pa
     stale = root / "local_modules/alpha/android/src/main/cpp/stale_jni.cpp"
     stale.write_text("// generated stale JNI\n")
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     assert result.status == "failure"
     assert {issue.code for issue in result.issues} == {"SNMG_INPUT_INVALID"}
@@ -287,7 +287,7 @@ def test_missing_owned_artifact_is_classified_as_missing(tmp_path: Path):
     missing = root / "local_modules/alpha/index.js"
     missing.unlink()
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     issue = next(item for item in result.issues if item.path == "local_modules/alpha/index.js")
     assert issue.code == "SNMG_ARTIFACT_MISSING"
@@ -298,10 +298,10 @@ def test_missing_marker_end_is_a_single_runtime_scoped_issue(tmp_path: Path):
     root = canonical_plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime", "")
+        settings.read_text().replace("// end sn-module-gen-runtime", "")
     )
 
-    result = V4Validator(root).validate()
+    result = GeneratedProjectValidator(root).validate()
 
     wiring = [issue for issue in result.issues if issue.code == "SNMG_WIRING_INVALID"]
     assert len(wiring) == 1
@@ -327,11 +327,11 @@ def test_build_is_additive_and_diagnostics_are_outside_source_state(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         successful_build,
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     assert result.status == "success"
     assert result.build == "passed"
@@ -361,11 +361,11 @@ def test_build_failure_prioritizes_source_cause_and_preserves_full_log(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         failed_build,
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     assert result.status == "failure"
     assert result.build == "failed"
@@ -400,10 +400,10 @@ def test_first_build_restores_protected_directory_metadata_after_cache_creation(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", first_build
+        "supernote_module_generator.validation.run_process", first_build
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     assert result.build == ("passed" if exit_code == 0 else "failed")
     assert protected_directory_metadata(root) == before
@@ -421,11 +421,11 @@ def test_successful_gradle_exit_that_mutates_source_fails_build_validation(
         return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         mutating_build,
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     assert result.status == "failure"
     assert result.build == "failed"
@@ -455,10 +455,10 @@ def test_build_mutation_detector_includes_cache_named_user_source_directory(
         return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", mutating_build
+        "supernote_module_generator.validation.run_process", mutating_build
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     issue = next(
         item for item in result.issues if item.code == "SNMG_BUILD_MUTATED_SOURCE"
@@ -470,7 +470,7 @@ def test_runtime_frontend_subproject_build_outputs_are_canonical_build_state(
     tmp_path: Path,
 ):
     root = canonical_plugin(tmp_path)
-    runtime = root / "android/.supernote-module/v4-runtime"
+    runtime = root / "android/.supernote-module/runtime"
     generated_build_files = (
         runtime / "annotations/build/classes/Annotation.class",
         runtime / "processor/build/libs/processor.jar",
@@ -500,10 +500,10 @@ def test_build_mutation_detector_rejects_touch_only_source_change(
         return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", touching_build
+        "supernote_module_generator.validation.run_process", touching_build
     )
 
-    result = V4Validator(root).validate(build=True)
+    result = GeneratedProjectValidator(root).validate(build=True)
 
     assert {item.code for item in result.issues} == {"SNMG_BUILD_MUTATED_SOURCE"}
 
@@ -513,13 +513,13 @@ def test_diagnostics_refuse_symlink_ancestor_without_external_write(tmp_path: Pa
     external = tmp_path / "external"
     external.mkdir()
     (root / "android/build").symlink_to(external, target_is_directory=True)
-    sentinel = external / "sn-module-gen/diagnostics/v4-check-build.log"
+    sentinel = external / "sn-module-gen/diagnostics/check-build.log"
     sentinel.parent.mkdir(parents=True)
     sentinel.write_text("outside\n")
 
     result = write_process_diagnostics(
         root,
-        name="v4-check-build",
+        name="check-build",
         command=("gradle",),
         exit_code=1,
         stdout="",
@@ -536,11 +536,11 @@ def test_diagnostics_refuse_symlink_leaf_without_external_write(tmp_path: Path):
     diagnostic_root.mkdir(parents=True)
     external = tmp_path / "outside.log"
     external.write_text("outside\n")
-    (diagnostic_root / "v4-check-build.log").symlink_to(external)
+    (diagnostic_root / "check-build.log").symlink_to(external)
 
     result = write_process_diagnostics(
         root,
-        name="v4-check-build",
+        name="check-build",
         command=("gradle",),
         exit_code=1,
         stdout="",

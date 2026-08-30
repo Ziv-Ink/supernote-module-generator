@@ -6,7 +6,7 @@ from typing import Dict
 
 ROOT_HELP = """Supernote Module Generator
 
-Generate and manage language-neutral V4 features in an existing Supernote plugin.
+Generate and manage language-neutral features in an existing Supernote plugin.
 
 Usage:
   sn-module-gen
@@ -16,8 +16,8 @@ Commands:
   add        Create and link a local feature.
   update     Refresh generated parts of one or all managed features.
   validate   Check feature structure, integration, and optionally its build.
-  check      Authoritatively compare all V4 generated state with semantic inputs.
-  repair     Preview or apply the complete canonical V4 generation plan.
+  check      Authoritatively compare all generated state with semantic inputs.
+  repair     Preview or apply the complete canonical generation plan.
   remove     Permanently delete one or all features.
   template   Compare or explicitly sync the versioned template capability.
   doctor     Verify the development environment.
@@ -187,7 +187,7 @@ Exit:
 
 CHECK_HELP = """Supernote Module Generator
 
-Authoritatively compare semantic inputs, the V4 manifest, wiring, and every
+Authoritatively compare semantic inputs, the integrity manifest, wiring, and every
 generator-owned artifact with the current filesystem.
 
 Usage:
@@ -204,7 +204,7 @@ Options:
 
 REPAIR_HELP = """Supernote Module Generator
 
-Preview or apply one complete canonical V4 generation transaction.
+Preview or apply one complete canonical generation transaction.
 
 Usage:
   sn-module-gen repair [--dry-run] [--diff] [--yes] [output options]
@@ -327,7 +327,7 @@ Exit:
 
 DOCTOR_HELP = """Supernote Module Generator
 
-Verify the development environment selected by this V4 plugin.
+Verify the development environment selected by this plugin.
 
 Usage:
   sn-module-gen doctor [options]
@@ -351,7 +351,7 @@ Behavior:
   platform/build tools/NDK, configured ADB, NDK Clang with C23/C++23, CMake, and
   the JSI boundary. Merely finding files never claims KSP, JSI, project-build, or
   device success. Inside a plugin root, configured devconfig.json paths take
-  priority over the launching environment. --build adds the authoritative V4
+  priority over the launching environment. --build adds the authoritative
   read-only state check and full Gradle/KSP/Kotlin/CMake/JNI/JSI build probe.
 
 Examples:

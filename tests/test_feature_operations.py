@@ -31,7 +31,7 @@ def registry(root: Path) -> dict:
     return json.loads(
         (
             root
-            / "android/.supernote-module/v4-runtime/feature-registry.json"
+            / "android/.supernote-module/runtime/feature-registry.json"
         ).read_text()
     )
 
@@ -63,6 +63,6 @@ def test_jvm_only_feature_is_scaffolded_for_ksp_without_python_source_parsing(
     assert created == jvm.output
     assert not (created / "android/src/main/cpp").exists()
     assert (created / "android/src/main/java/com/example/jvm/FeatureApi.kt").is_file()
-    gradle = (root / "android/.supernote-module/v4-runtime/build.gradle").read_text()
+    gradle = (root / "android/.supernote-module/runtime/build.gradle").read_text()
     assert "local_modules/jvm/android/src/main/java" in gradle
     assert "com.google.devtools.ksp" in gradle

@@ -1,4 +1,4 @@
-"""Render the V4 JVM nominal-object handle and per-runtime identity registry."""
+"""Render the JVM nominal-object handle and per-runtime identity registry."""
 from __future__ import annotations
 
 

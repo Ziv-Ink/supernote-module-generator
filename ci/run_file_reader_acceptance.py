@@ -255,7 +255,7 @@ def run(
     settings = project / "android/settings.gradle"
     settings_baseline = settings.read_bytes()
     corrupted_settings = settings_baseline.replace(
-        b"supernote-module-v4-runtime", b"broken-v4-runtime", 1
+        b"sn-module-gen-runtime", b"broken-runtime", 1
     )
     if corrupted_settings == settings_baseline:
         raise RuntimeError("runtime wiring corruption substitution changed no bytes")

@@ -1,4 +1,4 @@
-"""Read-only canonical discovery of the V4 project input model."""
+"""Read-only canonical discovery of the generated project input model."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,6 +22,7 @@ from .filesystem import (
     validate_contained_path_no_follow,
 )
 from .integrity_manifest import (
+    INTEGRITY_MANIFEST_SCHEMA_VERSION,
     INTEGRITY_MANIFEST_PATH,
     IntegrityManifestError,
     load_integrity_manifest,
@@ -33,8 +34,8 @@ from .schemas import FEATURE_MANIFEST_KIND, FEATURE_MANIFEST_SCHEMA_VERSION
 class ExistingGeneration(str, Enum):
     NONE = "none"
     V3 = "v3"
-    V4 = "v4"
-    UNMANIFESTED_V4 = "unmanifested_v4"
+    CURRENT = "current"
+    UNMANIFESTED_CURRENT = "unmanifested_current"
     UNSUPPORTED_LEGACY = "unsupported_legacy"
 
 
@@ -132,7 +133,7 @@ def detect_existing_generation(
     if manifest_kind is not None:
         if manifest_kind != "file":
             manifest_error = GeneratorError(
-                f"V4 integrity manifest must be a regular file: {manifest}",
+                f"Generated integrity manifest must be a regular file: {manifest}",
                 kind="invalid_metadata",
                 phase="preflight",
             )
@@ -144,14 +145,15 @@ def detect_existing_generation(
                 manifest_value = json.loads(content.decode("utf-8"))
             except (OSError, UnicodeDecodeError, ValueError) as exc:
                 manifest_error = GeneratorError(
-                    f"V4 integrity manifest is invalid: {manifest}: {exc}",
+                    f"Generated integrity manifest is invalid: {manifest}: {exc}",
                     kind="invalid_metadata",
                     phase="preflight",
                 )
             if (
                 manifest_error is None
                 and isinstance(manifest_value, dict)
-                and manifest_value.get("schema_version") == 4
+                and manifest_value.get("schema_version")
+                == INTEGRITY_MANIFEST_SCHEMA_VERSION
             ):
                 try:
                     # First parse only the root ownership declaration. Explicit
@@ -164,21 +166,22 @@ def detect_existing_generation(
                     )
                 except IntegrityManifestError as exc:
                     manifest_error = GeneratorError(
-                        f"V4 integrity manifest is invalid: {manifest}: {exc}",
+                        f"Generated integrity manifest is invalid: {manifest}: {exc}",
                         kind="invalid_metadata",
                         phase="preflight",
                     )
 
-    active_v4_roots = (
+    active_feature_roots = (
         tuple(item.root for item in loaded_manifest.features)
         if loaded_manifest is not None
-        else _claimed_v4_feature_roots(manifest_value)
+        else _claimed_current_feature_roots(manifest_value)
     )
-    # Legacy evidence is authoritative even when a schema-4 file also exists.
-    # V4 never migrates, coexists with, or partially reinterprets an older
-    # generated layout. Manifest-owned V4 metadata is excluded here so its own
+    # Legacy evidence is authoritative even when a current manifest also exists.
+    # The public generator never migrates, coexists with, or partially
+    # reinterprets an older generated layout. Manifest-owned current metadata is
+    # excluded here so its own
     # parser can report precise corruption diagnostics.
-    signals = _legacy_signals(root, active_v4_feature_roots=active_v4_roots)
+    signals = _legacy_signals(root, active_feature_roots=active_feature_roots)
     if any("v3" in signal.lower() for signal in signals):
         return ExistingGeneration.V3
     if signals:
@@ -193,7 +196,7 @@ def detect_existing_generation(
             loaded_manifest = load_integrity_manifest(root)
         except IntegrityManifestError as exc:
             manifest_error = GeneratorError(
-                f"V4 integrity manifest is invalid: {manifest}: {exc}",
+                f"Generated integrity manifest is invalid: {manifest}: {exc}",
                 kind="invalid_metadata",
                 phase="preflight",
             )
@@ -203,22 +206,22 @@ def detect_existing_generation(
             raise manifest_error
         if (
             isinstance(manifest_value, dict)
-            and manifest_value.get("schema_version") in {1, 2, 3}
+            and manifest_value.get("schema_version") in {1, 2, 3, 4}
         ):
             return ExistingGeneration.UNSUPPORTED_LEGACY
         if loaded_manifest is not None:
-            return ExistingGeneration.V4
+            return ExistingGeneration.CURRENT
         raise GeneratorError(
-            f"V4 integrity manifest has an unsupported schema: {manifest}",
+            f"Generated integrity manifest has an unsupported schema: {manifest}",
             kind="invalid_metadata",
             phase="preflight",
         )
 
-    if _unmanifested_v4_signals(root):
+    if _unmanifested_current_signals(root):
         # The public boundary rejects this state. It is accepted only inside the
-        # already-open first-add transaction while the complete V4 manifest is
+        # already-open first-add transaction while the complete manifest is
         # still being staged.
-        return ExistingGeneration.UNMANIFESTED_V4
+        return ExistingGeneration.UNMANIFESTED_CURRENT
     return ExistingGeneration.NONE
 
 
@@ -227,7 +230,7 @@ def reject_unsupported_legacy_project(
     *,
     generation: ExistingGeneration | None = None,
 ) -> None:
-    """Reject V1/V2/V3 state before any public operation can mutate it."""
+    """Reject V1-V4 state before any public operation can mutate it."""
 
     generation = generation or detect_existing_generation(root)
     if generation not in {
@@ -235,15 +238,15 @@ def reject_unsupported_legacy_project(
         ExistingGeneration.UNSUPPORTED_LEGACY,
     }:
         return
-    label = "V3" if generation is ExistingGeneration.V3 else "V1/V2/V3"
+    label = "V3" if generation is ExistingGeneration.V3 else "V1/V2/V3/V4"
     signals = _legacy_signals(root)
     details = "\n".join(f"  {item}" for item in signals[:8])
     suffix = f"\n\nDetected legacy state:\n{details}" if details else ""
     raise UnsupportedLegacyProject(
         f"Unsupported legacy Supernote Module Generator project ({label})."
         f"{suffix}\n\n"
-        "V4 does not migrate or reinterpret V1, V2, or V3 generated state. "
-        "Create a clean V4 plugin and copy only reviewed user-owned source files."
+        "sn-module-gen does not migrate or reinterpret V1-V4 generated state. "
+        "Create a clean plugin and copy only reviewed user-owned source files."
     )
 
 
@@ -252,20 +255,24 @@ def reject_unsupported_project_state(
     *,
     generation: ExistingGeneration | None = None,
 ) -> None:
-    """Reject every generated state lacking active V4 manifest authority."""
+    """Reject every generated state lacking active manifest authority."""
 
     generation = generation or detect_existing_generation(root)
     reject_unsupported_legacy_project(root, generation=generation)
-    if generation is not ExistingGeneration.UNMANIFESTED_V4:
+    if generation is not ExistingGeneration.UNMANIFESTED_CURRENT:
         return
-    signals = _unmanifested_v4_signals(root)
+    signals = _unmanifested_current_signals(root)
     details = "\n".join(f"  {item}" for item in signals[:8])
-    suffix = f"\n\nDetected unmanifested V4 state:\n{details}" if details else ""
+    suffix = (
+        f"\n\nDetected unmanifested generated state:\n{details}"
+        if details
+        else ""
+    )
     raise UnmanifestedGeneratedProject(
-        "V4 generated state exists without a schema-4 integrity manifest."
+        "Generated state exists without a schema-version 1.0 integrity manifest."
         f"{suffix}\n\n"
         "The generator cannot prove ownership of this state and will not "
-        "reinterpret, repair, replace, or delete it. Create a clean V4 plugin "
+        "reinterpret, repair, replace, or delete it. Create a clean plugin "
         "or restore the exact manifest that owns these generated artifacts."
     )
 
@@ -276,11 +283,11 @@ def assert_public_project(root: Path) -> ExistingGeneration:
     return generation
 
 
-def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
+def _unmanifested_current_signals(root: Path) -> tuple[str, ...]:
     """Find exact current-layout state that requires root-manifest authority."""
 
     signals: set[str] = set()
-    runtime = root / "android/.supernote-module/v4-runtime"
+    runtime = root / "android/.supernote-module/runtime"
     runtime_kind = contained_entry_kind_no_follow(root, runtime)
     if runtime_kind is not None:
         signals.add(
@@ -290,7 +297,7 @@ def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
     for record in FeatureOperationService(root).records():
         signals.add(
             f"{record.path.relative_to(root).as_posix()}/.supernote-module.json "
-            "(V4 feature metadata)"
+            "(generated feature metadata)"
         )
 
     marker_paths = (
@@ -303,9 +310,9 @@ def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
         if contained_entry_kind_no_follow(root, path) != "file":
             continue
         content, _metadata = read_contained_regular_bytes_no_follow(root, path)
-        if b"supernote-module-v4-runtime" in content:
+        if b"sn-module-gen-runtime" in content:
             signals.add(
-                f"{path.relative_to(root).as_posix()} (V4 runtime wiring)"
+                f"{path.relative_to(root).as_posix()} (generated runtime wiring)"
             )
 
     application_root = root / "android/app/src/main"
@@ -319,9 +326,9 @@ def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
             if kind != "file" or path.suffix.lower() not in {".java", ".kt"}:
                 continue
             content, _metadata = read_contained_regular_bytes_no_follow(root, path)
-            if b"supernote-module-v4-package" in content:
+            if b"supernote-module-package" in content:
                 signals.add(
-                    f"{path.relative_to(root).as_posix()} (V4 package wiring)"
+                    f"{path.relative_to(root).as_posix()} (generated package wiring)"
                 )
     return tuple(sorted(signals))
 
@@ -329,14 +336,14 @@ def _unmanifested_v4_signals(root: Path) -> tuple[str, ...]:
 def _legacy_signals(
     root: Path,
     *,
-    active_v4_feature_roots: tuple[str, ...] = (),
+    active_feature_roots: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     signals: set[str] = set()
-    active_v4_metadata = {
+    active_metadata = {
         f"{feature_root}/.supernote-module.json"
-        for feature_root in active_v4_feature_roots
+        for feature_root in active_feature_roots
     }
-    for version in ("v1", "v2", "v3"):
+    for version in ("v1", "v2", "v3", "v4"):
         relative = f"android/.supernote-module/{version}-runtime"
         if contained_entry_kind_no_follow(root, root / relative) is not None:
             signals.add(relative)
@@ -398,18 +405,18 @@ def _legacy_signals(
                             value = None
                     if isinstance(value, dict) and isinstance(value.get("kind"), str):
                         label += f" ({value['kind']})"
-                    if label.split(" (", 1)[0] in active_v4_metadata:
+                    if label.split(" (", 1)[0] in active_metadata:
                         if _is_explicit_legacy_feature_metadata(value):
                             signals.add(label)
-                        # A claimed V4 metadata path is otherwise left to the
-                        # strict V4 manifest/feature parser so malformed V4
+                        # A claimed current metadata path is otherwise left to
+                        # the strict manifest/feature parser so malformed
                         # input keeps its precise invalid-metadata diagnostic.
                         continue
                     if (
                         modules_name == "local_modules"
                         and metadata_name == ".supernote-module.json"
                         and isinstance(value, dict)
-                        and value.get("kind") == "supernote_v4_feature"
+                        and value.get("kind") == "supernote_module_feature"
                     ):
                         continue
                     signals.add(label)
@@ -452,7 +459,7 @@ def _legacy_signals(
                 signals.add(
                     f"{path.relative_to(root).as_posix()} ({marker[:-1]} wiring)"
                 )
-        for version in ("v1", "v2", "v3"):
+        for version in ("v1", "v2", "v3", "v4"):
             if f"supernote-module-{version}" in text or f"supernote-{version}" in text:
                 signals.add(f"{path.relative_to(root).as_posix()} ({version} wiring)")
     application_root = root / "android/app/src/main"
@@ -476,7 +483,7 @@ def _legacy_signals(
                 phase="preflight",
             ) from exc
         text = content.decode("utf-8", errors="replace")
-        for version in ("v1", "v2", "v3"):
+        for version in ("v1", "v2", "v3", "v4"):
             if f"supernote-module-{version}-package" in text:
                 signals.add(
                     f"{path.relative_to(root).as_posix()} ({version} package wiring)"
@@ -484,10 +491,13 @@ def _legacy_signals(
     return tuple(sorted(signals))
 
 
-def _claimed_v4_feature_roots(manifest: object) -> tuple[str, ...]:
+def _claimed_current_feature_roots(manifest: object) -> tuple[str, ...]:
     """Extract non-authoritative roots solely to route preflight diagnostics."""
 
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 4:
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != INTEGRITY_MANIFEST_SCHEMA_VERSION
+    ):
         return ()
     features = manifest.get("features")
     if not isinstance(features, list):
@@ -512,12 +522,13 @@ def _is_explicit_legacy_feature_metadata(value: object) -> bool:
         return False
     schema = value.get("schema_version")
     kind = value.get("kind")
-    if schema in {1, 2}:
+    if schema in {1, 2, 3, 4}:
         return True
     if kind in {
         "supernote_v1_feature",
         "supernote_v2_feature",
         "supernote_v3_feature",
+        "supernote_v4_feature",
     }:
         return True
     return not (

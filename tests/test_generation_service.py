@@ -19,7 +19,7 @@ from supernote_module_generator.jvm_manifest import JvmSourceManifest, write_jvm
 from supernote_module_generator.project_model import ProjectModel
 from supernote_module_generator.transaction import Transaction
 from supernote_module_generator.cli_operations import CliOperationService
-from v4_project_inventory import inventory_project
+from project_inventory import inventory_project
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -57,7 +57,7 @@ def test_real_generation_plan_contains_feature_runtime_and_manifest(tmp_path: Pa
 
     paths = {item.path for item in plan.artifacts}
     assert "local_modules/alpha/index.js" in paths
-    assert "android/.supernote-module/v4-runtime/feature-registry.json" in paths
+    assert "android/.supernote-module/runtime/feature-registry.json" in paths
     assert INTEGRITY_MANIFEST_PATH in paths
     assert plan.requested_targets == ("alpha",)
     assert set(plan.affected_targets) >= {
@@ -83,6 +83,33 @@ def test_execute_plan_commits_once_then_replanning_is_a_true_noop(tmp_path: Path
 
     assert (root / INTEGRITY_MANIFEST_PATH).is_file()
     assert second.is_noop
+
+
+def test_current_generated_project_uses_only_public_identity_and_schema(
+    tmp_path: Path,
+) -> None:
+    root = plugin(tmp_path)
+    add_cpp(root)
+    service = GenerationService(root)
+    plan = service.plan(
+        operation="update",
+        requested_targets=("alpha",),
+        allow_unmanifested_bootstrap=True,
+    )
+    service.execute(plan, Transaction(root, "update", ("alpha",)))
+
+    forbidden = (b"v4", b"snv4", b"__supernotev4")
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix().lower().encode("utf-8")
+        assert not any(token in relative for token in forbidden), relative
+        if not path.is_file():
+            continue
+        content = path.read_bytes().lower()
+        assert not any(token in content for token in forbidden), relative
+        if path.suffix == ".json":
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(value, dict) and "schema_version" in value:
+                assert value["schema_version"] == "1.0", relative
 
 
 def test_existing_manifest_is_valid_prior_authority_for_a_second_add(tmp_path: Path):
@@ -121,7 +148,7 @@ def test_existing_manifest_is_valid_prior_authority_for_a_second_add(tmp_path: P
     assert service.plan(operation="check", requested_targets=()).is_noop
 
 
-def test_remove_plan_is_complete_before_mutation_and_leaves_canonical_empty_v4(
+def test_remove_plan_is_complete_before_mutation_and_leaves_canonical_empty_runtime(
     tmp_path: Path,
 ):
     root = plugin(tmp_path)
@@ -144,7 +171,7 @@ def test_remove_plan_is_complete_before_mutation_and_leaves_canonical_empty_v4(
     assert inventory_project(root) == before
     assert {(item.path, item.owner) for item in plan.tree_removals} == {
         ("local_modules/alpha", "feature:alpha"),
-        ("android/.supernote-module/v4-runtime", "shared-runtime"),
+        ("android/.supernote-module/runtime", "shared-runtime"),
     }
     assert plan.dependency_actions[0].package_names == ("alpha",)
     assert {item.path for item in plan.wiring_actions} == {
@@ -156,13 +183,13 @@ def test_remove_plan_is_complete_before_mutation_and_leaves_canonical_empty_v4(
     service.execute(plan, Transaction(root, "remove", ("alpha",)))
 
     assert not (root / "local_modules/alpha").exists()
-    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert not (root / "android/.supernote-module/runtime").exists()
     assert service.plan(operation="check", requested_targets=()).is_noop
 
 
 def test_unmanifested_runtime_tree_cannot_authorize_its_own_deletion(tmp_path: Path):
     root = plugin(tmp_path)
-    runtime = root / "android/.supernote-module/v4-runtime"
+    runtime = root / "android/.supernote-module/runtime"
     runtime.mkdir(parents=True)
     sentinel = runtime / "user-sentinel.txt"
     sentinel.write_text("unmanifested user bytes\n")
@@ -181,7 +208,7 @@ def test_unmanifested_runtime_tree_cannot_authorize_its_own_deletion(tmp_path: P
 
 def test_direct_feature_add_cannot_replace_unmanifested_runtime(tmp_path: Path):
     root = plugin(tmp_path)
-    runtime = root / "android/.supernote-module/v4-runtime"
+    runtime = root / "android/.supernote-module/runtime"
     runtime.mkdir(parents=True)
     sentinel = runtime / "user-sentinel.txt"
     sentinel.write_text("unmanifested user bytes\n")
@@ -336,7 +363,7 @@ def test_malformed_manifest_never_authorizes_feature_tree_removal(
         item
         for item in manifest["artifacts"]
         if item["path"]
-        == "android/.supernote-module/v4-runtime/ownership.json"
+        == "android/.supernote-module/runtime/ownership.json"
     )
 
     if corruption == "missing_generator_version":
@@ -399,7 +426,7 @@ def test_windows_backslash_runtime_ownership_cannot_reach_user_source(tmp_path: 
     service.execute(plan, Transaction(root, "update", ("alpha",)))
     sentinel = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
     before = sentinel.read_bytes()
-    ownership_path = root / "android/.supernote-module/v4-runtime/ownership.json"
+    ownership_path = root / "android/.supernote-module/runtime/ownership.json"
     ownership = json.loads(ownership_path.read_text())
     ownership["generated_files"].append(
         r"..\..\..\local_modules\alpha\android\src\main\cpp\feature.cpp"
@@ -458,7 +485,7 @@ def test_duplicate_json_keys_never_authorize_tree_removal(
         )
         manifest_path.write_text(text)
     else:
-        ownership = root / "android/.supernote-module/v4-runtime/ownership.json"
+        ownership = root / "android/.supernote-module/runtime/ownership.json"
         ownership.write_text(
             ownership.read_text().replace(
                 "{\n", '{\n  "schema_version": 1,\n', 1

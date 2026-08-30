@@ -1,4 +1,4 @@
-"""Generate typed handwritten-C++ facades for hidden V4 bindings."""
+"""Generate typed handwritten-C++ facades for hidden bindings."""
 from __future__ import annotations
 
 import json
@@ -157,7 +157,7 @@ namespace supernote::internal::{namespace} {{
 namespace supernote::internal::{namespace} {{
 namespace {{
 
-constexpr char kInternalLogTag[] = "SupernoteV4Internal";
+constexpr char kInternalLogTag[] = "SupernoteModuleInternal";
 
 std::shared_ptr<supernote::runtime::FeatureSession> require_feature() {{
   auto feature = supernote::runtime::current_feature_session();

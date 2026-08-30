@@ -269,7 +269,7 @@ def test_windows_recovery_pointer_identity_uses_normalized_path_key(
 def test_private_recovery_registry_rejects_non_directory(
     tmp_path: Path,
 ) -> None:
-    registry = tmp_path / "supernote-module-v4-recovery-v2-fixture"
+    registry = tmp_path / "supernote-module-recovery-v2-fixture"
     registry.write_bytes(b"not a registry\n")
     with pytest.raises(FilesystemError, match="registry is unsafe"):
         private_recovery_registry(
@@ -282,7 +282,7 @@ def test_private_recovery_registry_rejects_non_directory(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX private-mode contract")
 def test_private_recovery_registry_rejects_shared_mode(tmp_path: Path) -> None:
-    registry = tmp_path / "supernote-module-v4-recovery-v2-fixture"
+    registry = tmp_path / "supernote-module-recovery-v2-fixture"
     registry.mkdir(mode=0o700)
     registry.chmod(0o755)
     with pytest.raises(FilesystemError, match="not private"):

@@ -135,7 +135,7 @@ def field_shape(declaration: list[_Token]) -> CppFieldShape:
         raise CppMemberShapeError(
             None,
             "a generated field must be one directly declared named canonical "
-            "V4 field without initializer, pointer, attribute, or multiple "
+            "generated field without initializer, pointer, attribute, or multiple "
             "declarator",
         )
     is_static = values[0] == "static"
@@ -187,7 +187,7 @@ def method_shape(
     if return_type is None or not method_prefix or method_token.kind != "identifier":
         raise CppMemberShapeError(
             declaration[0].line,
-            "a marked method must use one canonical V4 result type followed "
+            "a marked method must use one canonical generated result type followed "
             "by an ordinary method name",
         )
     method_name = method_token.value

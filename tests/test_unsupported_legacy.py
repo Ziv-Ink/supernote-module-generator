@@ -26,7 +26,7 @@ from supernote_module_generator.project_model import (
     detect_existing_generation,
 )
 from supernote_module_generator.transaction import Transaction
-from v4_project_inventory import inventory_project
+from project_inventory import inventory_project
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -91,7 +91,7 @@ PUBLIC_COMMANDS = (
 
 @pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
 @pytest.mark.parametrize("sentinel_kind", ("file", "directory", "symlink"))
-def test_public_commands_reject_unmanifested_v4_runtime_without_mutation(
+def test_public_commands_reject_legacy_v4_runtime_without_mutation(
     tmp_path: Path,
     arguments: tuple[str, ...],
     sentinel_kind: str,
@@ -120,10 +120,9 @@ def test_public_commands_reject_unmanifested_v4_runtime_without_mutation(
     code, result = invoke(root, list(arguments))
 
     assert code == 1
-    assert result["error"]["kind"] == "unmanifested_generated_project"
+    assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert "cannot prove ownership" in result["error"]["message"]
-    assert "schema-4 integrity manifest" in result["next_action"]
+    assert "does not migrate or reinterpret V1-V4" in result["error"]["message"]
     assert exact_metadata(root) == before_metadata
     assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
@@ -131,7 +130,7 @@ def test_public_commands_reject_unmanifested_v4_runtime_without_mutation(
 
 
 @pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_public_commands_reject_unmanifested_v4_wiring_without_mutation(
+def test_public_commands_reject_legacy_v4_wiring_without_mutation(
     tmp_path: Path,
     arguments: tuple[str, ...],
 ):
@@ -149,12 +148,12 @@ def test_public_commands_reject_unmanifested_v4_wiring_without_mutation(
     code, result = invoke(root, list(arguments))
 
     assert code == 1
-    assert result["error"]["kind"] == "unmanifested_generated_project"
+    assert result["error"]["kind"] == "unsupported_legacy_project"
     assert exact_metadata(root) == before_metadata
     assert inventory_project(root) == before
 
 
-def test_clean_public_add_uses_transaction_scoped_v4_bootstrap(tmp_path: Path):
+def test_clean_public_add_uses_transaction_scoped_bootstrap(tmp_path: Path):
     root = plugin(tmp_path)
     wrapper = root / ("android/gradlew.bat" if os.name == "nt" else "android/gradlew")
     wrapper.write_text("@exit /b 0\r\n" if os.name == "nt" else "#!/bin/sh\nexit 0\n")
@@ -168,7 +167,7 @@ def test_clean_public_add_uses_transaction_scoped_v4_bootstrap(tmp_path: Path):
 
     assert code == 0, result
     assert (root / ".supernote-module/manifest.json").is_file()
-    assert detect_existing_generation(root) is ExistingGeneration.V4
+    assert detect_existing_generation(root) is ExistingGeneration.CURRENT
     assert invoke(root, ["check"])[0] == 0
 
 
@@ -269,7 +268,7 @@ def test_public_commands_reject_legacy_runtime_before_any_mutation(
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
     assert "does not migrate" in result["error"]["message"]
-    assert "Create a clean V4 plugin" in result["next_action"]
+    assert "Create a clean plugin" in result["next_action"]
     assert exact_metadata(root) == before_metadata
     assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
@@ -329,7 +328,7 @@ def test_every_public_command_rejects_known_historical_layouts_exactly(
     ),
 )
 @pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_v4_manifest_never_masks_known_historical_layouts(
+def test_manifest_never_masks_known_historical_layouts(
     tmp_path: Path,
     family: str,
     arguments: tuple[str, ...],
@@ -351,7 +350,7 @@ def test_v4_manifest_never_masks_known_historical_layouts(
 
 @pytest.mark.parametrize("version", ("v1", "v2", "v3"))
 @pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_v4_manifest_never_masks_legacy_runtime_roots(
+def test_manifest_never_masks_legacy_runtime_roots(
     tmp_path: Path,
     version: str,
     arguments: tuple[str, ...],
@@ -589,13 +588,15 @@ def test_add_rejects_real_v2_wiring_without_any_mutation(tmp_path: Path):
     assert not (root / ".supernote-module/manifest.json").exists()
 
 
-def test_v4_manifest_schema_is_required_and_legacy_schema_is_not_reinterpreted(
+@pytest.mark.parametrize("legacy_schema", (1, 2, 3, 4))
+def test_manifest_schema_is_required_and_legacy_schema_is_not_reinterpreted(
     tmp_path: Path,
+    legacy_schema: int,
 ):
     root = plugin(tmp_path)
     manifest = root / ".supernote-module/manifest.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"schema_version":3}\n')
+    manifest.write_text(json.dumps({"schema_version": legacy_schema}) + "\n")
     before = inventory_project(root)
 
     code, result = invoke(root, ["repair", "--yes"])
@@ -637,7 +638,9 @@ def test_build_hook_trust_rejects_unsafe_state_without_following_it(
     root = plugin(tmp_path / "plugin")
     manifest = root / ".supernote-module/manifest.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"schema_version":4,"generation_id":"generation"}\n')
+    manifest.write_text(
+        '{"schema_version":"1.0","generation_id":"generation"}\n'
+    )
     journal = root / ".supernote-module-transaction.json"
     target = manifest if state_name == "manifest" else journal
     if state_name == "manifest":
@@ -645,7 +648,7 @@ def test_build_hook_trust_rejects_unsafe_state_without_following_it(
     outside = tmp_path / f"outside-{state_name}.json"
     outside.write_text(
         (
-            '{"schema_version":4,"generation_id":"generation"}\n'
+            '{"schema_version":"1.0","generation_id":"generation"}\n'
             if state_name == "manifest"
             else '{"schema":1,"id":"transaction","phase":"apply"}\n'
         )
@@ -677,7 +680,9 @@ def test_build_hook_boundary_rejects_manifest_symlink_ancestor_without_reading(
     outside = tmp_path / "outside-state"
     outside.mkdir()
     manifest = outside / "manifest.json"
-    manifest.write_text('{"schema_version":4,"generation_id":"generation"}\n')
+    manifest.write_text(
+        '{"schema_version":"1.0","generation_id":"generation"}\n'
+    )
     manifest_bytes = manifest.read_bytes()
     before = _metadata(manifest)
     (root / ".supernote-module").symlink_to(outside, target_is_directory=True)

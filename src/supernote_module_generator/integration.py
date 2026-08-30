@@ -1,4 +1,4 @@
-"""Minimal parent dependency bootstrap used by fresh V4 feature creation."""
+"""Minimal parent dependency bootstrap used by fresh feature creation."""
 from __future__ import annotations
 
 import json

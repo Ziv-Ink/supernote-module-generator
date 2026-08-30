@@ -1,4 +1,4 @@
-"""V4 plan/check/repair command adapter shared by human and JSON output."""
+"""Plan/check/repair command adapter shared by human and JSON output."""
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
@@ -19,7 +19,7 @@ from .models import (
     ValidationResult,
 )
 from .transaction import Transaction
-from .v4_validation import V4ValidationResult, V4Validator
+from .validation import GeneratedProjectValidationResult, GeneratedProjectValidator
 from .filesystem import (
     ProtectedSourceRestoreError,
     ProtectedSourceGuard,
@@ -186,7 +186,7 @@ class CliOperationService:
         guard = ProtectedSourceGuard(self.root)
 
         try:
-            result = V4Validator(self.root).validate(
+            result = GeneratedProjectValidator(self.root).validate(
                 build=build,
                 jvm_manifests=jvm_manifests,
                 validate_dependencies=command == "validate",
@@ -448,7 +448,7 @@ class CliOperationService:
         self,
         command: str,
         requested: tuple[str, ...],
-        result: V4ValidationResult,
+        result: GeneratedProjectValidationResult,
         *,
         build: bool,
         rollback: RollbackResult,
@@ -1155,7 +1155,7 @@ class CliOperationService:
                 commit=not staged_repair,
             )
             if staged_repair:
-                staged_validation = V4Validator(self.root).validate(
+                staged_validation = GeneratedProjectValidator(self.root).validate(
                     jvm_manifests=jvm_manifests,
                     parent_transaction_id=transaction.identifier,
                 )
@@ -1298,7 +1298,7 @@ class CliOperationService:
     def _staged_repair_validation_failure(
         self,
         plan,
-        result: V4ValidationResult,
+        result: GeneratedProjectValidationResult,
         *,
         planned_changes: list[Change],
         rollback: RollbackResult,
@@ -1373,7 +1373,7 @@ class CliOperationService:
                 "JVM generation requires the Android Gradle wrapper to run KSP"
             )
         command = gradle_wrapper_command(
-            gradle, [":supernote-v4-runtime:kspDebugKotlin"]
+            gradle, [":supernote-runtime:kspDebugKotlin"]
         )
         result = run_process(command, cwd=self.root / "android", timeout=1200)
         if result.returncode:

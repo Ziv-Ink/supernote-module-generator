@@ -30,12 +30,12 @@ class JsiBindingMode:
 
 
 def binding_mode(feature_id: str | None) -> JsiBindingMode:
-    """Validate one optional V4 feature identity and derive its namespace suffix."""
+    """Validate one optional feature identity and derive its namespace suffix."""
 
     if feature_id is None:
         return JsiBindingMode(None, "")
     if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
-        raise JsiBindingDecisionError(f"invalid V4 feature identity {feature_id!r}")
+        raise JsiBindingDecisionError(f"invalid feature identity {feature_id!r}")
     return JsiBindingMode(
         feature_id,
         feature_id.removeprefix("supernote:feature:"),
@@ -53,7 +53,7 @@ def registration_kind(
         return JsiRegistrationKind.SYNC
     if not mode.feature_scoped:
         raise JsiBindingDecisionError(
-            "V4 async bindings require plugin-level feature lowering"
+            "async bindings require plugin-level feature lowering"
         )
     return JsiRegistrationKind.ASYNC
 

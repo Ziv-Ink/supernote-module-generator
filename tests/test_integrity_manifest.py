@@ -19,7 +19,7 @@ from supernote_module_generator.semantic_ir import (
 def canonical_manifest() -> dict[str, object]:
     generation_id = "a" * 64
     return {
-        "schema_version": 4,
+        "schema_version": "1.0",
         "generator_version": "4.0.0",
         "generation_id": generation_id,
         "plugin": {"id": "fixture"},
@@ -33,7 +33,7 @@ def canonical_manifest() -> dict[str, object]:
         ],
         "artifacts": [
             {
-                "path": "android/.supernote-module/v4-runtime/ownership.json",
+                "path": "android/.supernote-module/runtime/ownership.json",
                 "owner": "shared-runtime",
                 "kind": "runtime-metadata",
                 "sha256": "c" * 64,

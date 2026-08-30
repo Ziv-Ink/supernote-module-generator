@@ -38,7 +38,7 @@ class JvmSourceManifest:
     feature_id: str
     frontend_version: str
     owners: tuple[JvmOwnerSource, ...]
-    schema_version: int = JVM_MANIFEST_SCHEMA_VERSION
+    schema_version: str = JVM_MANIFEST_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != JVM_MANIFEST_SCHEMA_VERSION:
@@ -109,7 +109,13 @@ def read_jvm_manifest(
             {"schema_version", "kind", "feature_id", "frontend_version", "owners"},
             "manifest",
         )
-        schema = _integer(value["schema_version"], "schema_version")
+        raw_schema = value["schema_version"]
+        if not isinstance(raw_schema, str) or not raw_schema:
+            raise JvmManifestError(
+                f"incompatible JVM manifest schema {raw_schema!r}; "
+                f"expected {JVM_MANIFEST_SCHEMA_VERSION}"
+            )
+        schema = raw_schema
         if schema != JVM_MANIFEST_SCHEMA_VERSION:
             raise JvmManifestError(
                 f"incompatible JVM manifest schema {schema}; "

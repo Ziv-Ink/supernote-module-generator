@@ -165,7 +165,7 @@ public:
 """,
     )
 
-    source = binding_codegen.render_v4_feature_jsi(
+    source = binding_codegen.render_feature_jsi(
         root,
         module_name="Drawing",
         feature_id="supernote:feature:0123456789abcdef",
@@ -178,7 +178,7 @@ public:
     assert "CppObjectRegistry" in source
     assert "try_extract_cpp_object<" in source
     assert '"supernote:feature:0123456789abcdef:type:Stroke"' in source
-    assert "supernote_wrap_v4_object_0" in source
+    assert "supernote_wrap_module_object_0" in source
     assert "std::make_shared<::drawing::Stroke>" in source
     assert "native_instance->intersects(*supernote_input_0)" in source
     assert "this->managed_ref()->child = supernote_input_0" in source
@@ -190,6 +190,7 @@ public:
     assert 'object_type.setProperty(runtime, "check"' in source
     assert '"NOMINAL_MISMATCH", path, "Stroke"' in source
     assert '"__supernoteCppObjectInfo"' in source
+    assert "v4" not in source.lower()
     accepts = source.index('PropNameID::forAscii(runtime, "select.accepts")')
     check = source.index('PropNameID::forAscii(runtime, "select.checkArguments")')
     assert "::drawing::select(" not in source[accepts:check]
@@ -248,7 +249,7 @@ std::vector<std::byte> echoBytes(std::vector<std::byte> value) {
         encoding="utf-8",
     )
 
-    source = binding_codegen.render_v4_feature_jsi(
+    source = binding_codegen.render_feature_jsi(
         root,
         module_name="Drawing",
         feature_id="supernote:feature:0123456789abcdef",
@@ -303,7 +304,7 @@ std::vector<std::byte> echoBytes(std::vector<std::byte> value) {
         assert "std::vector<std::byte> result" not in preflight
     assert 'range ? "LIMIT_EXCEEDED" : "TYPE_MISMATCH"' in source
     assert "supernote_make_uint8_array" in source
-    assert "supernote_v4_throw_conversion_failure" in source
+    assert "supernote_module_throw_conversion_failure" in source
     assert "supernote_validate_js_" in source
     assert 'exports.setProperty(runtime, "Point"' in source
     assert 'exports.setProperty(runtime, "Color"' in source
@@ -343,7 +344,7 @@ Point echoPoint(Point point) { return point; }
         encoding="utf-8",
     )
 
-    source = binding_codegen.render_v4_feature_jsi(
+    source = binding_codegen.render_feature_jsi(
         root,
         module_name="Drawing",
         feature_id="supernote:feature:0123456789abcdef",
@@ -351,8 +352,8 @@ Point echoPoint(Point point) { return point; }
     )
 
     assert 'exports.setProperty(runtime, "echoPoint"' in source
-    assert "::drawing::Point supernote_v4_from_js_" in source
-    assert "facebook::jsi::Value supernote_v4_to_js_" in source
+    assert "::drawing::Point supernote_module_from_js_" in source
+    assert "facebook::jsi::Value supernote_module_to_js_" in source
 
 
 def test_feature_renderer_emits_async_object_retention_and_js_thread_wrapping(
@@ -377,7 +378,7 @@ public:
 """,
     )
 
-    source = binding_codegen.render_v4_feature_jsi(
+    source = binding_codegen.render_feature_jsi(
         root,
         module_name="Drawing",
         feature_id="supernote:feature:0123456789abcdef",
@@ -390,7 +391,7 @@ public:
     assert "operation->set_retained_state(retained_input_state)" in source
     assert "retained_result" in source
     assert "process_services().workers().submit" in source
-    assert "supernote_v4_object_registry(runtime)" in source
+    assert "supernote_module_object_registry(runtime)" in source
     assert "schedule_completion" in source
 
     argument = source.index("auto supernote_input_0 =")
@@ -400,12 +401,12 @@ public:
     queued = source.index("workers().submit", attached)
     scheduled = source.index("schedule_completion", attached)
     js_identity_lookup = source.index(
-        "supernote_v4_object_registry(runtime)", scheduled
+        "supernote_module_object_registry(runtime)", scheduled
     )
     assert argument < retained < accepted < attached < queued
     assert queued < scheduled < js_identity_lookup
     worker_capture = source[queued : source.index("mutable {", queued)]
     assert "facebook::jsi::Runtime" not in worker_capture
-    assert "supernote_v4_object_registry" not in worker_capture
+    assert "supernote_module_object_registry" not in worker_capture
     completion = source[scheduled:js_identity_lookup]
     assert "void *runtime_pointer" in completion

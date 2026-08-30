@@ -12,14 +12,14 @@ import dalvik.system.BaseDexClassLoader
 import java.io.File
 import java.security.MessageDigest
 
-class SupernoteV4Module(
+class SupernoteModule(
     private val context: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(context) {
   private val lifecycleLock = Any()
   private var lifecycleState = LifecycleState.NEW
   private var sessionId: Long = 0L
 
-  override fun getName(): String = "SupernoteV4Runtime"
+  override fun getName(): String = "SupernoteModuleRuntime"
 
   override fun initialize() {
     super.initialize()
@@ -47,7 +47,7 @@ class SupernoteV4Module(
         abandonPendingInstall()
         return@runOnJSQueueThread
       }
-      val loader = SupernoteV4Module::class.java.classLoader
+      val loader = SupernoteModule::class.java.classLoader
       if (loader == null) {
         Log.e(TAG, "plugin ClassLoader is unavailable")
         abandonPendingInstall()
@@ -74,7 +74,7 @@ class SupernoteV4Module(
         }
       } ?: return@runOnJSQueueThread
       if (installed == 0L) {
-        Log.e(TAG, "V4 runtime installation failed")
+        Log.e(TAG, "Generated runtime installation failed")
       }
     }
   }
@@ -97,7 +97,7 @@ class SupernoteV4Module(
   }
 
   private fun loadNativeLibrary(): Boolean = try {
-    val pluginClassLoader = SupernoteV4Module::class.java.classLoader
+    val pluginClassLoader = SupernoteModule::class.java.classLoader
     val libraryPath =
         (pluginClassLoader as? BaseDexClassLoader)
             ?.findLibrary("${NATIVE_LIBRARY_NAME}")
@@ -109,9 +109,9 @@ class SupernoteV4Module(
     val previous = thread.contextClassLoader
     val runtimeDirectory =
         File(libraryPath).parentFile
-            ?: error("Generated V4 runtime native-library directory is unavailable")
+            ?: error("Generated runtime native-library directory is unavailable")
     if (!runtimeDirectory.isDirectory) {
-      error("Generated V4 runtime native-library directory does not exist")
+      error("Generated runtime native-library directory does not exist")
     }
     val runtimeLoadName =
         "${NATIVE_LIBRARY_NAME}_" +
@@ -146,13 +146,13 @@ class SupernoteV4Module(
           val cachedAddress = cachedPublication.substring(separator + 1).toLongOrNull()
               ?: error("SNMG_GENERATION_STATE_CORRUPT: cached registrar address is invalid")
           if (cachedAddress == 0L ||
-              !SupernoteV4NativeRegistrationBridge.register(
+              !SupernoteModuleNativeRegistrationBridge.register(
                   File(registrationLibraryPath),
                   cachedAddress,
                   cachedGeneration,
                   pluginClassLoader,
               )) {
-            error("Cannot reuse unchanged generated V4 runtime natives")
+            error("Cannot reuse unchanged generated runtime natives")
           }
           Log.i(TAG, "Reused native generation $cachedGeneration for sha256=$binaryHash")
         } else {
@@ -206,28 +206,28 @@ class SupernoteV4Module(
           SoLoader.loadLibrary(runtimeLoadName)
           val publication =
               System.getProperty("${NATIVE_REGISTRAR_PROPERTY}")
-                  ?: error("Generated V4 runtime registrar is unavailable")
+                  ?: error("Generated runtime registrar is unavailable")
           val separator = publication.indexOf(':')
           if (separator <= 0 || separator == publication.lastIndex) {
-            error("Generated V4 runtime registrar publication is malformed")
+            error("Generated runtime registrar publication is malformed")
           }
           val publishedGeneration = publication.substring(0, separator)
           if (publishedGeneration != runtimeLoadName) {
             error(
-                "Generated V4 runtime generation mismatch: expected " +
+                "Generated runtime generation mismatch: expected " +
                     "$runtimeLoadName but loaded $publishedGeneration",
             )
           }
           val registrarAddress = publication.substring(separator + 1).toLongOrNull()
-              ?: error("Generated V4 runtime registrar address is invalid")
+              ?: error("Generated runtime registrar address is invalid")
           if (registrarAddress == 0L ||
-              !SupernoteV4NativeRegistrationBridge.register(
+              !SupernoteModuleNativeRegistrationBridge.register(
                   File(registrationLibraryPath),
                   registrarAddress,
                   runtimeLoadName,
                   pluginClassLoader,
               )) {
-            error("Cannot register generated V4 runtime natives")
+            error("Cannot register generated runtime natives")
           }
           System.setProperty(binaryRegistryKey, publication)
         } finally {
@@ -245,7 +245,7 @@ class SupernoteV4Module(
     }
     true
   } catch (failure: Throwable) {
-    Log.e(TAG, "Cannot load the generated V4 runtime", failure)
+    Log.e(TAG, "Cannot load the generated runtime", failure)
     false
   }
 
@@ -258,7 +258,7 @@ class SupernoteV4Module(
   private external fun nativeInvalidate(sessionId: Long)
 
   private companion object {
-    const val TAG = "SupernoteV4Runtime"
+    const val TAG = "SupernoteModuleRuntime"
     const val MAX_RETAINED_GENERATIONS = 32
 
     fun sha256(file: File): String {
@@ -283,7 +283,7 @@ class SupernoteV4Module(
   }
 }
 
-private object SupernoteV4NativeRegistrationBridge {
+private object SupernoteModuleNativeRegistrationBridge {
   fun register(
       sourceLibrary: File,
       registrarAddress: Long,
@@ -291,13 +291,13 @@ private object SupernoteV4NativeRegistrationBridge {
       classLoader: ClassLoader,
   ): Boolean {
     if (registrarAddress == 0L) {
-      error("Generated V4 runtime registrar address is invalid")
+      error("Generated runtime registrar address is invalid")
     }
     val directory =
         sourceLibrary.parentFile
-            ?: error("Generated V4 registration native-library directory is unavailable")
+            ?: error("Generated registration native-library directory is unavailable")
     if (!directory.isDirectory) {
-      error("Generated V4 registration native-library directory does not exist")
+      error("Generated registration native-library directory does not exist")
     }
     val bridge =
         File.createTempFile("${NATIVE_REGISTRATION_LIBRARY_NAME}-", ".so", directory)
@@ -320,13 +320,13 @@ private object SupernoteV4NativeRegistrationBridge {
       classLoader: ClassLoader,
   ): Boolean
 
-  private const val TAG = "SupernoteV4Runtime"
+  private const val TAG = "SupernoteModuleRuntime"
 }
 
-class SupernoteV4Package : ReactPackage {
+class SupernoteModulePackage : ReactPackage {
   override fun createNativeModules(
       reactContext: ReactApplicationContext,
-  ): List<NativeModule> = listOf(SupernoteV4Module(reactContext))
+  ): List<NativeModule> = listOf(SupernoteModule(reactContext))
 
   override fun createViewManagers(
       reactContext: ReactApplicationContext,

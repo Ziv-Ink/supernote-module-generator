@@ -346,7 +346,7 @@ class Renderer:
         if result.validation is not None and any(
             "code" in issue for issue in result.validation.issues
         ):
-            self._render_v4_validation_failure(result, error)
+            self._render_validation_failure(result, error)
             return
         if result.modules:
             noun = (
@@ -437,7 +437,7 @@ class Renderer:
             print(f"\n  Next:     {result.metadata['next_action']}", file=self.stderr)
         self._render_debug(error)
 
-    def _render_v4_validation_failure(
+    def _render_validation_failure(
         self,
         result: CommandResult,
         error: ErrorInfo,

@@ -1008,7 +1008,7 @@ def _stored_member_kind(
         ) from exc
 
 
-def _parse_v4_field_source(
+def _parse_generated_field_source(
     *,
     module_root: Path,
     path: Path,
@@ -1103,7 +1103,7 @@ def _constructor_is_lowerable(
     return route is CppConstructorRoute.LOWER
 
 
-def _parse_v4_constructor_source(
+def _parse_generated_constructor_source(
     *,
     module_root: Path,
     path: Path,
@@ -1215,7 +1215,7 @@ def _parse_v4_constructor_source(
     )
 
 
-def _parse_v4_method_source(
+def _parse_generated_method_source(
     *,
     module_root: Path,
     path: Path,
@@ -1356,7 +1356,7 @@ def _class_member_callable_parts(
     )
 
 
-def _parse_v4_class_members(
+def _parse_generated_class_members(
     *,
     module_root: Path,
     path: Path,
@@ -1396,7 +1396,7 @@ def _parse_v4_class_members(
         if stored_kind is CppStoredMemberKind.FIELD:
             assert stack is not None
             fields.append(
-                _parse_v4_field_source(
+                _parse_generated_field_source(
                     module_root=module_root,
                     path=path,
                     module_name=module_name,
@@ -1424,7 +1424,7 @@ def _parse_v4_class_members(
         )
         if callable_head.kind is CppCallableKind.CONSTRUCTOR:
             has_user_constructor = True
-            constructor = _parse_v4_constructor_source(
+            constructor = _parse_generated_constructor_source(
                 module_root=module_root,
                 path=path,
                 module_name=module_name,
@@ -1444,7 +1444,7 @@ def _parse_v4_class_members(
         if stack is None:
             continue
         methods.append(
-            _parse_v4_method_source(
+            _parse_generated_method_source(
                 module_root=module_root,
                 path=path,
                 module_name=module_name,
@@ -1572,7 +1572,7 @@ def _class_parse_context(
     )
 
 
-def _parse_v4_class_source(
+def _parse_generated_class_source(
     *,
     module_root: Path,
     source_root: Path,
@@ -1680,7 +1680,7 @@ def _parse_v4_class_source(
     consumed = set(member_bindings.consumed_comment_offsets)
 
     relative = str(path.relative_to(module_root))
-    constructors, methods, fields, has_user_constructor = _parse_v4_class_members(
+    constructors, methods, fields, has_user_constructor = _parse_generated_class_members(
         module_root=module_root,
         path=path,
         module_name=module_name,
@@ -1780,7 +1780,7 @@ def scan_cpp_class_source_model(
             if route.kind is ClassStackKind.ENUM:
                 consumed.update(comment.start for comment in stack.comments)
                 continue
-            item, item_consumed = _parse_v4_class_source(
+            item, item_consumed = _parse_generated_class_source(
                 module_root=module_root,
                 source_root=source_root,
                 path=path,
@@ -1804,7 +1804,7 @@ def scan_cpp_class_source_model(
             class_token = next(
                 token for token, _, _ in extents if token.start == owner_offset
             )
-            item, item_consumed = _parse_v4_class_source(
+            item, item_consumed = _parse_generated_class_source(
                 module_root=module_root,
                 source_root=source_root,
                 path=path,
@@ -2440,7 +2440,7 @@ def scan_objects(
                 comment.line,
                 module_name,
                 None,
-                "SupernoteExportObject is removed in V4; mark the class with "
+                "SupernoteExportObject is removed; mark the class with "
                 "SupernotePluginExport and mark each generated method explicitly",
             )
     class_sources = scan_cpp_class_source_model(
@@ -2561,12 +2561,12 @@ def scan_bindings(
     return ScannedBindings(tuple(exports), tuple(objects))
 
 
-def scan_v4_bindings(
+def scan_generated_bindings(
     module_root: Path,
     *,
     module_name: str,
 ) -> ScannedBindings:
-    """Lower source declarations into the active V4 binding model."""
+    """Lower source declarations into the active binding model."""
 
     function_sources = scan_cpp_source_model(
         module_root, module_name=module_name
@@ -3490,7 +3490,7 @@ facebook::jsi::Value supernote_make_uint8_array(
 
 def _jsi_async_helpers() -> str:
     return r'''constexpr char kPromiseContinuationsGlobal[] =
-    "__supernoteV4PromiseContinuations_a7db36cf3b5e";
+    "__supernoteModulePromiseContinuations_a7db36cf3b5e";
 
 facebook::jsi::Object supernote_error_object(
     facebook::jsi::Runtime &runtime,
@@ -4374,7 +4374,7 @@ constexpr char kGlobalName[] = {json.dumps(global_name)};
 """
     else:
         bootstrap_constants = f"""constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV4FeatureRegistry_63f6999c8c67";
+    "__supernoteModuleFeatureRegistry_63f6999c8c67";
 constexpr char kFeatureId[] = {json.dumps(feature_id)};
 """
     value_helpers = _jsi_value_helpers()
@@ -4548,7 +4548,7 @@ void {install_name}(
 """
 
 
-def render_v4_feature_jsi(
+def render_feature_jsi(
     module_root: Path,
     *,
     module_name: str,
@@ -4604,7 +4604,7 @@ def render_v4_feature_jsi(
             )
         except (CppProjectionError, CppRouteError, SourceModelError, ValueError) as exc:
             raise CodegenError(str(exc)) from exc
-        # The V4 route renderer owns every public C++ function, including
+        # The route renderer owns every public C++ function, including
         # scalar-only functions.  Keeping the legacy scalar renderer empty is
         # important because it loses namespace ownership and cannot safely
         # distinguish identical starter symbols from separate features.
@@ -4612,10 +4612,10 @@ def render_v4_feature_jsi(
     else:
         bindings = ScannedBindings((), ())
     config: dict[str, object] = {
-        "android_namespace": "supernote.generated.v4",
+        "android_namespace": "supernote.generated.runtime",
         "module_name": module_name,
-        "class_prefix": "V4Feature",
-        "jsi_global_name": "__supernoteV4",
+        "class_prefix": "ModuleFeature",
+        "jsi_global_name": "__supernoteModule",
     }
     rendered = _jsi_binding(
         config,
@@ -4631,16 +4631,16 @@ def render_v4_feature_jsi(
     if conversion_digest is None:
         return rendered
     if not re.fullmatch(r"[0-9a-f]{64}", conversion_digest):
-        raise CodegenError("invalid V4 conversion-plan digest")
+        raise CodegenError("invalid conversion-plan digest")
     return (
-        f"// Supernote V4 conversion plan SHA-256: {conversion_digest}\n"
+        f"// Supernote conversion plan SHA-256: {conversion_digest}\n"
         "#include <supernote/conversion.hpp>\n"
         "#include <supernote/cpp_objects.hpp>\n"
         + rendered
     )
 
 
-def render_v4_plugin_jsi(
+def render_plugin_jsi(
     feature_ids: list[str],
     *,
     jvm_feature_ids: list[str] | None = None,
@@ -4650,16 +4650,16 @@ def render_v4_plugin_jsi(
     validated: list[tuple[str, str]] = []
     for feature_id in feature_ids:
         if not re.fullmatch(r"supernote:feature:[0-9a-f]{16}", feature_id):
-            raise CodegenError(f"invalid V4 feature identity {feature_id!r}")
+            raise CodegenError(f"invalid feature identity {feature_id!r}")
         validated.append(
             (feature_id, feature_id.removeprefix("supernote:feature:"))
         )
     if len({feature_id for feature_id, _ in validated}) != len(validated):
-        raise CodegenError("duplicate V4 feature identity in plugin registry")
+        raise CodegenError("duplicate feature identity in plugin registry")
     jvm_features = set(jvm_feature_ids or ())
     unknown_jvm = jvm_features - {feature_id for feature_id, _ in validated}
     if unknown_jvm:
-        raise CodegenError("JVM routes refer to an unknown V4 feature")
+        raise CodegenError("JVM routes refer to an unknown feature")
     declarations = "\n".join(
         "namespace supernote::generated::feature_"
         f"{suffix} {{\n"
@@ -4711,7 +4711,7 @@ namespace supernote::generated {{
 namespace {{
 
 constexpr char kFeatureRegistryGlobal[] =
-    "__supernoteV4FeatureRegistry_63f6999c8c67";
+    "__supernoteModuleFeatureRegistry_63f6999c8c67";
 
 [[noreturn]] void throw_type_error(
     facebook::jsi::Runtime &runtime, const std::string &message) {{
@@ -4748,7 +4748,7 @@ void install_plugin_bindings(
         if (argument_count != 1 || !arguments[0].isString()) {{
           throw_type_error(
               runtime,
-              "Supernote V4 runtime feature(id) expects exactly one string");
+              "Supernote generated runtime feature(id) expects exactly one string");
         }}
         const auto feature_id = arguments[0].asString(runtime).utf8(runtime);
         auto registry = runtime.global().getPropertyAsObject(
@@ -4756,13 +4756,13 @@ void install_plugin_bindings(
         auto binding = registry.getProperty(runtime, feature_id.c_str());
         if (binding.isUndefined()) {{
           throw_type_error(
-              runtime, "unknown Supernote V4 feature: " + feature_id);
+              runtime, "unknown Supernote generated feature: " + feature_id);
         }}
         return binding;
       }});
   public_runtime.setProperty(runtime, "feature", std::move(feature));
   runtime.global().setProperty(
-      runtime, "__supernoteV4", std::move(public_runtime));
+      runtime, "__supernoteModule", std::move(public_runtime));
 }}
 
 }}  // namespace supernote::generated

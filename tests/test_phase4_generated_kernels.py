@@ -12,7 +12,7 @@ from supernote_module_generator.conversion_codegen import (
     render_cpp_conversion_kernel,
     render_jvm_conversion_kernel,
 )
-from supernote_module_generator.binding_codegen import render_v4_feature_jsi
+from supernote_module_generator.binding_codegen import render_feature_jsi
 from supernote_module_generator.feature_model import PluginRuntimeRegistry
 from supernote_module_generator.jvm_codegen import render_jvm_feature_jsi
 from supernote_module_generator.jvm_manifest import JvmSourceManifest
@@ -39,12 +39,12 @@ def test_plugin_runtime_contains_one_cpp_and_jvm_limits_contract():
     assert "SupernoteConversionBudget.kt" in ownership
 
 
-def test_v4_feature_translation_units_include_shared_conversion_kernel(
+def test_feature_translation_units_include_shared_conversion_kernel(
     tmp_path: Path,
 ):
     digest = "a" * 64
     feature_id = "supernote:feature:0123456789abcdef"
-    cpp = render_v4_feature_jsi(
+    cpp = render_feature_jsi(
         tmp_path,
         module_name="Drawing",
         feature_id=feature_id,
@@ -58,7 +58,7 @@ def test_v4_feature_translation_units_include_shared_conversion_kernel(
         conversion_digest=digest,
     )
     expected = (
-        "// Supernote V4 conversion plan SHA-256: " + digest + "\n"
+        "// Supernote conversion plan SHA-256: " + digest + "\n"
         "#include <supernote/conversion.hpp>\n"
     )
     assert cpp.startswith(expected + "#include <supernote/cpp_objects.hpp>\n")

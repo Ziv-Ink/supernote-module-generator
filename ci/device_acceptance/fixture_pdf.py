@@ -8,7 +8,7 @@ FIXTURE_NAME = "SNMG_Bounded_Acceptance.pdf"
 FIXTURE_DEVICE_PATH = f"/storage/emulated/0/Document/{FIXTURE_NAME}"
 
 
-def build_fixture_pdf(label: str = "SNV4 Bounded DOC Acceptance") -> bytes:
+def build_fixture_pdf(label: str = "SN Module Gen Bounded DOC Acceptance") -> bytes:
     escaped = label.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
     stream = f"BT /F1 24 Tf 72 720 Td ({escaped}) Tj ET\n".encode("ascii")
     objects = (

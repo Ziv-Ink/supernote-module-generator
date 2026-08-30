@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "suite": "v4-bounded-note-doc-final",
+  "schema_version": "1.0",
+  "suite": "sn-module-gen-bounded-note-doc",
   "pinned_file_reader_revision": "9f626ed39be82b43ff74eb735d10b7de61f51508",
   "pinned_sn_plugin_lib": "0.1.63",
   "hosts": {

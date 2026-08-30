@@ -46,7 +46,7 @@ class DestinationConflict(GeneratorError):
 
 
 class UnsupportedLegacyProject(GeneratorError):
-    """A pre-V4 generated layout was found at the public command boundary."""
+    """A V1-V4 generated layout was found at the public command boundary."""
 
     exit_code = 1
     kind = "unsupported_legacy_project"
@@ -54,7 +54,7 @@ class UnsupportedLegacyProject(GeneratorError):
 
 
 class UnmanifestedGeneratedProject(GeneratorError):
-    """Current-layout generated state exists without V4 ownership authority."""
+    """Current-layout generated state exists without ownership authority."""
 
     exit_code = 1
     kind = "unmanifested_generated_project"

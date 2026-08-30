@@ -29,8 +29,8 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.io.path.invariantSeparatorsPathString
 
-private const val manifestSchema = 3
-private const val manifestKind = "supernote_v4_jvm_source_manifest"
+private const val manifestSchema = "1.0"
+private const val manifestKind = "supernote_module_jvm_source_manifest"
 private val markerOrder = listOf(
   "SupernotePluginObject",
   "SupernotePluginValue",
@@ -45,7 +45,7 @@ private val markerNames = markerOrder.associateWith {
 
 private class SupernoteSourceDiagnostic : RuntimeException()
 
-class SupernoteV4Processor(
+class SupernoteModuleProcessor(
   private val environment: SymbolProcessorEnvironment,
 ) : SymbolProcessor {
   private var generated = false
@@ -876,12 +876,12 @@ class SupernoteV4Processor(
     .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
   private fun fail(node: KSNode, message: String): Nothing {
-    environment.logger.error("Supernote V4: $message", node)
+    environment.logger.error("Supernote module: $message", node)
     throw SupernoteSourceDiagnostic()
   }
 
   private fun fail(path: String, message: String): Nothing {
-    environment.logger.error("Supernote V4: $path: $message")
+    environment.logger.error("Supernote module: $path: $message")
     throw SupernoteSourceDiagnostic()
   }
 }
@@ -1205,7 +1205,7 @@ private fun json(value: Any?): String = when (value) {
   else -> error("Unsupported JSON value ${value::class}")
 }
 
-class SupernoteV4ProcessorProvider : SymbolProcessorProvider {
+class SupernoteModuleProcessorProvider : SymbolProcessorProvider {
   override fun create(environment: SymbolProcessorEnvironment): SymbolProcessor =
-    SupernoteV4Processor(environment)
+    SupernoteModuleProcessor(environment)
 }

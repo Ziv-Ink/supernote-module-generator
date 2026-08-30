@@ -18,6 +18,7 @@ HISTORICAL_MARKERS = (
     "SNV4_TEST_EVENT ",
     "SNV4_PERMISSION_REQUEST ",
 )
+HISTORICAL_SUITE = "v4-bounded-note-doc-final"
 
 
 def _payloads(log: str, marker: str) -> list[dict[str, Any]]:
@@ -58,8 +59,13 @@ def validate_evidence(
         raise ValueError("host must be note or doc")
     expected_checks = [item["id"] for item in cases["checks"]]
     markers, results = _marker_family(log)
+    current_family = markers == CURRENT_MARKERS
     result = results[0]
-    if result.get("suite") != cases["suite"] or result.get("host") != host:
+    expected_suite = cases["suite"] if current_family else HISTORICAL_SUITE
+    expected_schema: object = "1.0" if current_family else 1
+    if result.get("schema") != expected_schema:
+        raise ValueError("terminal result schema mismatch")
+    if result.get("suite") != expected_suite or result.get("host") != host:
         raise ValueError("terminal result suite/host mismatch")
     if result.get("status") != "pass":
         raise ValueError("terminal result did not pass")
@@ -77,7 +83,7 @@ def validate_evidence(
     requests = _payloads(log, markers[2])
     expected_host = cases["hosts"][host]
     expected_request = {
-        "schema": 1,
+        "schema": expected_schema,
         "host": host,
         "permission": expected_host["permission"],
         "action": expected_host["permission_action"],
@@ -104,8 +110,8 @@ def validate_evidence(
         raise ValueError(f"permission outcome mismatch: {permission!r}")
 
     return {
-        "schema_version": 1,
-        "suite": cases["suite"],
+        "schema_version": expected_schema,
+        "suite": expected_suite,
         "host": host,
         "plugin_name": result.get("pluginName"),
         "status": "pass",

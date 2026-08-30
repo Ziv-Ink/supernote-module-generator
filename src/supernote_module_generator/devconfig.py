@@ -125,7 +125,7 @@ def configured_developer_environment(root: Path) -> Iterator[DevConfigApplicatio
     and fall back to the launching environment for absent or unusable values. The
     generator follows the same selection rules here, restores its environment after
     the command, and gives every subprocess and Doctor lookup one configuration.
-    V4 never rewrites ``android/local.properties`` while applying this environment.
+    The generator never rewrites ``android/local.properties`` while applying this environment.
     """
 
     plugin_root = root.expanduser().resolve()

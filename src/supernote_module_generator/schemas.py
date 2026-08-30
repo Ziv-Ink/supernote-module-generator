@@ -6,17 +6,17 @@ changes are explicit, reviewable, and cannot drift independently between
 frontends.
 """
 
-SEMANTIC_MANIFEST_SCHEMA_VERSION = 3
-SEMANTIC_MANIFEST_KIND = "supernote_v4_semantic_manifest"
+SEMANTIC_MANIFEST_SCHEMA_VERSION = "1.0"
+SEMANTIC_MANIFEST_KIND = "supernote_module_semantic_manifest"
 
-JVM_SOURCE_MANIFEST_SCHEMA_VERSION = 3
-JVM_SOURCE_MANIFEST_KIND = "supernote_v4_jvm_source_manifest"
+JVM_SOURCE_MANIFEST_SCHEMA_VERSION = "1.0"
+JVM_SOURCE_MANIFEST_KIND = "supernote_module_jvm_source_manifest"
 
-FEATURE_MANIFEST_SCHEMA_VERSION = 3
-FEATURE_MANIFEST_KIND = "supernote_v4_feature"
+FEATURE_MANIFEST_SCHEMA_VERSION = "1.0"
+FEATURE_MANIFEST_KIND = "supernote_module_feature"
 
-PLUGIN_REGISTRY_SCHEMA_VERSION = 2
-PLUGIN_REGISTRY_KIND = "supernote_v4_plugin_runtime_registry"
+PLUGIN_REGISTRY_SCHEMA_VERSION = "1.0"
+PLUGIN_REGISTRY_KIND = "supernote_module_plugin_runtime_registry"
 
-GENERATED_OWNERSHIP_SCHEMA_VERSION = 2
-GENERATED_OWNERSHIP_KIND = "supernote_v4_plugin_runtime_ownership"
+GENERATED_OWNERSHIP_SCHEMA_VERSION = "1.0"
+GENERATED_OWNERSHIP_KIND = "supernote_module_plugin_runtime_ownership"

@@ -25,7 +25,7 @@ from supernote_module_generator.platform_tools import gradle_wrapper_path
 from supernote_module_generator.plugin_build_integration import set_runtime_wiring
 import supernote_module_generator.transaction as transaction_module
 from supernote_module_generator.transaction import Transaction, recover_pending
-from v4_project_inventory import inventory_project
+from project_inventory import inventory_project
 
 
 def plugin(tmp_path: Path, *, npm_lock: bool = False, yarn_lock: bool = False) -> Path:
@@ -149,7 +149,7 @@ def test_add_scaffolds_selected_families_without_backend_metadata(
     assert (feature / "android/src/main/cpp/feature.cpp").is_file() is native
     kotlin = feature / "android/src/main/java/com/example/document/FeatureApi.kt"
     assert kotlin.is_file() is jvm
-    assert "supernote-v4-runtime" in (root / "android/settings.gradle").read_text()
+    assert "supernote-runtime" in (root / "android/settings.gradle").read_text()
 
 
 def test_add_and_update_render_semantic_api_without_gradle_source_writes(
@@ -501,7 +501,7 @@ def test_update_build_mutation_preserves_unattributed_live_source(
         return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", mutating_build
+        "supernote_module_generator.validation.run_process", mutating_build
     )
 
     code, stdout, stderr = invoke(
@@ -543,7 +543,7 @@ def test_update_build_failure_preserves_structured_plan_and_diagnostics(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", failed_build
+        "supernote_module_generator.validation.run_process", failed_build
     )
 
     code, stdout, stderr = invoke(
@@ -574,7 +574,7 @@ def test_add_build_mutation_preserves_unattributed_application_source(
         return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", mutating_build
+        "supernote_module_generator.validation.run_process", mutating_build
     )
 
     code, stdout, stderr = invoke(
@@ -636,7 +636,7 @@ def test_unsupported_platform_symlink_capability_fails_before_transaction(
     assert not (root / ".supernote-module-transaction.json").exists()
 
 
-def test_v4_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
+def test_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
     tmp_path: Path, make_directory_symlink, stub_ksp_frontend
 ):
     root = plugin(tmp_path)
@@ -739,7 +739,7 @@ def test_v4_typed_cpp_jvm_and_mixed_features_complete_public_cli_lifecycle(
             root, ["remove", name, "--skip-install", "--yes"]
         )
         assert code == 0, stderr
-    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert not (root / "android/.supernote-module/runtime").exists()
 
 
 def test_update_skip_install_is_idempotent_when_refresh_is_not_required(
@@ -811,7 +811,7 @@ def test_add_postcondition_failure_rolls_back_feature_runtime_and_parent(
     assert code == 1
     assert "forced staged verification failure" in stderr
     assert not (root / "local_modules/broken").exists()
-    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert not (root / "android/.supernote-module/runtime").exists()
     assert not (root / "local_modules").exists()
     assert not (root / "android/.supernote-module").exists()
     for path, content in originals.items():
@@ -1611,7 +1611,7 @@ def test_add_rejects_stale_v2_generated_runtime_without_mutation(tmp_path: Path)
     assert "does not migrate" in stderr
     assert inventory_project(root) == before
     assert legacy_runtime.is_dir()
-    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert not (root / "android/.supernote-module/runtime").exists()
 
 
 @pytest.mark.skipif(
@@ -1675,7 +1675,7 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
         ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
     )[0] == 0
     feature = root / "local_modules/safe"
-    runtime_before = (root / "android/.supernote-module/v4-runtime/feature-registry.json").read_bytes()
+    runtime_before = (root / "android/.supernote-module/runtime/feature-registry.json").read_bytes()
 
     attempts = 0
 
@@ -1693,7 +1693,7 @@ def test_remove_dependency_failure_restores_feature_runtime_and_parent(
     assert "forced install failure" in stderr
     assert feature.is_dir()
     assert (
-        root / "android/.supernote-module/v4-runtime/feature-registry.json"
+        root / "android/.supernote-module/runtime/feature-registry.json"
     ).read_bytes() == runtime_before
     assert json.loads((root / "package.json").read_text())["dependencies"]["safe"]
 
@@ -1734,7 +1734,7 @@ def test_failed_or_interrupted_dependency_refresh_exactly_restores_main_applicat
     assert code == (130 if interrupted else 1), stderr
     assert application.read_bytes() == before
     expected_marker_count = 0 if command == "add" else 1
-    assert application.read_text().count("supernote-module-v4-package") == (
+    assert application.read_text().count("supernote-module-package") == (
         expected_marker_count * 2
     )
     assert not (root / ".supernote-module-transaction.json").exists()
@@ -1765,7 +1765,7 @@ def test_partial_then_startup_recovery_preserves_restored_main_application(
     assert application.read_bytes() == before
 
 
-def test_empty_validation_rejects_unmanifested_v4_runtime_and_package_wiring(
+def test_empty_validation_rejects_unmanifested_runtime_and_package_wiring(
     tmp_path: Path,
 ):
     root = plugin(tmp_path)
@@ -1783,10 +1783,10 @@ def test_empty_validation_rejects_unmanifested_v4_runtime_and_package_wiring(
     code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 1
-    assert "without a schema-4 integrity manifest" in stderr
+    assert "without a schema-version 1.0 integrity manifest" in stderr
     assert "cannot prove ownership" in stderr
     assert {path: path.read_bytes() for path in before} == before
-    assert application.read_text().count("supernote-module-v4-package") == 2
+    assert application.read_text().count("supernote-module-package") == 2
 
 
 def test_empty_validation_rejects_unmanifested_package_registration_alone(
@@ -1804,10 +1804,10 @@ def test_empty_validation_rejects_unmanifested_package_registration_alone(
     code, _, stderr = invoke(root, ["validate", "--all"])
 
     assert code == 1
-    assert "without a schema-4 integrity manifest" in stderr
+    assert "without a schema-version 1.0 integrity manifest" in stderr
     assert "cannot prove ownership" in stderr
     assert application.read_bytes() == before
-    assert application.read_text().count("supernote-module-v4-package") == 2
+    assert application.read_text().count("supernote-module-package") == 2
 
 
 def test_feature_validation_rejects_missing_main_application_registration(
@@ -1833,7 +1833,7 @@ def test_feature_validation_rejects_missing_main_application_registration(
     assert code == 1
     assert "SNMG_WIRING_INVALID" in stderr
     assert "expected 1 start/end pair" in stderr
-    assert "supernote-module-v4-package" not in application.read_text()
+    assert "supernote-module-package" not in application.read_text()
 
 
 def test_remove_preserves_build_outputs_unless_cleanup_is_explicit(tmp_path: Path):
@@ -1888,7 +1888,7 @@ def test_remove_all_is_explicit_and_removes_every_feature(tmp_path: Path):
     assert "2 features" in stdout
     assert not (root / "local_modules/one").exists()
     assert not (root / "local_modules/two").exists()
-    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert not (root / "android/.supernote-module/runtime").exists()
 
 
 def test_remove_json_exposes_the_complete_v4_plan_and_actual_changes(tmp_path: Path):
@@ -1923,7 +1923,7 @@ def test_remove_json_exposes_the_complete_v4_plan_and_actual_changes(tmp_path: P
     }
     assert ("local_modules/safe", "delete", "feature_implementation") in changes
     assert (
-        "android/.supernote-module/v4-runtime",
+        "android/.supernote-module/runtime",
         "delete",
         "plugin_runtime",
     ) in changes
@@ -1931,7 +1931,7 @@ def test_remove_json_exposes_the_complete_v4_plan_and_actual_changes(tmp_path: P
     assert any(scope == "plugin_wiring" for _path, _action, scope in changes)
     assert payload["actual_changes"] == payload["changes"]
     assert not (root / "local_modules/safe").exists()
-    assert not (root / "android/.supernote-module/v4-runtime").exists()
+    assert not (root / "android/.supernote-module/runtime").exists()
     assert invoke(root, ["--json", "check"])[0] == 0
 
 
@@ -2033,14 +2033,14 @@ def test_build_flag_routes_to_parent_assemble_task_and_changes_success_copy(
         gradle.write_text(
             "@echo off\r\n"
             'if "%1"=="--version" exit /b 0\r\n'
-            'if "%1"==":supernote-v4-runtime:generateSupernoteDebugSemantics" exit /b 0\r\n'
+            'if "%1"==":supernote-runtime:generateSupernoteDebugSemantics" exit /b 0\r\n'
             'if "%1"==":app:assembleDebug" exit /b 0\r\n'
             "exit /b 1\r\n",
             encoding="utf-8",
         )
     else:
         gradle.write_text(
-            '#!/bin/sh\ncase "$1" in\n  --version|:supernote-v4-runtime:generateSupernoteDebugSemantics|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
+            '#!/bin/sh\ncase "$1" in\n  --version|:supernote-runtime:generateSupernoteDebugSemantics|:app:assembleDebug) exit 0 ;;\n  *) exit 1 ;;\nesac\n',
             encoding="utf-8",
         )
         gradle.chmod(0o755)

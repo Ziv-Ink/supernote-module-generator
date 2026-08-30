@@ -345,7 +345,7 @@ def test_add_update_build_and_doctor_share_the_devconfig_environment(
     monkeypatch.setattr(
         "supernote_module_generator.feature_cli_operations.run_process", record
     )
-    monkeypatch.setattr("supernote_module_generator.v4_validation.run_process", record)
+    monkeypatch.setattr("supernote_module_generator.validation.run_process", record)
 
     add_code, _, add_error = _invoke(
         root,

@@ -1,4 +1,4 @@
-"""Idempotent parent wiring for the one plugin-level V4 runtime component."""
+"""Idempotent parent wiring for the one plugin-level generated runtime."""
 from __future__ import annotations
 
 import os
@@ -17,16 +17,16 @@ from .filesystem import (
 )
 
 
-PROJECT_NAME = "supernote-v4-runtime"
-ANNOTATIONS_PROJECT = "supernote-v4-annotations"
-PROCESSOR_PROJECT = "supernote-v4-processor"
-START = "// supernote-module-v4-runtime"
-END = "// end supernote-module-v4-runtime"
-PACKAGE_START = "// supernote-module-v4-package"
-PACKAGE_END = "// end supernote-module-v4-package"
+PROJECT_NAME = "supernote-runtime"
+ANNOTATIONS_PROJECT = "supernote-module-annotations"
+PROCESSOR_PROJECT = "supernote-module-processor"
+START = "// sn-module-gen-runtime"
+END = "// end sn-module-gen-runtime"
+PACKAGE_START = "// supernote-module-package"
+PACKAGE_END = "// end supernote-module-package"
 LEGACY_MARKERS = tuple(
     f"// supernote-module-v{version}-{kind}"
-    for version in (1, 2, 3)
+    for version in (1, 2, 3, 4)
     for kind in ("runtime", "package")
 )
 
@@ -130,7 +130,7 @@ def desired_runtime_wiring_files(
                 text,
                 canonical if enabled else None,
             )
-            marker = "supernote-module-v4-runtime"
+            marker = "sn-module-gen-runtime"
         elif path == app_build:
             canonical = _dependency_block(path.suffix == ".kts")
             if (
@@ -146,7 +146,7 @@ def desired_runtime_wiring_files(
                 text,
                 canonical if enabled else None,
             )
-            marker = "supernote-module-v4-runtime"
+            marker = "sn-module-gen-runtime"
         else:
             canonical = _package_block(path.suffix == ".kt")
             if (
@@ -172,7 +172,7 @@ def desired_runtime_wiring_files(
                 enabled=enabled,
                 kotlin=path.suffix == ".kt",
             )
-            marker = "supernote-module-v4-package"
+            marker = "supernote-module-package"
         rows.append(
             CanonicalWiringFile(
                 path,
@@ -201,12 +201,12 @@ def expected_runtime_wiring_blocks(
     blocks = [
         CanonicalWiringBlock(
             settings,
-            "supernote-module-v4-runtime",
+            "sn-module-gen-runtime",
             _settings_block(settings.suffix == ".kts"),
         ),
         CanonicalWiringBlock(
             app_build,
-            "supernote-module-v4-runtime",
+            "sn-module-gen-runtime",
             _dependency_block(app_build.suffix == ".kts"),
         ),
     ]
@@ -245,7 +245,7 @@ def expected_runtime_wiring_blocks(
         blocks.append(
             CanonicalWiringBlock(
                 application.path,
-                "supernote-module-v4-package",
+                "supernote-module-package",
                 _extract_marker_block(expected, PACKAGE_START, PACKAGE_END),
             )
         )
@@ -477,7 +477,7 @@ def verify_runtime_wiring(
         expected = 1 if enabled else 0
         if count != expected:
             raise ConfigurationError(
-                f"{path} contains {count} V4 runtime blocks; expected {expected}"
+                f"{path} contains {count} generated runtime blocks; expected {expected}"
             )
     if application is not None:
         count = inspected[application].count(PACKAGE_START)
@@ -486,16 +486,16 @@ def verify_runtime_wiring(
             enabled and allow_missing_package and count == 0
         ):
             raise ConfigurationError(
-                f"{application} contains {count} V4 package blocks; "
+                f"{application} contains {count} generated package blocks; "
                 f"expected {expected}"
             )
 
 
 def _settings_block(kotlin: bool) -> str:
     projects = (
-        (PROJECT_NAME, ".supernote-module/v4-runtime"),
-        (ANNOTATIONS_PROJECT, ".supernote-module/v4-runtime/annotations"),
-        (PROCESSOR_PROJECT, ".supernote-module/v4-runtime/processor"),
+        (PROJECT_NAME, ".supernote-module/runtime"),
+        (ANNOTATIONS_PROJECT, ".supernote-module/runtime/annotations"),
+        (PROCESSOR_PROJECT, ".supernote-module/runtime/processor"),
     )
     if kotlin:
         body = "\n".join(
@@ -521,9 +521,9 @@ def _dependency_block(kotlin: bool) -> str:
 
 def _package_block(kotlin: bool) -> str:
     registration = (
-        "add(supernote.generated.runtime.SupernoteV4Package())"
+        "add(supernote.generated.runtime.SupernoteModulePackage())"
         if kotlin
-        else "packages.add(new supernote.generated.runtime.SupernoteV4Package());"
+        else "packages.add(new supernote.generated.runtime.SupernoteModulePackage());"
     )
     return f"{PACKAGE_START}\n{registration}\n{PACKAGE_END}"
 
@@ -535,10 +535,10 @@ def _remove_owned_wiring_fragments(
     end: str,
     canonical: str,
 ) -> str:
-    """Remove only text whose V4 ownership is unambiguous.
+    """Remove only text whose generated ownership is unambiguous.
 
     Complete marker blocks are wholly generator-owned. For incomplete marker
-    structures, exact marker lines and V4-unique payload statements are owned,
+    structures, exact marker lines and unique generated payload statements are owned,
     while generic Gradle braces and all other user text are preserved.
     """
 
@@ -581,7 +581,9 @@ def _replace_block(content: str, replacement: str | None) -> str:
     )
     matches = list(pattern.finditer(content))
     if len(matches) > 1:
-        raise ConfigurationError("Android build contains duplicate V4 runtime blocks")
+        raise ConfigurationError(
+            "Android build contains duplicate generated runtime blocks"
+        )
     if replacement is None:
         updated = pattern.sub("\n", content)
         return updated.rstrip() + "\n"
@@ -649,7 +651,9 @@ def _replace_package_registration(
     )
     matches = list(pattern.finditer(content))
     if len(matches) > 1:
-        raise ConfigurationError("MainApplication has duplicate V4 package blocks")
+        raise ConfigurationError(
+            "MainApplication has duplicate generated package blocks"
+        )
     cleaned = pattern.sub("", content)
     if not enabled:
         return cleaned
@@ -666,7 +670,7 @@ def _replace_package_registration(
         indent = anchor.group("indent") + "  "
         block = (
             f"\n{indent}{PACKAGE_START}\n"
-            f"{indent}add(supernote.generated.runtime.SupernoteV4Package())\n"
+            f"{indent}add(supernote.generated.runtime.SupernoteModulePackage())\n"
             f"{indent}{PACKAGE_END}"
         )
         return cleaned[: anchor.end()] + block + cleaned[anchor.end() :]
@@ -682,7 +686,7 @@ def _replace_package_registration(
     indent = anchor.group("indent")
     block = (
         f"\n{indent}{PACKAGE_START}\n"
-        f"{indent}packages.add(new supernote.generated.runtime.SupernoteV4Package());\n"
+        f"{indent}packages.add(new supernote.generated.runtime.SupernoteModulePackage());\n"
         f"{indent}{PACKAGE_END}"
     )
     return cleaned[: anchor.end()] + block + cleaned[anchor.end() :]
@@ -706,5 +710,5 @@ def _reject_legacy_wiring(files: dict[Path, str]) -> None:
         if any(marker in content for marker in LEGACY_MARKERS):
             raise ConfigurationError(
                 f"{path} contains unsupported legacy runtime wiring; "
-                "V4 does not read or convert legacy generated state"
+                "sn-module-gen does not read or convert V1-V4 generated state"
             )

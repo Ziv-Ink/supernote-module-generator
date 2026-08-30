@@ -10,7 +10,7 @@ import pytest
 
 from supernote_module_generator.errors import SymlinkPreservationError
 from supernote_module_generator.filesystem import validate_source_symlink_support
-from v4_project_inventory import inventory_json, inventory_project
+from project_inventory import inventory_json, inventory_project
 
 
 def _write_ownership_fixture(root: Path) -> None:
@@ -28,7 +28,7 @@ def _write_ownership_fixture(root: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    runtime = root / "android/.supernote-module/v4-runtime"
+    runtime = root / "android/.supernote-module/runtime"
     runtime.mkdir(parents=True)
     (runtime / "runtime.cpp").write_text("int runtime = 1;\n", encoding="utf-8")
     (runtime / "ownership.json").write_text(
@@ -54,7 +54,7 @@ def test_inventory_records_hash_mode_type_link_target_and_generator_owner(
     executable.chmod(0o751)
     link = root / "runtime-link"
     try:
-        link.symlink_to("android/.supernote-module/v4-runtime", target_is_directory=True)
+        link.symlink_to("android/.supernote-module/runtime", target_is_directory=True)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symbolic links are unavailable on this host: {exc}")
 
@@ -67,7 +67,7 @@ def test_inventory_records_hash_mode_type_link_target_and_generator_owner(
     ).hexdigest()
     assert generated.generator_owner == "feature:@scope/drawing"
     assert inventory["local_modules/@scope/drawing/source.cpp"].generator_owner is None
-    assert inventory["android/.supernote-module/v4-runtime/runtime.cpp"].generator_owner == (
+    assert inventory["android/.supernote-module/runtime/runtime.cpp"].generator_owner == (
         "shared-runtime"
     )
     assert inventory["scripts/build.sh"].mode == stat.S_IMODE(
@@ -77,7 +77,7 @@ def test_inventory_records_hash_mode_type_link_target_and_generator_owner(
         assert inventory["scripts/build.sh"].mode == 0o751
     assert inventory["runtime-link"].kind == "symlink"
     assert inventory["runtime-link"].symlink_target == (
-        "android/.supernote-module/v4-runtime"
+        "android/.supernote-module/runtime"
     )
     assert not any(path.startswith("runtime-link/") for path in inventory)
 

@@ -1,4 +1,4 @@
-"""Recursive, backend-neutral V4 semantic types.
+"""Recursive, backend-neutral semantic types.
 
 Source spellings and lowering ownership never appear here.  Named references
 carry only the stable logical type identity that JavaScript and TypeScript use.

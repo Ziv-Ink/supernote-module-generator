@@ -131,7 +131,7 @@ def _discover_generator_owners(root: Path) -> Dict[str, str]:
             if owned_path is not None:
                 owners[owned_path] = owner
 
-    runtime_root = root / "android/.supernote-module/v4-runtime"
+    runtime_root = root / "android/.supernote-module/runtime"
     ownership = runtime_root / "ownership.json"
     value = _read_json_object(ownership)
     if value is not None:

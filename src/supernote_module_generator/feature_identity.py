@@ -1,4 +1,4 @@
-"""Canonical V4 feature identity, package path, and managed destination rules."""
+"""Canonical feature identity, package path, and managed destination rules."""
 from __future__ import annotations
 
 from dataclasses import dataclass

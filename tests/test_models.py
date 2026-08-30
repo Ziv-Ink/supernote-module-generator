@@ -280,8 +280,8 @@ def test_semantic_api_is_backend_neutral_deterministic_and_validated():
         source,
     )
     manifest = SemanticApi((binding,)).manifest()
-    assert manifest["schema_version"] == 3
-    assert manifest["kind"] == "supernote_v4_semantic_manifest"
+    assert manifest["schema_version"] == "1.0"
+    assert manifest["kind"] == "supernote_module_semantic_manifest"
     assert manifest["classes"] == []
     assert manifest["types"] == []
     assert manifest["functions"][0]["binding_id"] == "api:function:loadPage"

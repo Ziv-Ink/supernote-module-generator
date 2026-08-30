@@ -1,4 +1,4 @@
-"""Transactional public CLI operations for V4 logical features."""
+"""Transactional public CLI operations for logical features."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -67,7 +67,7 @@ from .subprocesses import run_process
 from .transaction import Transaction
 from .verification import build_android
 from .cli_operations import CliOperationService
-from .v4_validation import V4Validator
+from .validation import GeneratedProjectValidator
 
 
 def _json_object_members(text: str, start: int) -> tuple[list[dict[str, object]], int]:
@@ -296,13 +296,13 @@ class FeatureCliOperationService:
                 manager=decisions.package_manager,
                 action="install_dependency",
             )
-            integrity = V4Validator(self.root).validate(
+            integrity = GeneratedProjectValidator(self.root).validate(
                 jvm_manifests=jvm_manifests,
                 validate_dependencies=decisions.install,
                 build=decisions.build,
                 parent_transaction_id=transaction.identifier,
             )
-            validation = self._v4_validation_result(integrity)
+            validation = self._validation_result(integrity)
             if _failed(validation):
                 assert plan is not None
                 return self._validation_failure(
@@ -491,13 +491,13 @@ class FeatureCliOperationService:
                 skipped_status="skipped" if refresh else "not_needed",
             )
             updated = self.features.find_record(decisions.package_name)
-            integrity = V4Validator(self.root).validate(
+            integrity = GeneratedProjectValidator(self.root).validate(
                 jvm_manifests=jvm_manifests,
                 validate_dependencies=not decisions.skip_install,
                 build=decisions.build,
                 parent_transaction_id=transaction.identifier,
             )
-            validation = self._v4_validation_result(integrity)
+            validation = self._validation_result(integrity)
             if _failed(validation):
                 return self._validation_failure(
                     "update",
@@ -618,7 +618,7 @@ class FeatureCliOperationService:
                 manager=decisions.package_manager,
                 action="refresh_dependency",
             )
-            integrity = V4Validator(self.root).validate(
+            integrity = GeneratedProjectValidator(self.root).validate(
                 jvm_manifests={
                     feature_id: manifest
                     for feature_id, manifest in jvm_manifests.items()
@@ -628,7 +628,7 @@ class FeatureCliOperationService:
                 validate_dependencies=not decisions.skip_install,
                 parent_transaction_id=transaction.identifier,
             )
-            validation = self._v4_validation_result(integrity)
+            validation = self._validation_result(integrity)
             if _failed(validation):
                 return self._validation_failure(
                     "remove",
@@ -845,7 +845,7 @@ class FeatureCliOperationService:
             issues=issues,
         )
 
-    def _v4_validation_result(self, result) -> ValidationResult:
+    def _validation_result(self, result) -> ValidationResult:
         structural_failed = any(
             issue.code.startswith("SNMG_ARTIFACT")
             or issue.code in {"SNMG_INPUT_INVALID", "SNMG_JAVASCRIPT_INVALID"}
@@ -871,7 +871,7 @@ class FeatureCliOperationService:
             issues=[issue.manifest() for issue in result.issues],
         )
 
-    def _raise_v4_build_failure(self, result) -> None:
+    def _raise_build_failure(self, result) -> None:
         if result.build != "failed":
             return
         subprocess_error = (
@@ -1062,7 +1062,7 @@ class FeatureCliOperationService:
         gradle = gradle_wrapper_path(self.root)
         command = gradle_wrapper_command(
             gradle,
-            [":supernote-v4-runtime:generateSupernoteDebugSemantics"],
+            [":supernote-runtime:generateSupernoteDebugSemantics"],
         )
         try:
             result = run_process(
@@ -1104,7 +1104,7 @@ class FeatureCliOperationService:
         if not success:
             assert error is not None
             raise SubprocessFailure(
-                "Gradle could not build the V4 plugin runtime.",
+                "Gradle could not build the generated plugin runtime.",
                 kind="build_failed",
                 phase="build",
                 subprocess=error.to_dict(),

@@ -41,11 +41,11 @@ async function runChecks(): Promise<CheckRecord[]> {
     try {
       const actual = await operation();
       checks.push({id, status: 'pass', actual});
-      emit('SNMG_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-pass', id, actual});
+      emit('SNMG_TEST_EVENT', {schema: '1.0', host: HOST, phase: 'check-pass', id, actual});
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       checks.push({id, status: 'fail', message});
-      emit('SNMG_TEST_EVENT', {schema: 1, host: HOST, phase: 'check-fail', id, message});
+      emit('SNMG_TEST_EVENT', {schema: '1.0', host: HOST, phase: 'check-fail', id, message});
     }
   };
 
@@ -147,14 +147,14 @@ async function runChecks(): Promise<CheckRecord[]> {
     const before = await PluginManager.hasPermission(PERMISSION);
     assertThat(before === 0, `permission was not initially denied: ${before}`);
     emit('SNMG_PERMISSION_REQUEST', {
-      schema: 1,
+      schema: '1.0',
       host: HOST,
       permission: PERMISSION,
       action: PERMISSION_ACTION,
     });
     const requested = await PluginManager.requestPermission(
       PERMISSION,
-      `SNV4 ${HOST.toUpperCase()} bounded acceptance`,
+      `SN Module Gen ${HOST.toUpperCase()} bounded acceptance`,
     );
     const after = await PluginManager.hasPermission(PERMISSION);
     if (PERMISSION_ACTION === 'deny') {
@@ -178,8 +178,8 @@ function App(): React.JSX.Element {
       checks => {
         const failed = checks.filter(item => item.status !== 'pass');
         const result = {
-          schema: 1,
-          suite: 'v4-bounded-note-doc-final',
+          schema: '1.0',
+          suite: 'sn-module-gen-bounded-note-doc',
           host: HOST,
           pluginName: EXPECTED_PLUGIN_NAME,
           status: failed.length === 0 ? 'pass' : 'fail',
@@ -193,8 +193,8 @@ function App(): React.JSX.Element {
       error => {
         const message = error instanceof Error ? error.message : String(error);
         emit('SNMG_TEST_RESULT', {
-          schema: 1,
-          suite: 'v4-bounded-note-doc-final',
+          schema: '1.0',
+          suite: 'sn-module-gen-bounded-note-doc',
           host: HOST,
           pluginName: EXPECTED_PLUGIN_NAME,
           status: 'fail',
@@ -213,7 +213,7 @@ function App(): React.JSX.Element {
 
   return (
     <View>
-      <Text testID="snv4-bounded-result">{summary}</Text>
+      <Text testID="snmg-bounded-result">{summary}</Text>
     </View>
   );
 }

@@ -18,9 +18,9 @@ from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.generation_plan import PlanConflictError
 from supernote_module_generator.models import Change, RollbackResult
 from supernote_module_generator.cli_operations import CliOperationService
-from supernote_module_generator.v4_validation import (
-    V4ValidationResult,
-    V4Validator,
+from supernote_module_generator.validation import (
+    GeneratedProjectValidationResult,
+    GeneratedProjectValidator,
     ValidationIssue,
 )
 from supernote_module_generator.transaction import Transaction, recover_pending
@@ -34,7 +34,7 @@ from supernote_module_generator.filesystem import (
     restore_protected_source_backup,
     source_tree_inventory,
 )
-from v4_project_inventory import inventory_project
+from project_inventory import inventory_project
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -89,7 +89,7 @@ def isolate_source_guard_temp(
     original_mkdtemp = tempfile.mkdtemp
 
     def isolated_mkdtemp(*args, **kwargs):
-        if kwargs.get("prefix") == "supernote-v4-source-guard-":
+        if kwargs.get("prefix") == "sn-module-gen-source-guard-":
             kwargs["dir"] = private_root
         return original_mkdtemp(*args, **kwargs)
 
@@ -194,14 +194,14 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
     canonical = settings.read_text()
     user_line = "include ':user-library'\n"
     if damage == "missing_end":
-        damaged = canonical.replace("// end supernote-module-v4-runtime\n", "")
+        damaged = canonical.replace("// end sn-module-gen-runtime\n", "")
     elif damage == "duplicate":
-        start = canonical.index("// supernote-module-v4-runtime")
+        start = canonical.index("// sn-module-gen-runtime")
         block = canonical[start:]
         damaged = canonical + block
     else:
         damaged = canonical.replace(
-            "include ':supernote-v4-runtime'",
+            "include ':supernote-runtime'",
             "include ':corrupted-generator-payload'",
         )
     settings.write_text(damaged + user_line)
@@ -241,8 +241,8 @@ def test_repair_canonicalizes_malformed_v4_wiring_without_touching_user_text(
         for change in repaired["actual_changes"]
     )
     text = settings.read_text()
-    assert text.count("// supernote-module-v4-runtime") == 1
-    assert text.count("// end supernote-module-v4-runtime") == 1
+    assert text.count("// sn-module-gen-runtime") == 1
+    assert text.count("// end sn-module-gen-runtime") == 1
     assert text.count(user_line.strip()) == 1
     assert invoke(root, ["--json", "check"])[0] == 0
 
@@ -261,15 +261,15 @@ def test_repair_restores_every_malformed_wiring_family_atomically(tmp_path: Path
     settings = root / "android/settings.gradle"
     app_build = root / "android/app/build.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-runtime\n", "")
         + "include ':user-library'\n"
     )
     app_build.write_text(
-        app_build.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        app_build.read_text().replace("// end sn-module-gen-runtime\n", "")
         + "dependencies { implementation project(':user-library') }\n"
     )
     application.write_text(
-        application.read_text().replace("// end supernote-module-v4-package\n", "")
+        application.read_text().replace("// end supernote-module-package\n", "")
     )
     before = inventory_project(root)
 
@@ -290,9 +290,9 @@ def test_repair_restores_every_malformed_wiring_family_atomically(tmp_path: Path
     assert "include ':user-library'" in settings.read_text()
     assert "implementation project(':user-library')" in app_build.read_text()
     assert "add(UserPackage())" in application.read_text()
-    assert settings.read_text().count("// end supernote-module-v4-runtime") == 1
-    assert app_build.read_text().count("// end supernote-module-v4-runtime") == 1
-    assert application.read_text().count("// end supernote-module-v4-package") == 1
+    assert settings.read_text().count("// end sn-module-gen-runtime") == 1
+    assert app_build.read_text().count("// end sn-module-gen-runtime") == 1
+    assert application.read_text().count("// end supernote-module-package") == 1
     assert invoke(root, ["--json", "check"])[0] == 0
 
 
@@ -303,7 +303,7 @@ def test_staged_repair_validation_rejection_rolls_back_with_authoritative_issues
     root = plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-runtime\n", "")
     )
     preview_code, preview_stdout, preview_stderr = invoke(
         root, ["--json", "repair", "--diff"]
@@ -322,9 +322,9 @@ def test_staged_repair_validation_rejection_rolls_back_with_authoritative_issues
     )
 
     monkeypatch.setattr(
-        V4Validator,
+        GeneratedProjectValidator,
         "validate",
-        lambda self, **kwargs: V4ValidationResult(
+        lambda self, **kwargs: GeneratedProjectValidationResult(
             "failure",
             "1" * 64,
             (issue,),
@@ -367,7 +367,7 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
     root = plugin(tmp_path)
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-runtime\n", "")
     )
     preview_code, preview_stdout, _ = invoke(
         root, ["--json", "repair", "--diff"]
@@ -382,9 +382,9 @@ def test_staged_repair_partial_rollback_keeps_plan_and_reports_only_residue(
         path="android/settings.gradle",
     )
     monkeypatch.setattr(
-        V4Validator,
+        GeneratedProjectValidator,
         "validate",
-        lambda self, **kwargs: V4ValidationResult(
+        lambda self, **kwargs: GeneratedProjectValidationResult(
             "failure", "1" * 64, (issue,)
         ),
     )
@@ -459,14 +459,14 @@ def test_repair_structurally_canonicalizes_every_v4_marker_variant(
     text = path.read_text()
     package_marker = wiring_family == "application"
     start = (
-        "// supernote-module-v4-package"
+        "// supernote-module-package"
         if package_marker
-        else "// supernote-module-v4-runtime"
+        else "// sn-module-gen-runtime"
     )
     end = (
-        "// end supernote-module-v4-package"
+        "// end supernote-module-package"
         if package_marker
-        else "// end supernote-module-v4-runtime"
+        else "// end sn-module-gen-runtime"
     )
     if damage == "reversed":
         text = text.replace(start, "// marker-placeholder", 1)
@@ -619,7 +619,7 @@ def test_check_build_json_exposes_additive_build_and_diagnostics(
         return subprocess.CompletedProcess(command, 0, "BUILD SUCCESSFUL\n", "")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         successful_build,
     )
 
@@ -662,7 +662,7 @@ def test_check_build_preserves_unattributed_source_writes_with_recovery(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         source_writing_build,
     )
 
@@ -712,10 +712,10 @@ def test_nonbuild_validator_stage_preserves_live_change_and_retains_backup(
         if outcome == "interrupt":
             raise KeyboardInterrupt
         if outcome == "return":
-            return V4ValidationResult("success", "generation-sentinel", ())
+            return GeneratedProjectValidationResult("success", "generation-sentinel", ())
         raise RuntimeError("validation stage failed after writing source")
 
-    monkeypatch.setattr(V4Validator, "validate", mutating_validation)
+    monkeypatch.setattr(GeneratedProjectValidator, "validate", mutating_validation)
 
     code, stdout, stderr = invoke(root, arguments)
     payload = json.loads(stdout)
@@ -764,7 +764,7 @@ def test_validator_guard_finalization_interrupt_is_recovered_or_actionable(
 
     def mutating_validation(self, **kwargs):
         source.write_text(source.read_text() + "// validator mutation\n")
-        return V4ValidationResult(
+        return GeneratedProjectValidationResult(
             "success",
             "generation-sentinel",
             (),
@@ -773,7 +773,7 @@ def test_validator_guard_finalization_interrupt_is_recovered_or_actionable(
             build_duration_ms=17 if build else 0,
         )
 
-    monkeypatch.setattr(V4Validator, "validate", mutating_validation)
+    monkeypatch.setattr(GeneratedProjectValidator, "validate", mutating_validation)
     original_finish = ProtectedSourceGuard.finish
     finish_calls = 0
     recovery_paths: list[Path] = []
@@ -899,7 +899,7 @@ def test_validate_uses_authoritative_v4_integrity_before_build(
         raise AssertionError("build must not run after authoritative integrity failure")
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         unexpected_build,
     )
 
@@ -947,7 +947,7 @@ def test_read_only_frontend_mutation_preserves_live_bytes_and_backup(
         CliOperationService, "_jvm_frontend_manifests", mutating_frontend
     )
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process",
+        "supernote_module_generator.validation.run_process",
         lambda command, **kwargs: subprocess.CompletedProcess(
             command, 0, "BUILD SUCCESSFUL\n", ""
         ),
@@ -1109,7 +1109,7 @@ def test_guard_restore_failure_reports_residue_and_recovery_backup(
     original_copy = filesystem.copy_entry_no_follow
 
     def failing_restore_copy(src, dst):
-        if "supernote-v4-restore" in Path(dst).name:
+        if "sn-module-gen-restore" in Path(dst).name:
             raise OSError("disk full")
         return original_copy(src, dst)
 
@@ -1120,7 +1120,7 @@ def test_guard_restore_failure_reports_residue_and_recovery_backup(
 
     code, stdout, stderr = invoke(root, ["--json", "check"])
     payload = json.loads(stdout)
-    retained = set(temporary_root.glob("supernote-v4-source-guard-*"))
+    retained = set(temporary_root.glob("sn-module-gen-source-guard-*"))
 
     assert code == 3, stderr
     assert payload["status"] == "partial"
@@ -1173,7 +1173,7 @@ def test_retained_guard_backup_restores_content_and_directory_metadata_fresh(
     original_copy = filesystem.copy_entry_no_follow
 
     def failing_restore_copy(src, dst):
-        if "supernote-v4-restore" in Path(dst).name:
+        if "sn-module-gen-restore" in Path(dst).name:
             raise OSError("restore unavailable")
         return original_copy(src, dst)
 
@@ -1181,7 +1181,7 @@ def test_retained_guard_backup_restores_content_and_directory_metadata_fresh(
     monkeypatch.setattr(filesystem, "copy_entry_no_follow", failing_restore_copy)
     code, stdout, stderr = invoke(root, ["--json", "check"])
     assert code == 3, stderr
-    retained = set(temporary_root.glob("supernote-v4-source-guard-*"))
+    retained = set(temporary_root.glob("sn-module-gen-source-guard-*"))
     assert len(retained) == 1
     recovery = retained.pop()
 
@@ -1314,7 +1314,7 @@ def test_retained_backup_rejects_symlink_ancestors(
             "alpha",
         ),
         (
-            "android/.supernote-module/v4-runtime/feature-registry.json",
+            "android/.supernote-module/runtime/feature-registry.json",
             "runtime",
             "shared runtime",
         ),
@@ -1383,7 +1383,7 @@ def test_partial_restore_classifies_deleted_feature_from_pre_frontend_model(
     original_copy = filesystem.copy_entry_no_follow
 
     def failing_restore_copy(src, dst):
-        if "supernote-v4-restore" in Path(dst).name:
+        if "sn-module-gen-restore" in Path(dst).name:
             raise OSError("restore unavailable")
         return original_copy(src, dst)
 
@@ -1394,7 +1394,7 @@ def test_partial_restore_classifies_deleted_feature_from_pre_frontend_model(
 
     code, stdout, stderr = invoke(root, ["--json", "check"])
     payload = json.loads(stdout)
-    retained = set(temporary_root.glob("supernote-v4-source-guard-*"))
+    retained = set(temporary_root.glob("sn-module-gen-source-guard-*"))
 
     assert code == 3, stderr
     feature_issues = [
@@ -1675,7 +1675,7 @@ def test_ownership_change_after_authorization_is_a_precommit_conflict(
 ):
     root = plugin(tmp_path)
     assert invoke(root, ["--json", "update", "--all", "--yes"])[0] == 0
-    runtime = root / "android/.supernote-module/v4-runtime"
+    runtime = root / "android/.supernote-module/runtime"
     feature = root / "local_modules/alpha"
     if authority == "runtime":
         metadata = runtime / "ownership.json"

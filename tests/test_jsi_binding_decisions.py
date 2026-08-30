@@ -41,7 +41,7 @@ def test_binding_mode_is_immutable_and_preserves_canonical_feature_identity():
 def test_binding_mode_rejects_every_noncanonical_feature_identity(feature_id: str):
     with pytest.raises(
         JsiBindingDecisionError,
-        match=f"invalid V4 feature identity {feature_id!r}",
+        match=f"invalid feature identity {feature_id!r}",
     ):
         binding_mode(feature_id)
 
@@ -55,7 +55,7 @@ def test_registration_kind_preserves_sync_and_feature_scoped_async_policy():
     assert registration_kind(async_export=True, mode=feature) is JsiRegistrationKind.ASYNC
     with pytest.raises(
         JsiBindingDecisionError,
-        match="V4 async bindings require plugin-level feature lowering",
+        match="async bindings require plugin-level feature lowering",
     ):
         registration_kind(async_export=True, mode=standalone)
 

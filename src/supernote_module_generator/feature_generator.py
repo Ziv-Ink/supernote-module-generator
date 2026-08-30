@@ -1,4 +1,4 @@
-"""Transactional scaffolding for one language-neutral V4 logical feature."""
+"""Transactional scaffolding for one language-neutral logical feature."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -129,7 +129,7 @@ def stage_feature(
             "package.json",
             json.dumps(package, indent=2, ensure_ascii=False) + "\n",
         )
-        global_name = "__supernoteV4"
+        global_name = "__supernoteModule"
         _write(
             temporary,
             "index.js",
@@ -144,7 +144,7 @@ def stage_feature(
             "const ERROR_CONSTRUCTOR_PROPERTY = '__supernoteErrorConstructor';\n"
             "const CPP_OBJECT_INFO_PROPERTY = '__supernoteCppObjectInfo';\n"
             "const JVM_OBJECT_INFO_PROPERTY = '__supernoteJvmObjectInfo';\n"
-            f"const INSTALL_ERROR = {_javascript_string(config.public_name + ' is not installed in the Supernote V4 runtime')};\n\n"
+            f"const INSTALL_ERROR = {_javascript_string(config.public_name + ' is not installed in the Supernote generated runtime')};\n\n"
             "const VALIDATION_REASONS = new Set([\n"
             "  'ARITY_MISMATCH',\n"
             "  'TYPE_MISMATCH',\n"

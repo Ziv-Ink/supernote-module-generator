@@ -199,7 +199,7 @@ def test_release_result_verifier_rejects_pre_public_schema(tmp_path: Path) -> No
         verify(result, "update-no-op")
 
 
-def test_v4_device_canary_evidence_is_scoped_and_complete() -> None:
+def test_device_canary_evidence_is_scoped_and_complete() -> None:
     evidence = (
         ROOT / "maintainers/device-evidence/v4-device-canary-2026-08-27.md"
     ).read_text(encoding="utf-8")
@@ -244,7 +244,7 @@ def test_release_version_has_a_dated_changelog_section() -> None:
 def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> None:
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
     setup = (ROOT / "setup.cfg").read_text(encoding="utf-8")
-    platform_paths = (ROOT / "tests/test_v4_platform_paths.py").read_text(
+    platform_paths = (ROOT / "tests/test_platform_paths.py").read_text(
         encoding="utf-8"
     )
 
@@ -252,8 +252,8 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
         assert runner in quality
     assert "tests/test_platform_tools.py" in quality
     assert "tests/test_operation_lock.py" in quality
-    assert "tests/test_v4_regression_harness.py" in quality
-    assert "tests/test_v4_platform_paths.py" in quality
+    assert "tests/test_regression_harness.py" in quality
+    assert "tests/test_platform_paths.py" in quality
     assert "python -m compileall -q src tests ci" in quality
     assert "--data-file=.coverage.linux-complete" in quality
     assert "path: .coverage.linux-complete" in quality
@@ -266,7 +266,7 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
     assert "relative_files = True" in setup
     assert "fail_under = 82.03" in setup
     assert "precision = 2" in setup
-    assert "tests/test_v4_regression_harness.py" in quality
+    assert "tests/test_regression_harness.py" in quality
     assert "Parse the Bash launch boundary" in quality
     assert "Parse the PowerShell launch boundary" in quality
     assert "npm run run" in quality

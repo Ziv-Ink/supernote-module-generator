@@ -1,4 +1,4 @@
-"""Shared V4 JavaScript validation and transactional conversion planning.
+"""Shared JavaScript validation and transactional conversion planning.
 
 The semantic plan in this module is backend-neutral. C++ and JVM lowering may
 choose different native storage, but they must consume this exact tree so null,
@@ -256,8 +256,8 @@ class ApiConversionPlan:
 
     def manifest(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
-            "kind": "supernote_v4_conversion_plan",
+            "schema_version": "1.0",
+            "kind": "supernote_module_conversion_plan",
             "limits": self.limits.manifest(),
             "bindings": [item.manifest() for item in self.bindings],
             "constructors": [item.manifest() for item in self.constructors],

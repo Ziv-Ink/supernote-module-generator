@@ -110,7 +110,7 @@ def _android_sdk_selection() -> Tuple[Optional[Path], Optional[str], Dict[str, s
 def _project_toolchain_selection(root: Path) -> GradleToolchainSelection:
     """Read the official template's literal root selections without Gradle.
 
-    V4 intentionally does not guess through arbitrary Gradle expressions. A
+    The generator intentionally does not guess through arbitrary Gradle expressions. A
     missing, dynamic, or conflicting selection is reported as uninspectable so
     Doctor cannot claim that an unrelated installed tool is project-selected.
     """
@@ -690,7 +690,7 @@ class DoctorService:
                 error = error or ErrorInfo(
                     "doctor_build_failed",
                     "build",
-                    "Authoritative V4 state validation or the Android build failed.",
+                    "Authoritative generated-state validation or the Android build failed.",
                 )
             return CommandResult(
                 "doctor",
@@ -1816,9 +1816,9 @@ class DoctorService:
             "passed" if passed else "failed",
             None,
             str(root / "android"),
-            "Authoritative V4 state validation and the full Android build passed."
+            "Authoritative generated-state validation and the full Android build passed."
             if passed
-            else "Authoritative V4 state validation or the full Android build failed.",
+            else "Authoritative generated-state validation or the full Android build failed.",
             _capability_metadata(
                 configured=True,
                 found=True,

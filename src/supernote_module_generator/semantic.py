@@ -1,4 +1,4 @@
-"""Backend-neutral Supernote API semantics for V4.
+"""Backend-neutral Supernote API semantics.
 
 The records in this module answer what a Supernote API means.  They contain no
 JNI descriptors, C++ include paths, adapter symbols, or generated source text.
@@ -673,7 +673,13 @@ def semantic_api_from_manifest(raw: object) -> SemanticApi:
         {"schema_version", "kind", "functions", "classes", "types"},
         "semantic manifest",
     )
-    schema = _manifest_int(value["schema_version"], "schema_version")
+    raw_schema = value["schema_version"]
+    if not isinstance(raw_schema, str) or not raw_schema:
+        raise SemanticModelError(
+            f"incompatible semantic manifest schema {raw_schema!r}; "
+            f"expected {SEMANTIC_MANIFEST_SCHEMA_VERSION}"
+        )
+    schema = raw_schema
     if schema != SEMANTIC_MANIFEST_SCHEMA_VERSION:
         raise SemanticModelError(
             f"incompatible semantic manifest schema {schema}; "
@@ -1261,7 +1267,7 @@ def validate_semantic_route(
                 fail(
                     f"native object {declaration.name!r} cannot cross "
                     f"{source_backend.value}->{target_backend.value}; cross-family "
-                    "object proxies are deferred in current V4",
+                    "object proxies are deferred in the current generator",
                     declaration=declaration,
                     position=position,
                 )

@@ -237,8 +237,8 @@ def test_copied_cross_family_codegen_is_typed_recursive_and_hidden(tmp_path: Pat
     )
 
     assert "::cross::Payload roundTrip(::cross::Payload payload);" in header
-    assert "supernote_v4_cross_to_jvm_" in helpers
-    assert "supernote_v4_cross_from_jvm_" in helpers
+    assert "supernote_module_cross_to_jvm_" in helpers
+    assert "supernote_module_cross_from_jvm_" in helpers
     assert "check_array_length" in helpers
     assert "check_string_bytes" in helpers
     assert "check_byte_buffer" in helpers
@@ -292,8 +292,8 @@ def test_composite_suspend_cross_family_route_uses_typed_phase8_completion(
         cross_family=renderer,
     )
     assert "SupernoteCoroutineBridge" in generated
-    assert "supernote_v4_cross_to_jvm_" in generated
-    assert "supernote_v4_cross_from_jvm_" in generated
+    assert "supernote_module_cross_to_jvm_" in generated
+    assert "supernote_module_cross_from_jvm_" in generated
     assert "operation->set_retained_state(retained_input_state)" in generated
     assert "feature closed before coroutine result conversion" in generated
 

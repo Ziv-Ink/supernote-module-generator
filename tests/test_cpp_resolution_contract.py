@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 
-FIXTURES = Path(__file__).parent / "fixtures/v4_cpp_resolution"
+FIXTURES = Path(__file__).parent / "fixtures/cpp_resolution"
 
 
 def test_d042_resolution_fixture_inventory_is_closed_and_deterministic():

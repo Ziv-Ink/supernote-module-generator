@@ -28,7 +28,7 @@ from supernote_module_generator.filesystem import (
     hash_entry_no_follow,
     source_tree_inventory,
 )
-from v4_project_inventory import inventory_project
+from project_inventory import inventory_project
 
 
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative POSIX fixture")
@@ -404,7 +404,7 @@ def test_startup_recovery_finishes_durable_abandon_without_restoring_snapshot(
     package.write_text('{"baseline":true}\n')
     transaction = Transaction(tmp_path, "update", ["alpha"])
     transaction.snapshot([package])
-    staging = tmp_path / ".v4-plan-staging"
+    staging = tmp_path / ".sn-module-gen-plan-staging"
     staging.mkdir()
     (staging / "generated").write_text("staged\n")
     transaction.track_created(staging)
@@ -861,7 +861,7 @@ def test_recovery_registry_rejects_a_forged_shared_directory(
     monkeypatch,
 ):
     identity = str(os.getuid())
-    registry = tmp_path / f"supernote-module-v4-recovery-v2-{identity}"
+    registry = tmp_path / f"supernote-module-recovery-v2-{identity}"
     registry.mkdir(mode=0o777)
     registry.chmod(0o777)
     sentinel = registry / "sentinel"
@@ -1081,7 +1081,7 @@ def test_metadata_recovery_rejects_a_missing_recovery_directory(
     tmp_path: Path,
 ) -> None:
     missing = Path(filesystem_module.tempfile.gettempdir()) / (
-        "supernote-v4-metadata-recovery-missing"
+        "sn-module-gen-metadata-recovery-missing"
     )
     assert not missing.exists()
 
@@ -1158,7 +1158,7 @@ def test_atomic_backup_restoration_mismatch_preserves_displaced_live_entry(
         before.st_atime_ns,
         before.st_mtime_ns,
     )
-    assert not tuple(tmp_path.glob(".destination.supernote-v4-*"))
+    assert not tuple(tmp_path.glob(".destination.sn-module-gen-*"))
 
 
 def test_hash_inventory_snapshot_and_guard_preserve_directory_atimes(tmp_path: Path):

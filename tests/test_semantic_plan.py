@@ -164,7 +164,7 @@ def test_generation_plan_rejects_delete_overlap_with_user_source(
 @pytest.mark.parametrize(
     "path",
     [
-        r"android\.supernote-module\v4-runtime\..\..\user.cpp",
+        r"android\.supernote-module\runtime\..\..\user.cpp",
         r"C:\plugin\generated.cpp",
         r"\\server\share\generated.cpp",
     ],
@@ -297,7 +297,7 @@ def test_integrity_manifest_is_timestamp_free_and_records_every_owned_hash():
     )
     value = json.loads(manifest.render())
 
-    assert value["schema_version"] == 4
+    assert value["schema_version"] == "1.0"
     assert "timestamp" not in value
     assert value["artifacts"][0]["sha256"] == artifact.sha256
     assert value["artifacts"][0]["generation_id"] == ir.generation_id

@@ -209,8 +209,8 @@ def test_method_shape_returns_name_result_and_static_state(
         ("operator double read()", "operators are deferred"),
         ("virtual double read()", "virtual methods are deferred"),
         ("virtual operator double read()", "operators are deferred"),
-        ("read()", "must use one canonical V4 result type"),
-        ("double * read()", "must use one canonical V4 result type"),
+        ("read()", "must use one canonical generated result type"),
+        ("double * read()", "must use one canonical generated result type"),
         ("double nullptr()", "method name 'nullptr' is a C\\+\\+23 keyword"),
     ],
 )

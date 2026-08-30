@@ -10,7 +10,7 @@ from supernote_module_generator.feature_operations import FeatureOperationServic
 from supernote_module_generator.frontend_discovery import discover_semantic_ir
 from supernote_module_generator.project_model import ExistingGeneration, ProjectModel
 from supernote_module_generator.semantic_ir import SemanticIRError
-from v4_project_inventory import inventory_project
+from project_inventory import inventory_project
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -41,7 +41,7 @@ def test_project_discovery_is_read_only_and_canonical(tmp_path: Path):
     model = ProjectModel.discover(root, allow_unmanifested_bootstrap=True)
     ir = discover_semantic_ir(model)
 
-    assert model.existing_generation is ExistingGeneration.UNMANIFESTED_V4
+    assert model.existing_generation is ExistingGeneration.UNMANIFESTED_CURRENT
     assert [feature.identity.npm_name for feature in model.features] == ["alpha"]
     assert ir.plugin_id == "fixture"
     assert inventory_project(root) == before

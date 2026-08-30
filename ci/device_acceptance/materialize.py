@@ -41,7 +41,7 @@ def _generator(root: Path, executable: str, *arguments: str) -> dict[str, object
 
 
 def _identity(host: str, suffix: str) -> tuple[str, str, str]:
-    key = f"snv4-{host}-acceptance-{suffix.lower()}"
+    key = f"snmg-{host}-acceptance-{suffix.lower()}"
     label = key
     plugin_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     return label, key, plugin_id

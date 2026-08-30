@@ -1,4 +1,4 @@
-"""Render the shared V4 C++ nominal-object handle and identity registry."""
+"""Render the shared C++ nominal-object handle and identity registry."""
 from __future__ import annotations
 
 

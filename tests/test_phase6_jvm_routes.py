@@ -295,7 +295,7 @@ def test_jvm_suspend_adapter_descriptor_retains_completion_token():
     )
     assert "SupernoteSuspendExecutor" in generated
     assert "register_jvm_async_completion" in generated
-    assert "supernote_v4_jvm_to_js_" in generated
+    assert "supernote_module_jvm_to_js_" in generated
     assert "operation->set_retained_state(retained_input_state)" in generated
     assert "JvmObjectHandleBase" in generated
 
@@ -349,13 +349,13 @@ def test_jvm_suspend_nullable_result_accepts_a_null_jobject():
     queued = generated.index("workers().submit", attached)
     scheduled = generated.index("schedule_completion", attached)
     js_identity_lookup = generated.index(
-        "supernote_v4_jvm_object_registry(runtime)", scheduled
+        "supernote_module_jvm_object_registry(runtime)", scheduled
     )
     assert argument < retained < accepted < attached < queued
     assert attached < scheduled < js_identity_lookup < queued
     worker = generated[queued : generated.index("operation->set_work(work)", queued)]
     assert "facebook::jsi::Runtime" not in worker
-    assert "supernote_v4_jvm_object_registry" not in worker
+    assert "supernote_module_jvm_object_registry" not in worker
 
 
 def test_jvm_identity_registry_uses_weak_globals_hash_buckets_and_is_same_object():
@@ -379,7 +379,7 @@ def test_generated_ksp_processor_emits_live_field_accessors():
 
     template = Path(
         "src/supernote_module_generator/templates/"
-        "v4.SupernoteV4Processor.kt.tmpl"
+        "runtime.SupernoteModuleProcessor.kt.tmpl"
     ).read_text(encoding="utf-8")
     assert "owner.fields.forEach { field ->" in template
     assert 'fun get(owner: $ownerType): $fieldType' in template
@@ -397,7 +397,7 @@ def test_generated_ksp_processor_emits_an_empty_manifest_for_every_feature_root(
 
     template = Path(
         "src/supernote_module_generator/templates/"
-        "v4.SupernoteV4Processor.kt.tmpl"
+        "runtime.SupernoteModuleProcessor.kt.tmpl"
     ).read_text(encoding="utf-8")
 
     assert "roots.sortedBy { it.featureId }.forEach { root ->" in template
@@ -494,25 +494,26 @@ def test_jvm_object_codegen_emits_nominal_wrappers_converters_and_registry():
         module_name="Drawing",
     )
 
-    assert "class GeneratedV4JvmObject0HostObject final" in generated
+    assert "class GeneratedModuleJvmObject0HostObject final" in generated
     assert ": public JvmObjectHandleBase" in generated
     assert "try_extract_jvm_object" in generated
-    assert "supernote_v4_wrap_jvm_object_0" in generated
+    assert "supernote_module_wrap_jvm_object_0" in generated
     assert "std::make_shared<JvmObjectRegistry>()" in generated
-    assert "__supernoteV4JvmObjectRegistry_2cfbc9ce6375" in generated
-    assert "jvm-v4-value-constructor:" in generated
-    assert "jvm-v4-enum-from:" in generated
-    assert "jvm-v4-field-get:" in generated
-    assert "jvm-v4-field-set:" in generated
+    assert "__supernoteModuleJvmObjectRegistry_2cfbc9ce6375" in generated
+    assert "jvm-module-value-constructor:" in generated
+    assert "jvm-module-enum-from:" in generated
+    assert "jvm-module-field-get:" in generated
+    assert "jvm-module-field-set:" in generated
     assert "listAdd" in generated
     assert "listGet" in generated
     assert "decodeString" not in generated
     assert "identityHash" in generated
     assert "IsSameObject" in generated
     assert "process_services().workers().submit" in generated
-    assert "supernote_v4_jvm_object_registry(runtime)" in generated
+    assert "supernote_module_jvm_object_registry(runtime)" in generated
     assert "argument_0 = std::move(argument_0)" in generated
     assert "retained_input_state = std::make_shared<std::tuple<" in generated
+    assert "v4" not in generated.lower()
     assert "operation->set_retained_state(retained_input_state)" in generated
     assert "schedule_completion" in generated
     assert generated.count("LocalFrame item_frame(env);") >= 2
@@ -540,7 +541,7 @@ def test_jvm_object_codegen_emits_nominal_wrappers_converters_and_registry():
     assert '"__supernoteJvmObjectInfo"' in generated
     assert 'exports.setProperty(runtime, "Point"' in generated
     assert 'exports.setProperty(runtime, "Color"' in generated
-    assert "supernote_v4_jvm_validate_js_" in generated
+    assert "supernote_module_jvm_validate_js_" in generated
     assert generated.count(
         'supernote_throw_error(runtime, "IMPLEMENTATION_ERROR", error.what())'
     ) >= 3

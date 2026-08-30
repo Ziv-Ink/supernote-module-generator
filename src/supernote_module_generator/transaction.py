@@ -2390,7 +2390,7 @@ class Transaction:
         """Merge post-plan external edits into the pending rollback baseline.
 
         This is used only when a fresh add already made visible generator
-        changes before its complete V4 plan detected a race.  Every retained
+        changes before its complete plan detected a race. Every retained
         edit must be covered by a pre-operation snapshot; otherwise the
         transaction stays available for explicit recovery rather than
         guessing which bytes belong to the user.

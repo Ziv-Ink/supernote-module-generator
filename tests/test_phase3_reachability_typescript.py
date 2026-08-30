@@ -400,7 +400,7 @@ def test_generated_contract_and_expect_error_fixture_pass_real_tsc(tmp_path: Pat
     tsc = shutil.which("tsc")
     if tsc is None:
         pytest.skip("TypeScript compiler is unavailable")
-    fixture_root = Path(__file__).parent / "fixtures/v4_typescript"
+    fixture_root = Path(__file__).parent / "fixtures/typescript"
     generated = render_typescript("Drawing", phase3_api())
     assert generated == (fixture_root / "index.d.ts").read_text(encoding="utf-8")
     (tmp_path / "index.d.ts").write_text(generated, encoding="utf-8")

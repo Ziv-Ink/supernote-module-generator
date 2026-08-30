@@ -78,7 +78,7 @@ def _class_body_open(following: list[_Token], first: _Token, cpp_name: str) -> i
         raise CppClassSyntaxError(
             before_body[0].line,
             cpp_name,
-            "inheritance is not supported for initial V4 generated classes",
+            "inheritance is not supported for generated classes",
         )
     if before_body:
         raise CppClassSyntaxError(

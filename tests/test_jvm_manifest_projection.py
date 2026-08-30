@@ -433,12 +433,13 @@ def test_jvm_export_object_uses_selected_constructor_and_only_marked_members():
         feature_id=FEATURE_ID,
         module_name="Documents",
     )
-    assert "GeneratedV4JvmObject0HostObject" in generated
+    assert "GeneratedModuleJvmObject0HostObject" in generated
     assert "Object::createFromHostObject" in generated
     assert 'property == "pageCount"' in generated
     assert 'property == "hiddenCache"' not in generated
     assert "method_route_1_" not in generated
     assert "ManagedJvmRef managed_" in generated
+    assert "v4" not in generated.lower()
 
 
 def test_java_export_object_has_distinct_instance_and_worker_async_routes():

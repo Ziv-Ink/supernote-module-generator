@@ -69,7 +69,7 @@ class ClassStackRoute:
 
 
 def source_marker(comment: _LineComment) -> tuple[bool, SupernoteMarker | None]:
-    """Return whether a line comment is a V4 marker candidate and its marker."""
+    """Return whether a line comment is a marker candidate and its marker."""
 
     value = comment.text.strip()
     if re.match(r"@SupernoteExportObject(?:\b|\()", value):
@@ -108,7 +108,7 @@ def _invalid_marker(comment: _LineComment) -> CppDeclarationError:
         )
     else:
         message = (
-            "malformed Supernote marker; initial V4 markers take no "
+            "malformed Supernote marker; generated markers take no "
             "arguments and must be written exactly, for example "
             "// @SupernotePluginExport"
         )

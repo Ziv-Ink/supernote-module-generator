@@ -34,7 +34,7 @@ def render_typescript(feature_name: str, api: SemanticApi) -> str:
     ]
 
     # Retain the old class records while their Phase 4 replacement tests are
-    # still useful. V4 declarations never depend on this compatibility path.
+    # still useful. Generated declarations never depend on this compatibility path.
     legacy_interfaces = []
     legacy_properties = []
     for item in api.classes:

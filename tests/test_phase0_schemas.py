@@ -33,14 +33,14 @@ from supernote_module_generator.schemas import (
 )
 
 
-def test_every_phase0_generated_boundary_has_an_explicit_v4_identity():
+def test_every_generated_boundary_has_an_explicit_public_identity():
     assert (
         SEMANTIC_MANIFEST_SCHEMA_VERSION,
         JVM_SOURCE_MANIFEST_SCHEMA_VERSION,
         FEATURE_MANIFEST_SCHEMA_VERSION,
         PLUGIN_REGISTRY_SCHEMA_VERSION,
         GENERATED_OWNERSHIP_SCHEMA_VERSION,
-    ) == (3, 3, 3, 2, 2)
+    ) == ("1.0", "1.0", "1.0", "1.0", "1.0")
     assert {
         SEMANTIC_MANIFEST_KIND,
         JVM_SOURCE_MANIFEST_KIND,
@@ -48,15 +48,15 @@ def test_every_phase0_generated_boundary_has_an_explicit_v4_identity():
         PLUGIN_REGISTRY_KIND,
         GENERATED_OWNERSHIP_KIND,
     } == {
-        "supernote_v4_semantic_manifest",
-        "supernote_v4_jvm_source_manifest",
-        "supernote_v4_feature",
-        "supernote_v4_plugin_runtime_registry",
-        "supernote_v4_plugin_runtime_ownership",
+        "supernote_module_semantic_manifest",
+        "supernote_module_jvm_source_manifest",
+        "supernote_module_feature",
+        "supernote_module_plugin_runtime_registry",
+        "supernote_module_plugin_runtime_ownership",
     }
 
 
-def test_v2_schema_versions_are_rejected_instead_of_converted(tmp_path):
+def test_prepublic_schema_versions_are_rejected_instead_of_converted(tmp_path):
     semantic = SemanticApi().manifest()
     for stale_schema in (1, 2, 99):
         semantic["schema_version"] = stale_schema

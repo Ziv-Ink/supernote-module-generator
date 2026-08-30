@@ -261,7 +261,7 @@ def test_logical_ids_and_manifests_are_language_neutral_and_deterministic():
     )
     api = SemanticApi(declarations=(point,))
     manifest = api.manifest()
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == "1.0"
     assert manifest["types"][0]["type_id"] == point_id
     assert manifest["types"][0]["fields"][0]["type"] == {
         "kind": "scalar",
@@ -547,7 +547,7 @@ def test_route_capabilities_recurse_and_reject_cross_family_object_leaves():
         SemanticModelError,
         match=(
             r"cannot cross cpp->jvm; cross-family object proxies are deferred "
-            r"in current V4 at value\[\].*stroke.hpp:10.*cpp-route.*jvm-route"
+                r"in the current generator at value\[\].*stroke.hpp:10.*cpp-route.*jvm-route"
         ),
     ):
         validate_semantic_route(
@@ -625,7 +625,7 @@ def test_cross_family_object_rejection_names_every_nested_position(
         SemanticModelError,
         match=(
             rf"native object 'Stroke' cannot cross cpp->jvm; cross-family object "
-            rf"proxies are deferred in current V4 at {position}.*"
+                rf"proxies are deferred in the current generator at {position}.*"
             rf"stroke-native.hpp:10.*cpp-route.hpp:10.*jvm-route.kt:10"
         ),
     ):

@@ -135,7 +135,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     consumer_rules = (generated / "consumer-rules.pro").read_text()
     processor = (
         generated
-        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteV4Processor.kt"
+        / "processor/src/main/kotlin/supernote/generated/processor/SupernoteModuleProcessor.kt"
     ).read_text()
     bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
     registration_bridge = (
@@ -143,7 +143,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     ).read_text()
     module = (
         generated
-        / "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt"
+        / "src/main/java/supernote/generated/runtime/SupernoteModule.kt"
     ).read_text()
     coroutine_bridge = (
         generated
@@ -161,8 +161,8 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "VISIBILITY_INLINES_HIDDEN YES" in cmake
     assert 'target_link_options' in cmake
     assert '"-Wl,-Bsymbolic-functions"' in cmake
-    assert "if(SUPERNOTE_V4_WEAK_OBJECT_PROBE)" in cmake
-    assert "SUPERNOTE_V4_WEAK_OBJECT_PROBE=1" in cmake
+    assert "if(SUPERNOTE_MODULE_WEAK_OBJECT_PROBE)" in cmake
+    assert "SUPERNOTE_MODULE_WEAK_OBJECT_PROBE=1" in cmake
     assert "runtime_services.cpp" in cmake
     assert "feature_registry.cpp" in cmake
     assert "local_modules/@local/alpha/android/src/main/cpp" in cmake
@@ -225,13 +225,13 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
     assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
     assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
-    assert "gradleProperty('supernoteV4WeakObjectProbe')" in gradle
-    assert "-DSUPERNOTE_V4_WEAK_OBJECT_PROBE=" in gradle
+    assert "gradleProperty('supernoteModuleWeakObjectProbe')" in gradle
+    assert "-DSUPERNOTE_MODULE_WEAK_OBJECT_PROBE=" in gradle
     assert "def supernoteIsWindows" in gradle
-    assert "'supernote-v4/sn_supernote_runtime_" in gradle
+    assert "'supernote-module/sn_supernote_runtime_" in gradle
     assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
     assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
-    assert 'file("${rootProject.projectDir}/.cxx/snv4")' in gradle
+    assert 'file("${rootProject.projectDir}/.cxx/sn-module-gen")' in gradle
     assert "checkSupernote${buildVariant}State" in gradle
     assert "workingDir supernotePluginRoot" in gradle
     assert "'--jvm-manifest-root'" in gradle
@@ -284,10 +284,10 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     jni_on_load_end = bootstrap.index("\n}\n", jni_on_load) + 3
     jni_on_load_body = bootstrap[jni_on_load:jni_on_load_end]
     assert "return publish_runtime_registrar(env)" in jni_on_load_body
-    assert f"supernote.v4.load-request.{component}.v1" in bootstrap
-    assert f"supernote.v4.registrar.{component}.v1" in bootstrap
+    assert f"supernote.module.load-request.{component}.v1" in bootstrap
+    assert f"supernote.module.registrar.{component}.v1" in bootstrap
     assert "generated runtime generation identity mismatch" in bootstrap
-    assert "supernote.generated.runtime.SupernoteV4Module" in bootstrap
+    assert "supernote.generated.runtime.SupernoteModule" in bootstrap
     assert "(JLjava/lang/ClassLoader;" in bootstrap
     assert "Lcom/facebook/react/bridge/ReactApplicationContext;" in bootstrap
     assert "CallInvokerHolder;)J" in bootstrap
@@ -324,7 +324,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "sessionId.also { sessionId = 0L }" in invalidate_guard
     assert "nativeRunJsTask" not in module
     assert f'findLibrary("{registration_component}")' in module
-    assert "SupernoteV4NativeRegistrationBridge.register" in module
+    assert "SupernoteModuleNativeRegistrationBridge.register" in module
     assert "File(libraryPath).parentFile" in module
     assert "sourceLibrary.parentFile" in module
     assert "context.codeCacheDir" not in module
@@ -339,9 +339,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "System.load(runtimeCopy.absolutePath)" not in module
     assert "synchronized(System.getProperties())" in module
     assert "publishedGeneration != runtimeLoadName" in module
-    assert f"supernote.v4.source.{component}.v1" in module
-    assert f"supernote.v4.generations.{component}.v1" in module
-    assert f"supernote.v4.binary.{component}.v1." in module
+    assert f"supernote.module.source.{component}.v1" in module
+    assert f"supernote.module.generations.{component}.v1" in module
+    assert f"supernote.module.binary.{component}.v1." in module
     assert "MAX_RETAINED_GENERATIONS = 32" in module
     assert "retainedGenerations !in 0 until MAX_RETAINED_GENERATIONS" in module
     assert "restart PluginHost" in module
@@ -353,8 +353,8 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "File.createTempFile" in module
     assert "System.load(bridge.absolutePath)" in module
     assert "bridge.delete()" in module
-    assert f"supernote.v4.load-request.{component}.v1" in module
-    assert f"supernote.v4.registrar.{component}.v1" in module
+    assert f"supernote.module.load-request.{component}.v1" in module
+    assert f"supernote.module.registrar.{component}.v1" in module
     assert (
         "nativeRegister(registrarAddress, generationIdentity, classLoader)"
         in module
@@ -362,11 +362,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "SupernoteRuntimeRegistrar" in registration_bridge
     assert "nativeRegister" in registration_bridge
     assert "dladdr((void *)registrar, &registrar_info)" in registration_bridge
-    assert "SupernoteV4Registration" in registration_bridge
+    assert "SupernoteModuleRegistration" in registration_bridge
     assert "published runtime registrar is no longer mapped" in registration_bridge
     assert "jsi" not in registration_bridge
     assert "RuntimeSession" not in registration_bridge
-    assert "class SupernoteV4Package" in module
+    assert "class SupernoteModulePackage" in module
     assert (
         generated
         / "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java"
@@ -787,7 +787,7 @@ def test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts(
     thread_flags = [] if os.name == "nt" else ["-pthread"]
     sanitizer_flags = (
         ["-fsanitize=thread", "-g"]
-        if os.environ.get("SUPERNOTE_V4_TSAN") == "1"
+        if os.environ.get("SUPERNOTE_MODULE_TSAN") == "1"
         else []
     )
     compiled = subprocess.run(
@@ -821,7 +821,7 @@ def test_saturated_cleanup_queue_never_destroys_on_invalidating_thread(tmp_path:
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     kotlin = (
         generated
-        / "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt"
+        / "src/main/java/supernote/generated/runtime/SupernoteModule.kt"
     ).read_text()
     bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
     services = (generated / "src/runtime_services.cpp").read_text()
@@ -932,7 +932,7 @@ def test_retry_worker_allocation_failure_is_restart_required_after_one_invalidat
     generated = generate_plugin_runtime(tmp_path, registry("alpha"))
     kotlin = (
         generated
-        / "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt"
+        / "src/main/java/supernote/generated/runtime/SupernoteModule.kt"
     ).read_text()
     bootstrap = (generated / "src/runtime_bootstrap.cpp").read_text()
     services = (generated / "src/runtime_services.cpp").read_text()
@@ -1273,8 +1273,8 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     assert "JNI_OnLoad" not in source
     bootstrap = (jni / "plugin_bindings.cpp").read_text()
     assert "install_plugin_bindings" in bootstrap
-    assert "__supernoteV4FeatureRegistry_" in bootstrap
-    assert '"__supernoteV4"' in bootstrap
+    assert "__supernoteModuleFeatureRegistry_" in bootstrap
+    assert '"__supernoteModule"' in bootstrap
     readme = (feature_root / "README.md").read_text()
     assert "import Math from '@local/math';" in readme
     assert "`Math.add(left: number, right: number): number` — sync" in readme

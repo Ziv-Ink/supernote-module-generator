@@ -128,8 +128,8 @@ jobs:
           -m pytest -q
           tests/test_platform_tools.py
           tests/test_operation_lock.py
-          tests/test_v4_regression_harness.py
-          tests/test_v4_platform_paths.py
+          tests/test_regression_harness.py
+          tests/test_platform_paths.py
           tests/test_devconfig.py
           tests/test_packaging.py::test_clean_wheel_installs_only_the_public_console_script
       - name: Retain native-platform coverage input

@@ -1,4 +1,4 @@
-"""Root V4 integrity manifest rendering and strict loading."""
+"""Root generated-state integrity manifest rendering and strict loading."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,9 +23,9 @@ from .schemas import (
 )
 
 
-INTEGRITY_MANIFEST_SCHEMA_VERSION = 4
+INTEGRITY_MANIFEST_SCHEMA_VERSION = "1.0"
 INTEGRITY_MANIFEST_PATH = ".supernote-module/manifest.json"
-V4_RUNTIME_ROOT = "android/.supernote-module/v4-runtime"
+RUNTIME_ROOT = "android/.supernote-module/runtime"
 TEMPLATE_CAPABILITY_VERSION = "launch-verification-v1"
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -204,7 +204,7 @@ def load_integrity_manifest(
         if isinstance(exc, IntegrityManifestError):
             raise
         raise IntegrityManifestError(
-            f"{INTEGRITY_MANIFEST_PATH}: cannot load V4 integrity manifest: {exc}"
+            f"{INTEGRITY_MANIFEST_PATH}: cannot load integrity manifest: {exc}"
         ) from exc
     result = parse_integrity_manifest(raw)
     authority_hashes = {
@@ -227,7 +227,7 @@ def load_integrity_manifest(
 
 
 def parse_integrity_manifest(raw: object) -> LoadedIntegrityManifest:
-    """Parse one complete canonical V4 ownership manifest."""
+    """Parse one complete canonical generated-state ownership manifest."""
 
     manifest = _require_manifest_object(raw)
     generator_version, generation_id, plugin_id = _parse_manifest_header(manifest)
@@ -372,7 +372,7 @@ def _require_ownership_anchors(
                 f"feature {feature.package_name!r} lacks canonical metadata ownership"
             )
     if features and not any(
-        artifact.path == f"{V4_RUNTIME_ROOT}/ownership.json"
+        artifact.path == f"{RUNTIME_ROOT}/ownership.json"
         and artifact.owner == "shared-runtime"
         and artifact.kind == "runtime-metadata"
         for artifact in artifacts
@@ -545,7 +545,7 @@ def _validate_runtime_inventory(
     runtime_paths: set[str],
     artifact_by_path: dict[str, ManifestArtifactRecord],
 ) -> tuple[str, str]:
-    relative = f"{V4_RUNTIME_ROOT}/ownership.json"
+    relative = f"{RUNTIME_ROOT}/ownership.json"
     ownership, content, metadata = _read_owned_json(root, relative)
     _require_runtime_metadata_identity(ownership, relative, generator_version)
     assert isinstance(ownership, dict)
@@ -554,7 +554,7 @@ def _validate_runtime_inventory(
         raise IntegrityManifestError(
             f"{relative}: ownership.json is absent from generated_files"
         )
-    expected = {f"{V4_RUNTIME_ROOT}/{path}" for path in generated}
+    expected = {f"{RUNTIME_ROOT}/{path}" for path in generated}
     if runtime_paths != expected:
         raise IntegrityManifestError(
             f"{relative}: manifest runtime ownership inventory is incomplete"
@@ -773,7 +773,7 @@ def _validate_artifact_owner(
     features: Dict[str, ManifestFeature],
 ) -> None:
     if owner == "shared-runtime":
-        if not _is_descendant(path, V4_RUNTIME_ROOT):
+        if not _is_descendant(path, RUNTIME_ROOT):
             raise IntegrityManifestError(
                 f"artifacts[{index}] shared-runtime path is outside the runtime root"
             )
@@ -785,7 +785,7 @@ def _validate_artifact_owner(
                 f"artifacts[{index}] feature ownership is inconsistent"
             )
     elif owner == "plugin-global":
-        if _is_descendant(path, V4_RUNTIME_ROOT) or any(
+        if _is_descendant(path, RUNTIME_ROOT) or any(
             _is_descendant(path, feature.root) for feature in features.values()
         ):
             raise IntegrityManifestError(
@@ -803,8 +803,8 @@ def _parse_wiring(raw: object, index: int) -> WiringRecord:
     sha256 = raw.get("sha256")
     _require_canonical_relative(path, f"wiring[{index}].path")
     if marker not in {
-        "supernote-module-v4-runtime",
-        "supernote-module-v4-package",
+        "sn-module-gen-runtime",
+        "supernote-module-package",
     }:
         raise IntegrityManifestError(f"wiring[{index}] marker is invalid")
     _require_sha256(sha256, f"wiring[{index}].sha256")

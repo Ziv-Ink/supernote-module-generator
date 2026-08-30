@@ -1,4 +1,4 @@
-"""Link-aware filesystem primitives used by V4 preservation and transactions."""
+"""Link-aware filesystem primitives used by preservation and transactions."""
 from __future__ import annotations
 
 import hashlib
@@ -2711,7 +2711,7 @@ class ProtectedSourceGuard:
         self.directory_metadata = protected_directory_metadata(self.root)
         self._observed_mutations: Tuple[str, ...] = ()
         self._temporary = Path(
-            tempfile.mkdtemp(prefix="supernote-v4-source-guard-")
+            tempfile.mkdtemp(prefix="sn-module-gen-source-guard-")
         )
         self._entries: list[tuple[Path, Path]] = []
         try:
@@ -2847,10 +2847,10 @@ class ProtectedSourceGuard:
 
         token = uuid.uuid4().hex
         staged = destination.with_name(
-            f".{destination.name}.supernote-v4-restore-{token}"
+            f".{destination.name}.sn-module-gen-restore-{token}"
         )
         displaced = destination.with_name(
-            f".{destination.name}.supernote-v4-displaced-{token}"
+            f".{destination.name}.sn-module-gen-displaced-{token}"
         )
         copy_entry_no_follow(backup, staged)
         had_destination = lexists(destination)
@@ -3082,10 +3082,10 @@ def _ensure_recovery_parent_no_follow(root: Path, relative: str) -> None:
 def _restore_backup_entry_atomic(source: Path, destination: Path) -> None:
     token = uuid.uuid4().hex
     staged = destination.with_name(
-        f".{destination.name}.supernote-v4-recover-{token}"
+        f".{destination.name}.sn-module-gen-recover-{token}"
     )
     displaced = destination.with_name(
-        f".{destination.name}.supernote-v4-displaced-{token}"
+        f".{destination.name}.sn-module-gen-displaced-{token}"
     )
     copy_entry_no_follow(source, staged)
     had_destination = lexists(destination)
@@ -3131,7 +3131,7 @@ def retain_directory_metadata_recovery(
     ):
         raise FilesystemError("Transaction metadata recovery binding is invalid")
     bundle_id = uuid.uuid4().hex
-    recovery = Path(tempfile.mkdtemp(prefix="supernote-v4-metadata-recovery-")).resolve(
+    recovery = Path(tempfile.mkdtemp(prefix="sn-module-gen-metadata-recovery-")).resolve(
         strict=True
     )
     manifest = {
@@ -3210,7 +3210,7 @@ def _validate_metadata_recovery_directory(path: Path) -> None:
     if (
         not path.is_absolute()
         or path.parent != temporary_root
-        or not path.name.startswith("supernote-v4-metadata-recovery-")
+        or not path.name.startswith("sn-module-gen-metadata-recovery-")
         or entry_kind(path) != "directory"
         or path.resolve(strict=True) != path
         or (
@@ -3362,7 +3362,7 @@ def validate_source_symlink_support(
         raise SymlinkPreservationError(
             "Windows cannot preserve user-owned source symlinks in this environment. "
             "Enable Developer Mode or grant the Create symbolic links privilege, then "
-            "retry. V4 will not dereference symlinks as a fallback."
+            "retry. The generator will not dereference symlinks as a fallback."
         ) from exc
 
 
@@ -3674,7 +3674,7 @@ def _copy_symlink(source: Path, destination: Path) -> None:
     except OSError as exc:
         raise SymlinkPreservationError(
             f"Could not preserve symbolic link {source} -> {target!r}. "
-            "V4 will not dereference symlinks as a fallback: {exc}"
+            "The generator will not dereference symlinks as a fallback: {exc}"
         ) from exc
 
 
@@ -3847,7 +3847,9 @@ def _is_build_or_cache_path(relative: str) -> bool:
         return True
     if first == ".supernote-module-transaction.json":
         return True
-    if first.startswith((".supernote-module-transaction-", ".v4-plan-")):
+    if first.startswith(
+        (".supernote-module-transaction-", ".sn-module-gen-plan-")
+    ):
         return True
     if parts[:2] in {
         ("android", "build"),
@@ -3861,12 +3863,12 @@ def _is_build_or_cache_path(relative: str) -> bool:
     if parts[:4] == (
         "android",
         ".supernote-module",
-        "v4-runtime",
+        "runtime",
         "build",
     ):
         return True
     if (
-        parts[:3] == ("android", ".supernote-module", "v4-runtime")
+        parts[:3] == ("android", ".supernote-module", "runtime")
         and len(parts) >= 5
         and parts[3] in {"annotations", "processor"}
         and parts[4] == "build"
@@ -3902,9 +3904,9 @@ def _may_contain_canonical_exclusion(relative: str) -> bool:
     if parts in {
         ("android", "app"),
         ("android", ".supernote-module"),
-        ("android", ".supernote-module", "v4-runtime"),
-        ("android", ".supernote-module", "v4-runtime", "annotations"),
-        ("android", ".supernote-module", "v4-runtime", "processor"),
+        ("android", ".supernote-module", "runtime"),
+        ("android", ".supernote-module", "runtime", "annotations"),
+        ("android", ".supernote-module", "runtime", "processor"),
         ("local_modules",),
     }:
         return True
@@ -3917,7 +3919,7 @@ def _may_contain_canonical_exclusion(relative: str) -> bool:
 
 
 def _probe_windows_symlink_support() -> None:
-    with tempfile.TemporaryDirectory(prefix="supernote-v4-symlink-probe-") as raw:
+    with tempfile.TemporaryDirectory(prefix="sn-module-gen-symlink-probe-") as raw:
         root = Path(raw)
         file_target = root / "file-target"
         directory_target = root / "directory-target"

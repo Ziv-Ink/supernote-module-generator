@@ -1,4 +1,4 @@
-"""Generate the one plugin-level V4 runtime/build component."""
+"""Generate the one plugin-level runtime/build component."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,7 @@ from .schemas import (
 )
 
 
-RUNTIME_RELATIVE_ROOT = Path("android/.supernote-module/v4-runtime")
+RUNTIME_RELATIVE_ROOT = Path("android/.supernote-module/runtime")
 
 
 def generated_runtime_files(registry: PluginRuntimeRegistry) -> dict[str, str]:
@@ -39,12 +39,12 @@ def generated_runtime_files(registry: PluginRuntimeRegistry) -> dict[str, str]:
         feature_rows = "    // No generated features are currently registered."
     component = registry.component_name
     registration_component = f"{component}_registration"
-    source_property = f"supernote.v4.source.{component}.v1"
-    generation_count_property = f"supernote.v4.generations.{component}.v1"
-    generation_ids_property = f"supernote.v4.generation-ids.{component}.v1"
-    binary_registry_prefix = f"supernote.v4.binary.{component}.v1."
-    load_request_property = f"supernote.v4.load-request.{component}.v1"
-    registrar_property = f"supernote.v4.registrar.{component}.v1"
+    source_property = f"supernote.module.source.{component}.v1"
+    generation_count_property = f"supernote.module.generations.{component}.v1"
+    generation_ids_property = f"supernote.module.generation-ids.{component}.v1"
+    binary_registry_prefix = f"supernote.module.binary.{component}.v1."
+    load_request_property = f"supernote.module.load-request.{component}.v1"
+    registrar_property = f"supernote.module.registrar.{component}.v1"
     jvm_roots = [
         f"local_modules/{entry.feature.npm_name}/{entry.feature.roots.jvm}"
         for entry in registry.features
@@ -158,9 +158,9 @@ set_target_properties(
 # Android linker may interpose a definition from an older plugin DSO and leave
 # a stale function address behind when that DSO is unloaded.
 target_link_options({component} PRIVATE "-Wl,-Bsymbolic-functions")
-if(SUPERNOTE_V4_WEAK_OBJECT_PROBE)
+if(SUPERNOTE_MODULE_WEAK_OBJECT_PROBE)
   target_compile_definitions(
-      {component} PRIVATE SUPERNOTE_V4_WEAK_OBJECT_PROBE=1)
+      {component} PRIVATE SUPERNOTE_MODULE_WEAK_OBJECT_PROBE=1)
 endif()
 target_include_directories(
     {component} PRIVATE ${{SUPERNOTE_NATIVE_ROOTS}}
@@ -196,13 +196,13 @@ def supernoteNativeRoots = [
 ]
 def supernoteIsWindows = System.getProperty('os.name').toLowerCase().contains('windows')
 def supernoteWeakObjectProbe = providers
-    .gradleProperty('supernoteV4WeakObjectProbe')
+    .gradleProperty('supernoteModuleWeakObjectProbe')
     .map {{ it.toBoolean() }}
     .orElse(false)
     .get()
 def supernoteWindowsBuildRoot = new File(
     System.getProperty('java.io.tmpdir'),
-    'supernote-v4/{component}',
+    'supernote-module/{component}',
 )
 if (supernoteIsWindows) {{
     layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))
@@ -223,7 +223,7 @@ android {{
             cmake {{
                 arguments(
                     '-DANDROID_STL=c++_shared',
-                    "-DSUPERNOTE_V4_WEAK_OBJECT_PROBE=${{supernoteWeakObjectProbe ? 1 : 0}}",
+                    "-DSUPERNOTE_MODULE_WEAK_OBJECT_PROBE=${{supernoteWeakObjectProbe ? 1 : 0}}",
                 )
             }}
         }}
@@ -236,7 +236,7 @@ android {{
             buildStagingDirectory(
                 supernoteIsWindows
                     ? new File(supernoteWindowsBuildRoot, 'cxx')
-                    : file("${{rootProject.projectDir}}/.cxx/snv4")
+                    : file("${{rootProject.projectDir}}/.cxx/sn-module-gen")
             )
         }}
     }}
@@ -273,8 +273,8 @@ dependencies {{
     implementation('com.facebook.react:react-android')
     implementation('org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1')
     implementation('org.jspecify:jspecify:1.0.0')
-    compileOnly project(':supernote-v4-annotations')
-    ksp project(':supernote-v4-processor')
+    compileOnly project(':supernote-module-annotations')
+    ksp project(':supernote-module-processor')
 }}
 
 ksp {{
@@ -337,7 +337,7 @@ plugins {
 }
 
 dependencies {
-    implementation project(':supernote-v4-annotations')
+    implementation project(':supernote-module-annotations')
     implementation 'com.google.devtools.ksp:symbol-processing-api:2.0.21-1.0.28'
 }
 
@@ -1833,7 +1833,7 @@ ProcessServices &process_services() noexcept {
 typedef jboolean (*SupernoteRuntimeRegistrar)(JNIEnv *, jobject, jstring);
 
 JNIEXPORT jboolean JNICALL
-Java_supernote_generated_runtime_SupernoteV4NativeRegistrationBridge_nativeRegister(
+Java_supernote_generated_runtime_SupernoteModuleNativeRegistrationBridge_nativeRegister(
     JNIEnv *env,
     jobject bridge,
     jlong registrar_address,
@@ -1849,7 +1849,7 @@ Java_supernote_generated_runtime_SupernoteV4NativeRegistrationBridge_nativeRegis
   if (dladdr((void *)registrar, &registrar_info) == 0 ||
       registrar_info.dli_fbase == NULL) {
     __android_log_print(
-        ANDROID_LOG_ERROR, "SupernoteV4Registration",
+        ANDROID_LOG_ERROR, "SupernoteModuleRegistration",
         "published runtime registrar is no longer mapped");
     return JNI_FALSE;
   }
@@ -1857,7 +1857,7 @@ Java_supernote_generated_runtime_SupernoteV4NativeRegistrationBridge_nativeRegis
       registrar(env, class_loader, generation_identity);
   if (registered != JNI_TRUE) {
     __android_log_print(
-        ANDROID_LOG_ERROR, "SupernoteV4Registration",
+        ANDROID_LOG_ERROR, "SupernoteModuleRegistration",
         "current runtime registrar rejected the plugin ClassLoader");
   }
   return registered;
@@ -1895,7 +1895,7 @@ extern "C" __attribute__((visibility("hidden"))) jboolean
 
 namespace {{
 
-constexpr char kLogTag[] = "SupernoteV4Runtime";
+constexpr char kLogTag[] = "SupernoteModuleRuntime";
 constexpr char kLoadRequestProperty[] = {json.dumps(load_request_property)};
 constexpr char kRegistrarProperty[] = {json.dumps(registrar_property)};
 std::string g_generation_identity;
@@ -1904,10 +1904,10 @@ std::unordered_map<std::uint64_t,
                    std::shared_ptr<supernote::runtime::RuntimeSession>>
     g_sessions;
 
-#if defined(SUPERNOTE_V4_WEAK_OBJECT_PROBE)
-constexpr char kWeakProbeGlobal[] = "__supernoteV4Phase0WeakObjectProbe";
+#if defined(SUPERNOTE_MODULE_WEAK_OBJECT_PROBE)
+constexpr char kWeakProbeGlobal[] = "__supernoteModulePhase0WeakObjectProbe";
 constexpr char kWeakProbeTargetGlobal[] =
-    "__supernoteV4Phase0WeakObjectProbeTarget";
+    "__supernoteModulePhase0WeakObjectProbeTarget";
 
 class WeakObjectProbeHost final : public facebook::jsi::HostObject {{
  public:
@@ -2124,7 +2124,7 @@ std::shared_ptr<void> global_ref(JNIEnv *env, jobject value) {{
 }}  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_supernote_generated_runtime_SupernoteV4Module_nativeInstall(
+Java_supernote_generated_runtime_SupernoteModule_nativeInstall(
     JNIEnv *env, jobject module, jlong runtime_pointer, jobject class_loader,
     jobject platform_context, jobject call_invoker_holder) {{
   if (env == nullptr || module == nullptr || class_loader == nullptr ||
@@ -2176,7 +2176,7 @@ Java_supernote_generated_runtime_SupernoteV4Module_nativeInstall(
     auto *runtime = reinterpret_cast<facebook::jsi::Runtime *>(
         static_cast<std::uintptr_t>(runtime_pointer));
     supernote::generated::install_plugin_bindings(*runtime, session);
-#if defined(SUPERNOTE_V4_WEAK_OBJECT_PROBE)
+#if defined(SUPERNOTE_MODULE_WEAK_OBJECT_PROBE)
     install_weak_object_probe(*runtime);
 #endif
     const auto session_id = session->id();
@@ -2201,7 +2201,7 @@ Java_supernote_generated_runtime_SupernoteV4Module_nativeInstall(
 }}
 
 extern "C" JNIEXPORT void JNICALL
-Java_supernote_generated_runtime_SupernoteV4Module_nativeInvalidate(
+Java_supernote_generated_runtime_SupernoteModule_nativeInvalidate(
     JNIEnv *, jobject, jlong session_id) {{
   std::shared_ptr<supernote::runtime::RuntimeSession> session;
   {{
@@ -2258,7 +2258,7 @@ extern "C" __attribute__((visibility("hidden"))) jboolean
             loader_class, "loadClass",
             "(Ljava/lang/String;)Ljava/lang/Class;");
   auto module_name = env->NewStringUTF(
-      "supernote.generated.runtime.SupernoteV4Module");
+      "supernote.generated.runtime.SupernoteModule");
   auto module_class = load_class == nullptr || module_name == nullptr
       ? nullptr
       : env->CallObjectMethod(class_loader, load_class, module_name);
@@ -2274,11 +2274,11 @@ extern "C" __attribute__((visibility("hidden"))) jboolean
             "Lcom/facebook/react/turbomodule/core/interfaces/"
             "CallInvokerHolder;)J"),
         reinterpret_cast<void *>(
-            &Java_supernote_generated_runtime_SupernoteV4Module_nativeInstall)}},
+            &Java_supernote_generated_runtime_SupernoteModule_nativeInstall)}},
       {{const_cast<char *>("nativeInvalidate"),
         const_cast<char *>("(J)V"),
         reinterpret_cast<void *>(
-            &Java_supernote_generated_runtime_SupernoteV4Module_nativeInvalidate)}},
+            &Java_supernote_generated_runtime_SupernoteModule_nativeInvalidate)}},
   }};
   if (env->RegisterNatives(
           static_cast<jclass>(module_class), methods,
@@ -2322,7 +2322,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             "annotations/src/main/java/supernote/generated/annotations/SupernotePluginValue.java",
             "feature-registry.json",
             "ownership.json",
-            "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt",
+            "src/main/java/supernote/generated/runtime/SupernoteModule.kt",
             "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt",
             "src/main/java/supernote/generated/runtime/SupernoteConversionBudget.kt",
             "src/feature_registry.cpp",
@@ -2335,7 +2335,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             "src/runtime_bootstrap.cpp",
             "src/runtime_registration_bridge.c",
             "processor/build.gradle",
-            "processor/src/main/kotlin/supernote/generated/processor/SupernoteV4Processor.kt",
+            "processor/src/main/kotlin/supernote/generated/processor/SupernoteModuleProcessor.kt",
             "processor/src/main/resources/META-INF/services/com.google.devtools.ksp.processing.SymbolProcessorProvider",
         ],
     }
@@ -2344,18 +2344,18 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         "build.gradle": gradle,
         "consumer-rules.pro": consumer_keep_rules,
         "annotations/build.gradle": annotations_gradle,
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginAsync.java": render("v4.SupernotePluginAsync.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernoteConstructor.java": render("v4.SupernoteConstructor.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java": render("v4.SupernotePluginExport.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginInternal.java": render("v4.SupernotePluginInternal.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginObject.java": render("v4.SupernotePluginObject.java.tmpl", {}),
-        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginValue.java": render("v4.SupernotePluginValue.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginAsync.java": render("runtime.SupernotePluginAsync.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernoteConstructor.java": render("runtime.SupernoteConstructor.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginExport.java": render("runtime.SupernotePluginExport.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginInternal.java": render("runtime.SupernotePluginInternal.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginObject.java": render("runtime.SupernotePluginObject.java.tmpl", {}),
+        "annotations/src/main/java/supernote/generated/annotations/SupernotePluginValue.java": render("runtime.SupernotePluginValue.java.tmpl", {}),
         "feature-registry.json": (
             json.dumps(registry.manifest(), indent=2, sort_keys=True) + "\n"
         ),
         "ownership.json": json.dumps(ownership, indent=2, sort_keys=True) + "\n",
-        "src/main/java/supernote/generated/runtime/SupernoteV4Module.kt": render(
-            "v4.SupernoteV4Module.kt.tmpl",
+        "src/main/java/supernote/generated/runtime/SupernoteModule.kt": render(
+            "runtime.SupernoteModule.kt.tmpl",
             {
                 "NATIVE_LIBRARY_NAME": component,
                 "NATIVE_REGISTRATION_LIBRARY_NAME": registration_component,
@@ -2368,7 +2368,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
             },
         ),
         "src/main/java/supernote/generated/runtime/SupernoteCoroutineBridge.kt": render(
-            "v4.SupernoteCoroutineBridge.kt.tmpl", {}
+            "runtime.SupernoteCoroutineBridge.kt.tmpl", {}
         ),
         "src/main/java/supernote/generated/runtime/SupernoteConversionBudget.kt": render_jvm_conversion_kernel(),
         "src/feature_registry.cpp": registry_source,
@@ -2381,12 +2381,12 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *java_vm, void *) {{
         "src/runtime_bootstrap.cpp": bootstrap,
         "src/runtime_registration_bridge.c": registration_bridge,
         "processor/build.gradle": processor_gradle,
-        "processor/src/main/kotlin/supernote/generated/processor/SupernoteV4Processor.kt": render(
-            "v4.SupernoteV4Processor.kt.tmpl",
+        "processor/src/main/kotlin/supernote/generated/processor/SupernoteModuleProcessor.kt": render(
+            "runtime.SupernoteModuleProcessor.kt.tmpl",
             {"GENERATOR_VERSION": registry.generator_version},
         ),
         "processor/src/main/resources/META-INF/services/com.google.devtools.ksp.processing.SymbolProcessorProvider": render(
-            "v4.processor.provider.tmpl", {}
+            "runtime.processor.provider.tmpl", {}
         ),
     }
     for entry in registry.features:

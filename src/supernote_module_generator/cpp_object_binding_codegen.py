@@ -1,4 +1,4 @@
-"""Emit synchronous JSI bindings for V4 C++ object routes."""
+"""Emit synchronous JSI bindings for C++ object routes."""
 from __future__ import annotations
 
 import hashlib
@@ -26,15 +26,15 @@ def _type_suffix(semantic: SemanticType) -> str:
 
 
 def _from_js_name(semantic: SemanticType) -> str:
-    return f"supernote_v4_from_js_{_type_suffix(semantic)}"
+    return f"supernote_module_from_js_{_type_suffix(semantic)}"
 
 
 def _to_js_name(semantic: SemanticType) -> str:
-    return f"supernote_v4_to_js_{_type_suffix(semantic)}"
+    return f"supernote_module_to_js_{_type_suffix(semantic)}"
 
 
 def _retain_native_name(semantic: SemanticType) -> str:
-    return f"supernote_v4_retain_native_{_type_suffix(semantic)}"
+    return f"supernote_module_retain_native_{_type_suffix(semantic)}"
 
 
 def _cpp_type(semantic: SemanticType, plan: CppRoutePlan) -> str:
@@ -624,10 +624,10 @@ def _conversion_helpers(types: tuple[SemanticType, ...], plan: CppRoutePlan) -> 
         )
     )
     failure = r'''constexpr char kCppObjectRegistryProperty[] =
-    "__supernoteV4CppObjectRegistry_5f271b119c3a";
+    "__supernoteModuleCppObjectRegistry_5f271b119c3a";
 
 std::shared_ptr<supernote::runtime::CppObjectRegistry>
-supernote_v4_object_registry(facebook::jsi::Runtime &runtime) {
+supernote_module_object_registry(facebook::jsi::Runtime &runtime) {
   auto registry = runtime.global().getPropertyAsObject(
       runtime, kFeatureRegistryGlobal);
   auto exports = registry.getPropertyAsObject(runtime, kFeatureId);
@@ -637,7 +637,7 @@ supernote_v4_object_registry(facebook::jsi::Runtime &runtime) {
       runtime)->registry();
 }
 
-[[noreturn]] void supernote_v4_throw_conversion_failure(
+[[noreturn]] void supernote_module_throw_conversion_failure(
     facebook::jsi::Runtime &runtime,
     const supernote::conversion::Failure &failure) {
   if (failure.kind() == supernote::conversion::FailureKind::TYPE) {
@@ -652,11 +652,11 @@ supernote_v4_object_registry(facebook::jsi::Runtime &runtime) {
 
 
 def _identifier(index: int) -> str:
-    return f"GeneratedV4Object{index}HostObject"
+    return f"GeneratedModuleObject{index}HostObject"
 
 
 def _wrap_function(index: int) -> str:
-    return f"supernote_wrap_v4_object_{index}"
+    return f"supernote_wrap_module_object_{index}"
 
 
 def _object_index(plan: CppRoutePlan, type_id: str) -> int:
@@ -783,7 +783,7 @@ def _callable_body(
             f"{indent}}} catch (const facebook::jsi::JSError &) {{",
             f"{indent}  throw;",
             f"{indent}}} catch (const supernote::conversion::Failure &failure) {{",
-            f"{indent}  supernote_v4_throw_conversion_failure(runtime, failure);",
+            f"{indent}  supernote_module_throw_conversion_failure(runtime, failure);",
             f"{indent}}} catch (const std::exception &error) {{",
             f"{indent}  supernote_throw_error(",
             f"{indent}      runtime, \"IMPLEMENTATION_ERROR\",",
@@ -934,7 +934,7 @@ def _async_host_function(
             f"{indent}                  state->success = true;"
         )
         resolution = (
-            f"{indent}                    auto object_registry = supernote_v4_object_registry(runtime);\n"
+            f"{indent}                    auto object_registry = supernote_module_object_registry(runtime);\n"
             f"{indent}                    supernote::conversion::Budget result_budget;\n"
             f"{indent}                    auto value = {_to_js_name(route.result)}(\n"
             f"{indent}                        runtime, *state->value, object_registry,\n"
@@ -1032,7 +1032,7 @@ def _async_host_function(
         f"{indent}    }} catch (const facebook::jsi::JSError &) {{",
         f"{indent}      throw;",
         f"{indent}    }} catch (const supernote::conversion::Failure &failure) {{",
-        f"{indent}      supernote_v4_throw_conversion_failure(runtime, failure);",
+        f"{indent}      supernote_module_throw_conversion_failure(runtime, failure);",
         f"{indent}    }} catch (const std::exception &error) {{",
         f"{indent}      supernote_throw_error(",
         f"{indent}          runtime, \"INTERNAL\", std::string({json.dumps(diagnostic + ': ')}) + error.what());",
@@ -1254,7 +1254,7 @@ def _wrapper(plan: CppRoutePlan, item: CppObjectRoute, index: int, module: str) 
             "      } catch (const facebook::jsi::JSError &) {\n"
             "        throw;\n"
             "      } catch (const supernote::conversion::Failure &failure) {\n"
-            "        supernote_v4_throw_conversion_failure(runtime, failure);\n"
+            "        supernote_module_throw_conversion_failure(runtime, failure);\n"
             "      } catch (const std::exception &error) {\n"
             "        supernote_throw_error(\n"
             "            runtime, \"IMPLEMENTATION_ERROR\",\n"
@@ -1313,7 +1313,7 @@ def _wrapper(plan: CppRoutePlan, item: CppObjectRoute, index: int, module: str) 
             "      } catch (const facebook::jsi::JSError &) {\n"
             "        throw;\n"
             "      } catch (const supernote::conversion::Failure &failure) {\n"
-            "        supernote_v4_throw_conversion_failure(runtime, failure);\n"
+            "        supernote_module_throw_conversion_failure(runtime, failure);\n"
             "      } catch (const std::exception &error) {\n"
             "        supernote_throw_error(\n"
             "            runtime, \"IMPLEMENTATION_ERROR\",\n"
@@ -1637,7 +1637,7 @@ def render_cpp_object_bindings(
 ]:
     """Return include, namespace-body, and registration fragments.
 
-    Every public free function is emitted through the V4 route renderer.  This
+    Every public free function is emitted through the route renderer. This
     preserves its exact namespace-qualified native symbol while keeping the
     public JavaScript name independent of the implementation spelling.
     """

@@ -59,10 +59,22 @@ class BindingCodegenScannerTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return path
 
-    def test_v4_feature_renderer_has_no_one_shot_jni_bootstrap(self):
+    def test_generated_binding_scan_lowers_the_current_export_model(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
-            source = binding_codegen.render_v4_feature_jsi(
+
+            bindings = binding_codegen.scan_generated_bindings(
+                module,
+                module_name="LocalTest",
+            )
+
+            self.assertEqual(["add"], [item.js_name for item in bindings.exports])
+            self.assertEqual((), bindings.objects)
+
+    def test_feature_renderer_has_no_one_shot_jni_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.make_module(Path(directory), backend="jsi")
+            source = binding_codegen.render_feature_jsi(
                 module,
                 module_name="LocalTest",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -83,7 +95,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(
             binding_codegen.CodegenError,
-            "invalid V4 feature identity 'invalid'",
+            "invalid feature identity 'invalid'",
         ):
             binding_codegen._jsi_binding(
                 config,
@@ -103,11 +115,11 @@ class BindingCodegenScannerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             binding_codegen.CodegenError,
-            "V4 async bindings require plugin-level feature lowering",
+            "async bindings require plugin-level feature lowering",
         ):
             binding_codegen._jsi_binding(config, [async_export], [])
 
-    def test_v4_feature_renderer_preserves_namespace_for_scalar_function(self):
+    def test_feature_renderer_preserves_namespace_for_scalar_function(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(
                 Path(directory),
@@ -120,7 +132,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                     "}\n"
                 ),
             )
-            source = binding_codegen.render_v4_feature_jsi(
+            source = binding_codegen.render_feature_jsi(
                 module,
                 module_name="LocalTest",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -264,7 +276,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 message = str(raised.exception)
                 self.assertIn(f"{diagnostic} as marked C++ results", message)
                 self.assertIn(
-                    "return one canonical owned V4 type",
+                    "return one canonical owned generated type",
                     message,
                 )
                 self.assertNotIn("expected a C++ function name", message)
@@ -312,7 +324,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
             (
                 "alias",
                 '// @SupernotePluginExport(name = "renamed")\n',
-                "initial V4 markers take no arguments",
+                "generated markers take no arguments",
             ),
             (
                 "trailing-text",
@@ -383,7 +395,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 ):
                     binding_codegen.scan_sources(module)
 
-    def test_v4_async_free_function_uses_promise_and_shared_runtime(self):
+    def test_async_free_function_uses_promise_and_shared_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(
                 Path(directory),
@@ -394,7 +406,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                     "std::int64_t load(std::string path) { return 42; }\n"
                 ),
             )
-            source = binding_codegen.render_v4_feature_jsi(
+            source = binding_codegen.render_feature_jsi(
                 module,
                 module_name="Files",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -411,7 +423,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
             self.assertIn("static_cast<std::size_t>(1)", source)
             self.assertNotIn("jsi::Runtime *runtime", source)
 
-    def test_v4_async_continuations_are_deleted_from_private_map(self):
+    def test_async_continuations_are_deleted_from_private_map(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(
                 Path(directory),
@@ -422,7 +434,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                     "double load() { return 1.0; }\n"
                 ),
             )
-            source = binding_codegen.render_v4_feature_jsi(
+            source = binding_codegen.render_feature_jsi(
                 module,
                 module_name="Files",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -438,7 +450,7 @@ class BindingCodegenScannerTests(unittest.TestCase):
                 source,
             )
 
-    def test_v4_async_object_method_retains_receiver_for_physical_work(self):
+    def test_async_object_method_retains_receiver_for_physical_work(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
@@ -457,7 +469,7 @@ public:
 """,
             )
 
-            source = binding_codegen.render_v4_feature_jsi(
+            source = binding_codegen.render_feature_jsi(
                 module,
                 module_name="Files",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -737,7 +749,7 @@ private:
   Document();
 };
 """,
-                "constructors accept only SupernoteConstructor in initial V4",
+                "constructors accept only SupernoteConstructor",
             ),
         )
         for name, source, diagnostic in cases:
@@ -949,7 +961,7 @@ public:
                 ):
                     binding_codegen.scan_cpp_semantic_model(module)
 
-    def test_v4_sync_class_lowers_to_retained_hostobject_machinery(self):
+    def test_sync_class_lowers_to_retained_hostobject_machinery(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
@@ -1016,7 +1028,7 @@ public:
 
     def test_rejects_markers_in_c_headers_and_helper_suffixes(self):
         cases = {
-            ".c": "direct marked C bindings are unsupported in initial V4",
+            ".c": "direct marked C bindings are unsupported",
             ".h": "classes require exactly one of SupernotePluginObject or SupernotePluginValue",
             ".hh": "classes require exactly one of SupernotePluginObject or SupernotePluginValue",
             ".hpp": "classes require exactly one of SupernotePluginObject or SupernotePluginValue",
@@ -1295,7 +1307,7 @@ public:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(module, source)
             api = binding_codegen.scan_cpp_semantic_model(module)
-            generated = binding_codegen.render_v4_feature_jsi(
+            generated = binding_codegen.render_feature_jsi(
                 module,
                 module_name="LocalTest",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -1693,7 +1705,7 @@ public:
             ):
                 binding_codegen.scan_cpp_semantic_model(module)
 
-    def test_v4_object_named_factory_does_not_collide_with_another_object(self):
+    def test_object_named_factory_does_not_collide_with_another_object(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
@@ -1728,11 +1740,11 @@ class NativeCounter { public: NativeCounter(); };
             )
             with self.assertRaisesRegex(
                 binding_codegen.CodegenError,
-                "SupernoteExportObject is removed in V4",
+                "SupernoteExportObject is removed",
             ):
                 binding_codegen.scan_bindings(module)
 
-    def test_v4_object_name_no_longer_collides_with_legacy_module_interface(self):
+    def test_object_name_no_longer_collides_with_legacy_module_interface(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory), backend="jsi")
             self.write_object_header(
@@ -1769,7 +1781,7 @@ class Third { public: Third(); };
 """,
                 relative="other/Third.hh",
             )
-            generated = binding_codegen.render_v4_feature_jsi(
+            generated = binding_codegen.render_feature_jsi(
                 module,
                 module_name="LocalTest",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -1922,7 +1934,7 @@ private:
             api = binding_codegen.scan_cpp_semantic_model(module)
             manifest = api.manifest()
             declarations = render_typescript("LocalTest", api)
-            generated = binding_codegen.render_v4_feature_jsi(
+            generated = binding_codegen.render_feature_jsi(
                 module,
                 module_name="LocalTest",
                 feature_id="supernote:feature:0123456789abcdef",
@@ -1961,7 +1973,7 @@ public:
             self.write_object_header(module, source)
             api = binding_codegen.scan_cpp_semantic_model(module)
             declarations = render_typescript("LocalTest", api)
-            generated = binding_codegen.render_v4_feature_jsi(
+            generated = binding_codegen.render_feature_jsi(
                 module,
                 module_name="LocalTest",
                 feature_id="supernote:feature:0123456789abcdef",

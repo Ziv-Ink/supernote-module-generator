@@ -1,4 +1,4 @@
-"""Emit synchronous JSI bindings for V4 JVM object and composite routes."""
+"""Emit synchronous JSI bindings for JVM object and composite routes."""
 from __future__ import annotations
 
 import hashlib
@@ -23,15 +23,15 @@ def _suffix(semantic: SemanticType) -> str:
 
 
 def _from_name(semantic: SemanticType) -> str:
-    return f"supernote_v4_jvm_from_js_{_suffix(semantic)}"
+    return f"supernote_module_jvm_from_js_{_suffix(semantic)}"
 
 
 def _to_name(semantic: SemanticType) -> str:
-    return f"supernote_v4_jvm_to_js_{_suffix(semantic)}"
+    return f"supernote_module_jvm_to_js_{_suffix(semantic)}"
 
 
 def _validate_name(semantic: SemanticType) -> str:
-    return f"supernote_v4_jvm_validate_js_{_suffix(semantic)}"
+    return f"supernote_module_jvm_validate_js_{_suffix(semantic)}"
 
 
 def _native(semantic: SemanticType) -> str:
@@ -94,7 +94,7 @@ def _route_expression(
     *, key: str, adapter_class: str, descriptor: str, method: str = "invoke"
 ) -> str:
     return (
-        "supernote_v4_jvm_route(feature, "
+        "supernote_module_jvm_route(feature, "
         + json.dumps(key)
         + ", "
         + json.dumps(adapter_class)
@@ -110,7 +110,7 @@ def _helper_route(
     feature_id: str, method: str, descriptor: str
 ) -> str:
     return _route_expression(
-        key=f"jvm-v4-helper:{method}:{descriptor}",
+        key=f"jvm-module-helper:{method}:{descriptor}",
         adapter_class=_bridge_class(feature_id),
         descriptor=descriptor,
         method=method,
@@ -496,7 +496,7 @@ def _from_definition(
             adapter = _enum_class(route.named_type.source_declaration_id)
             descriptor = f"([B)L{route.named_type.owner_class.replace('.', '/')};"
             resolved = _route_expression(
-                key=f"jvm-v4-enum-from:{semantic.type_id}",
+                key=f"jvm-module-enum-from:{semantic.type_id}",
                 adapter_class=adapter,
                 descriptor=descriptor,
                 method="fromName",
@@ -579,7 +579,7 @@ def _from_definition(
                     f"      runtime, field_{index}_value, env, feature, budget, field_{index}_path, depth + 1);",
                 ])
             resolved = _route_expression(
-                key=f"jvm-v4-value-constructor:{semantic.type_id}",
+                key=f"jvm-module-value-constructor:{semantic.type_id}",
                 adapter_class="supernote.generated.adapters.Adapter_"
                 + route.constructor.adapter_identity.rsplit(".", 1)[-1],
                 descriptor=route.constructor.adapter_descriptor,
@@ -782,7 +782,7 @@ def _to_definition(
         )
         lines.extend([
             "  budget.reserve(path, sizeof(void *));",
-            f"  return facebook::jsi::Value(supernote_v4_wrap_jvm_object_{index}(",
+            f"  return facebook::jsi::Value(supernote_module_wrap_jvm_object_{index}(",
             "      runtime, env, registry, feature, value));",
         ])
     elif kind is SemanticTypeKind.ENUM_REF:
@@ -793,7 +793,7 @@ def _to_definition(
         )
         adapter = _enum_class(route.named_type.source_declaration_id)
         resolved = _route_expression(
-            key=f"jvm-v4-enum-name:{semantic.type_id}",
+            key=f"jvm-module-enum-name:{semantic.type_id}",
             adapter_class=adapter,
             descriptor=f"(L{route.named_type.owner_class.replace('.', '/')};)[B",
             method="name",
@@ -870,7 +870,7 @@ def _to_definition(
         for index, field in enumerate(route.fields):
             adapter = "supernote.generated.adapters.Adapter_" + field.accessor_identity.rsplit(".", 1)[-1]
             getter = _route_expression(
-                key=f"jvm-v4-field-get:{field.source_declaration_id}",
+                key=f"jvm-module-field-get:{field.source_declaration_id}",
                 adapter_class=adapter,
                 descriptor=field.getter_descriptor,
                 method="get",
@@ -1003,7 +1003,7 @@ def _callable_body(
         ])
     adapter = "supernote.generated.adapters.Adapter_" + route.adapter_identity.rsplit(".", 1)[-1]
     resolved = _route_expression(
-        key=f"jvm-v4-call:{route.source_declaration_id}",
+        key=f"jvm-module-call:{route.source_declaration_id}",
         adapter_class=adapter,
         descriptor=route.adapter_descriptor,
     )
@@ -1107,7 +1107,7 @@ def _async_host_function(
     )
     adapter = "supernote.generated.adapters.Adapter_" + route.adapter_identity.rsplit(".", 1)[-1]
     resolved = _route_expression(
-        key=f"jvm-v4-call:{route.source_declaration_id}",
+        key=f"jvm-module-call:{route.source_declaration_id}",
         adapter_class=adapter,
         descriptor=route.adapter_descriptor,
     )
@@ -1160,7 +1160,7 @@ def _async_host_function(
             "auto *env = attached.get();",
             "if (env == nullptr) throw std::runtime_error(\"cannot attach to JavaVM\");",
             "LocalFrame frame(env);",
-            "auto registry = supernote_v4_jvm_object_registry(runtime);",
+            "auto registry = supernote_module_jvm_object_registry(runtime);",
             "supernote::conversion::Budget result_budget;",
             f"auto value = {_to_name(route.result)}(",
             "    runtime, *state->value, env, registry, completion_feature,",
@@ -1365,12 +1365,12 @@ def _suspend_host_function(
         + route.adapter_identity.rsplit(".", 1)[-1]
     )
     resolved = _route_expression(
-        key=f"jvm-v4-call:{route.source_declaration_id}",
+        key=f"jvm-module-call:{route.source_declaration_id}",
         adapter_class=adapter,
         descriptor=route.adapter_descriptor,
     )
     cancel_resolved = _route_expression(
-        key="jvm-v4-coroutine-cancel",
+        key="jvm-module-coroutine-cancel",
         adapter_class="supernote.generated.runtime.SupernoteCoroutineBridge",
         descriptor="(Lkotlinx/coroutines/Job;)V",
         method="cancel",
@@ -1469,7 +1469,7 @@ def _suspend_host_function(
             "auto *env = attached.get();",
             "if (env == nullptr) throw std::runtime_error(\"cannot attach to JavaVM\");",
             "LocalFrame frame(env);",
-            "auto registry = supernote_v4_jvm_object_registry(runtime);",
+            "auto registry = supernote_module_jvm_object_registry(runtime);",
             "supernote::conversion::Budget result_budget;",
             f"auto value = {_to_name(route.result)}(",
             "    runtime, *state->value, env, registry, completion_feature,",
@@ -1857,7 +1857,7 @@ def _wrapper(
     for field_index, field in enumerate(item.fields):
         adapter = "supernote.generated.adapters.Adapter_" + field.accessor_identity.rsplit(".", 1)[-1]
         getter = _route_expression(
-            key=f"jvm-v4-field-get:{field.source_declaration_id}",
+            key=f"jvm-module-field-get:{field.source_declaration_id}",
             adapter_class=adapter,
             descriptor=field.getter_descriptor,
             method="get",
@@ -1910,7 +1910,7 @@ def _wrapper(
             continue
         adapter = "supernote.generated.adapters.Adapter_" + field.accessor_identity.rsplit(".", 1)[-1]
         setter = _route_expression(
-            key=f"jvm-v4-field-set:{field.source_declaration_id}",
+            key=f"jvm-module-field-set:{field.source_declaration_id}",
             adapter_class=adapter,
             descriptor=field.setter_descriptor or "",
             method="set",
@@ -1953,10 +1953,10 @@ def _wrapper(
     set_rows = "\n".join(
         "  " + line for line in "\n".join(setters).splitlines()
     )
-    return f'''class GeneratedV4JvmObject{index}HostObject final
+    return f'''class GeneratedModuleJvmObject{index}HostObject final
     : public JvmObjectHandleBase {{
  public:
-  GeneratedV4JvmObject{index}HostObject(
+  GeneratedModuleJvmObject{index}HostObject(
       ManagedJvmRef owner,
       std::shared_ptr<supernote::runtime::FeatureSession> feature,
       std::shared_ptr<JvmObjectRegistry> registry)
@@ -2032,7 +2032,7 @@ def _wrapper(
 
 def _wrap_declarations(plan: JvmRoutePlan) -> str:
     return "\n".join(
-        f"facebook::jsi::Object supernote_v4_wrap_jvm_object_{index}(\n"
+        f"facebook::jsi::Object supernote_module_wrap_jvm_object_{index}(\n"
         "    facebook::jsi::Runtime &runtime, JNIEnv *env,\n"
         "    const std::shared_ptr<JvmObjectRegistry> &registry,\n"
         "    const std::shared_ptr<supernote::runtime::FeatureSession> &feature,\n"
@@ -2044,17 +2044,17 @@ def _wrap_declarations(plan: JvmRoutePlan) -> str:
 def _wrap_definitions(plan: JvmRoutePlan) -> str:
     rows = []
     for index, item in enumerate(plan.objects):
-        rows.append(f'''facebook::jsi::Object supernote_v4_wrap_jvm_object_{index}(
+        rows.append(f'''facebook::jsi::Object supernote_module_wrap_jvm_object_{index}(
     facebook::jsi::Runtime &runtime, JNIEnv *env,
     const std::shared_ptr<JvmObjectRegistry> &registry,
     const std::shared_ptr<supernote::runtime::FeatureSession> &feature,
     const ManagedJvmRef &value) {{
   return registry->wrap(
       runtime, env, {json.dumps(item.named_type.type_id)}, value.get(),
-      supernote_v4_jvm_identity_hash(env, feature, value.get()),
+      supernote_module_jvm_identity_hash(env, feature, value.get()),
       value.global_ref(),
       [feature, registry](ManagedJvmRef managed) {{
-        return std::make_shared<GeneratedV4JvmObject{index}HostObject>(
+        return std::make_shared<GeneratedModuleJvmObject{index}HostObject>(
             std::move(managed), feature, registry);
       }});
 }}''')
@@ -2065,7 +2065,7 @@ def _identity_helper(feature_id: str) -> str:
     route = _helper_route(
         feature_id, "identityHash", "(Ljava/lang/Object;)I"
     )
-    return f'''std::shared_ptr<JvmObjectRegistry> supernote_v4_jvm_object_registry(
+    return f'''std::shared_ptr<JvmObjectRegistry> supernote_module_jvm_object_registry(
     facebook::jsi::Runtime &runtime) {{
   auto feature_registry = runtime.global().getPropertyAsObject(
       runtime, kFeatureRegistryGlobal);
@@ -2079,7 +2079,7 @@ def _identity_helper(feature_id: str) -> str:
       .getHostObject<JvmObjectRegistryOwner>(runtime)->registry();
 }}
 
-std::shared_ptr<JvmRoute> supernote_v4_jvm_route(
+std::shared_ptr<JvmRoute> supernote_module_jvm_route(
     const std::shared_ptr<supernote::runtime::FeatureSession> &feature,
     const char *key,
     const char *adapter_class,
@@ -2091,7 +2091,7 @@ std::shared_ptr<JvmRoute> supernote_v4_jvm_route(
   return route->get(feature);
 }}
 
-jint supernote_v4_jvm_identity_hash(
+jint supernote_module_jvm_identity_hash(
     JNIEnv *env,
     const std::shared_ptr<supernote::runtime::FeatureSession> &feature,
     jobject value) {{

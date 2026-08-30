@@ -31,7 +31,7 @@ class GenerationPlanExecutor:
         *,
         commit: bool,
     ) -> None:
-        staging = Path(tempfile.mkdtemp(prefix=".v4-plan-", dir=self.root))
+        staging = Path(tempfile.mkdtemp(prefix=".sn-module-gen-plan-", dir=self.root))
         transaction.track_created(staging)
         self._stage_plan(plan, staging)
         transaction.checkpoint("after_staging")

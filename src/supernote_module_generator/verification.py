@@ -1,4 +1,4 @@
-"""Android build invocation retained by the active V4 feature workflow."""
+"""Android build invocation retained by the active feature workflow."""
 from __future__ import annotations
 
 from pathlib import Path

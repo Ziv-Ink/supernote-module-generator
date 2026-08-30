@@ -1,4 +1,4 @@
-"""Language-neutral feature ownership and plugin runtime registry for V4."""
+"""Language-neutral feature ownership and plugin runtime registry."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -28,7 +28,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class FeatureModelError(ValueError):
-    """Raised when V4 ownership/build metadata violates its contract."""
+    """Raised when ownership/build metadata violates its contract."""
 
 
 class StarterFamily(str, Enum):
@@ -68,7 +68,7 @@ class FeatureManifest:
     android_namespace: str
     roots: ImplementationRoots = field(default_factory=ImplementationRoots)
     starter_files: Tuple[str, ...] = field(default_factory=tuple)
-    schema_version: int = FEATURE_MANIFEST_SCHEMA_VERSION
+    schema_version: str = FEATURE_MANIFEST_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != FEATURE_MANIFEST_SCHEMA_VERSION:
@@ -240,7 +240,7 @@ class PluginRuntimeRegistry:
     component_name: str
     generator_version: str
     features: Tuple[FeatureRegistryEntry, ...]
-    schema_version: int = PLUGIN_REGISTRY_SCHEMA_VERSION
+    schema_version: str = PLUGIN_REGISTRY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != PLUGIN_REGISTRY_SCHEMA_VERSION:

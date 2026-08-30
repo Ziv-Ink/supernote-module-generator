@@ -1,4 +1,4 @@
-"""Authoritative expected-plan versus actual-state V4 validation."""
+"""Authoritative expected-plan versus actual generated-state validation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -63,7 +63,7 @@ class ValidationIssue:
 
 
 @dataclass(frozen=True)
-class V4ValidationResult:
+class GeneratedProjectValidationResult:
     status: str
     generation_id: str | None
     issues: Tuple[ValidationIssue, ...]
@@ -82,7 +82,7 @@ class _BuildResult:
     duration_ms: int
 
 
-class V4Validator:
+class GeneratedProjectValidator:
     def __init__(self, plugin_root: Path) -> None:
         self.root = plugin_root.resolve()
 
@@ -94,7 +94,7 @@ class V4Validator:
         build: bool = False,
         validate_dependencies: bool = False,
         parent_transaction_id: str | None = None,
-    ) -> V4ValidationResult:
+    ) -> GeneratedProjectValidationResult:
         try:
             project = ProjectModel.discover(self.root)
             plan = GenerationService(self.root).plan(
@@ -113,7 +113,7 @@ class V4Validator:
                 str(exc),
                 suggested_command="Fix the reported source/configuration issue and rerun sn-module-gen check.",
             )
-            return V4ValidationResult("failure", None, (issue,))
+            return GeneratedProjectValidationResult("failure", None, (issue,))
         features_by_path = {
             feature.root.relative_to(self.root).as_posix(): feature
             for feature in project.features
@@ -183,7 +183,7 @@ class V4Validator:
             issues.extend(self._dependency_issues(project))
         deduplicated = _deduplicate(issues)
         if deduplicated:
-            return V4ValidationResult(
+            return GeneratedProjectValidationResult(
                 "failure", plan.generation_id, deduplicated
             )
         build_status = "not_run"
@@ -197,7 +197,7 @@ class V4Validator:
                 parent_transaction_id=parent_transaction_id,
             )
             if build_result.status != "passed":
-                return V4ValidationResult(
+                return GeneratedProjectValidationResult(
                     "failure",
                     plan.generation_id,
                     build_result.issues,
@@ -209,7 +209,7 @@ class V4Validator:
             build_status = "passed"
             build_diagnostics = build_result.diagnostics
             build_duration_ms = build_result.duration_ms
-        return V4ValidationResult(
+        return GeneratedProjectValidationResult(
             "success",
             plan.generation_id,
             (),
@@ -318,7 +318,7 @@ class V4Validator:
         duration_ms = round((time.monotonic() - started) * 1000)
         diagnostic_path = write_process_diagnostics(
             self.root,
-            name="v4-check-build",
+            name="check-build",
             command=command,
             exit_code=exit_code,
             stdout=stdout,

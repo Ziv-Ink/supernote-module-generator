@@ -1,4 +1,4 @@
-"""Compute the JavaScript-public V4 type graph from common semantics."""
+"""Compute the JavaScript-public type graph from common semantics."""
 from __future__ import annotations
 
 from collections import deque

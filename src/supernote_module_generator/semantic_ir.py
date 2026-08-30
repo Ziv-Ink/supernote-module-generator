@@ -1,4 +1,4 @@
-"""Versioned project-level semantic input for V4 generation."""
+"""Versioned project-level semantic input for generated output."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,13 +10,13 @@ from .feature_identity import FeatureIdentity
 from .semantic import SemanticApi, merge_semantic_apis, semantic_api_from_manifest
 
 
-SEMANTIC_IR_SCHEMA_VERSION = 1
+SEMANTIC_IR_SCHEMA_VERSION = "1.0"
 CPP_FRONTEND_VERSION = 1
 JVM_FRONTEND_VERSION = 1
 
 
 class SemanticIRError(ValueError):
-    """A serialized or merged V4 semantic generation is invalid."""
+    """A serialized or merged semantic generation is invalid."""
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -92,7 +92,7 @@ class FeatureSemanticIR:
 class SemanticIR:
     plugin_id: str
     features: Tuple[FeatureSemanticIR, ...]
-    schema_version: int = SEMANTIC_IR_SCHEMA_VERSION
+    schema_version: str = SEMANTIC_IR_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != SEMANTIC_IR_SCHEMA_VERSION:
@@ -127,7 +127,7 @@ class SemanticIR:
     def manifest(self) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "kind": "supernote_module_v4_semantic_ir",
+            "kind": "supernote_module_semantic_ir",
             "plugin_id": self.plugin_id,
             "frontend_versions": {
                 "cpp": CPP_FRONTEND_VERSION,
@@ -151,7 +151,7 @@ class SemanticIR:
             raise SemanticIRError("SemanticIR fields are invalid")
         if raw.get("schema_version") != SEMANTIC_IR_SCHEMA_VERSION:
             raise SemanticIRError("SemanticIR schema is incompatible")
-        if raw.get("kind") != "supernote_module_v4_semantic_ir":
+        if raw.get("kind") != "supernote_module_semantic_ir":
             raise SemanticIRError("SemanticIR kind is invalid")
         versions = raw.get("frontend_versions")
         if versions != {"cpp": CPP_FRONTEND_VERSION, "jvm": JVM_FRONTEND_VERSION}:

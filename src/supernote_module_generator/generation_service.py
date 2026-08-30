@@ -1,4 +1,4 @@
-"""Assemble and atomically execute one complete V4 GenerationPlan."""
+"""Assemble and atomically execute one complete GenerationPlan."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -232,7 +232,7 @@ class GenerationService:
             )
             if planned_wiring_issues:
                 raise ConfigurationError(
-                    "planned V4 wiring is not canonical: "
+                    "planned generated wiring is not canonical: "
                     + "; ".join(planned_wiring_issues)
                 )
         wiring_actions = tuple(
@@ -542,7 +542,7 @@ class GenerationService:
             record = service.find_record(project_feature.identity.npm_name)
             semantic = by_id[project_feature.identity.feature_id]
             with tempfile.TemporaryDirectory(
-                prefix="supernote-v4-render-"
+                prefix="sn-module-gen-render-"
             ) as raw_render_root:
                 config = FeatureConfig(
                     output=Path(raw_render_root) / "feature",
@@ -660,7 +660,7 @@ class GenerationService:
             runtime_files[conversion_path] = (
                 json.dumps(conversion_json, indent=2, sort_keys=True) + "\n"
             )
-            runtime_files[feature_jni] = binding_codegen.render_v4_feature_jsi(
+            runtime_files[feature_jni] = binding_codegen.render_feature_jsi(
                 record.path,
                 module_name=record.manifest.public_name,
                 feature_id=feature_id,
@@ -712,7 +712,7 @@ class GenerationService:
                 generated_relative.append(jvm_jni)
                 jvm_feature_ids.append(feature_id)
         plugin_jni = "generated/jni/plugin_bindings.cpp"
-        runtime_files[plugin_jni] = binding_codegen.render_v4_plugin_jsi(
+        runtime_files[plugin_jni] = binding_codegen.render_plugin_jsi(
             feature_ids, jvm_feature_ids=jvm_feature_ids
         )
         generated_relative.append(plugin_jni)

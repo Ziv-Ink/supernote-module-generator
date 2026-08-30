@@ -76,7 +76,7 @@ def _exercise_mutation_validation_and_rollback(root: Path) -> None:
 
 
 @pytest.mark.parametrize("directory", ("project with spaces", "פרויקט-unicode-文档"))
-def test_active_v4_path_supports_spaces_and_unicode(
+def test_active_path_supports_spaces_and_unicode(
     tmp_path: Path, directory: str
 ) -> None:
     root = _plugin(tmp_path / directory)
@@ -85,7 +85,7 @@ def test_active_v4_path_supports_spaces_and_unicode(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows long-path contract")
-def test_windows_long_path_reaches_active_v4_mutation_validation_and_rollback(
+def test_windows_long_path_reaches_active_mutation_validation_and_rollback(
     tmp_path: Path,
 ) -> None:
     root = tmp_path

@@ -1,4 +1,4 @@
-"""Atomic V4 logical-feature and shared-runtime mutations."""
+"""Atomic logical-feature and shared-runtime mutations."""
 from __future__ import annotations
 
 import json
@@ -50,7 +50,7 @@ class FeatureMetadataError(GeneratorError):
 
 
 class FeatureSourceError(GeneratorError):
-    """A marked user declaration cannot be represented by V4 bindings."""
+    """A marked user declaration cannot be represented by generated bindings."""
 
     kind = "invalid_source"
     phase = "preflight"
@@ -105,7 +105,7 @@ class FeatureOperationService:
             and contained_entry_kind_no_follow(self.root, runtime_root) is not None
         ):
             raise FeatureOperationError(
-                "shared V4 runtime exists without feature or integrity-manifest "
+                "shared generated runtime exists without feature or integrity-manifest "
                 f"ownership authority: {runtime_root}"
             )
         verify_runtime_wiring(
@@ -305,7 +305,7 @@ class FeatureOperationService:
         runtime = self.root / RUNTIME_RELATIVE_ROOT
         if not records:
             if runtime.exists():
-                issues.append("shared V4 runtime exists without any features")
+                issues.append("shared generated runtime exists without any features")
             return issues
         try:
             expected = generated_runtime_files(self.expected_registry())
@@ -394,7 +394,7 @@ def read_feature_manifest(path: Path) -> FeatureManifest:
                 _array_string(starter_files, index)
                 for index in range(len(starter_files))
             ),
-            schema_version=_required_integer(raw, "schema_version"),
+            schema_version=_required_string(raw, "schema_version"),
         )
     except FeatureMetadataError:
         raise

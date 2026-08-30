@@ -293,13 +293,13 @@ def _exception_result(command: str, exc: Exception, debug: bool) -> CommandResul
             )
         elif exc.kind == "unsupported_legacy_project":
             result.metadata["next_action"] = (
-                "Create a clean V4 plugin and copy only reviewed user-owned source files; "
-                "V4 does not migrate legacy generated state."
+                "Create a clean plugin and copy only reviewed user-owned source files; "
+                "sn-module-gen does not migrate V1-V4 generated state."
             )
         elif exc.kind == "unmanifested_generated_project":
             result.metadata["next_action"] = (
-                "Preserve the unmanifested files. Restore the exact schema-4 integrity "
-                "manifest that owns them, or create a clean V4 plugin and copy only "
+                "Preserve the unmanifested files. Restore the exact schema-version 1.0 "
+                "integrity manifest that owns them, or create a clean plugin and copy only "
                 "reviewed user-owned source files."
             )
         elif result.recovery is None:
@@ -594,7 +594,7 @@ def _run_feature_command(
                 )
             if not parsed.has("dry_run") and not parsed.has("yes"):
                 raise ConfigurationError(
-                    "non-interactive V4 update execution requires --yes; use --dry-run to preview"
+                    "non-interactive update execution requires --yes; use --dry-run to preview"
                 )
             result = CliOperationService(root).update(
                 requested,

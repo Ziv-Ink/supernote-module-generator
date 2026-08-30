@@ -1,4 +1,4 @@
-"""Source-backed JVM routes for the V4 semantic object model.
+"""Source-backed JVM routes for the semantic object model.
 
 KSP records exact JVM owners and deterministic adapter identities.  This module
 joins those compiler facts back to the backend-neutral semantic API and derives

@@ -147,7 +147,7 @@ def _capture_template_snapshot(root: Path) -> _TemplateSnapshot:
     entries: list[_CapturedTemplateEntry] = []
     manifest_entry = _capture_existing_entry(root, INTEGRITY_MANIFEST_PATH)
     if manifest_entry is None:
-        raise TemplateStateError("V4 integrity manifest is unavailable")
+        raise TemplateStateError("Generated integrity manifest is unavailable")
     entries.append(manifest_entry)
     records: list[TemplateFileState] = []
     for relative in TEMPLATE_SCRIPT_PATHS:

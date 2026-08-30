@@ -60,11 +60,11 @@ def parameter_syntax(
     marker_line: int,
     keywords: AbstractSet[str],
 ) -> CppParameterSyntax:
-    """Validate one named canonical V4 parameter declaration."""
+    """Validate one named canonical generated parameter declaration."""
 
     line = tokens[0].line if tokens else marker_line
     expected = (
-        f"argument {argument_index} must use one named canonical V4 value "
+        f"argument {argument_index} must use one named canonical generated value "
         "type, for example 'std::int32_t value'"
     )
     if not tokens:

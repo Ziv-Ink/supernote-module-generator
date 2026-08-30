@@ -1,4 +1,4 @@
-"""Language-specific declaration facts retained by V4 frontends."""
+"""Language-specific declaration facts retained by source frontends."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -65,7 +65,7 @@ class SourceIntent:
             invalid = marker_set - {SupernoteMarker.CONSTRUCTOR}
             if invalid:
                 raise SourceModelError(
-                    "constructors accept only SupernoteConstructor in initial V4"
+                    "constructors accept only SupernoteConstructor"
                 )
         elif self.target is DeclarationTarget.CLASS:
             if marker_set and marker_set not in (

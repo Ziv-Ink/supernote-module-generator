@@ -19,7 +19,8 @@ def test_bounded_pack_has_fifteen_source_backed_checks_and_two_hosts() -> None:
     manifest = json.loads((PACK / "cases.json").read_text(encoding="utf-8"))
     checks = manifest["checks"]
 
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == "1.0"
+    assert manifest["suite"] == "sn-module-gen-bounded-note-doc"
     assert manifest["pinned_file_reader_revision"] == materialize.PINNED_REVISION
     assert manifest["pinned_sn_plugin_lib"] == "0.1.63"
     assert set(manifest["hosts"]) == {"note", "doc"}
@@ -65,7 +66,7 @@ def test_doc_fixture_pdf_is_deterministic_and_self_contained() -> None:
 
     assert first == second
     assert first.startswith(b"%PDF-1.4\n")
-    assert b"SNV4 Bounded DOC Acceptance" in first
+    assert b"SN Module Gen Bounded DOC Acceptance" in first
     assert first.endswith(b"%%EOF\n")
     assert b"/Count 1" in first
 
@@ -108,19 +109,19 @@ def test_device_evidence_requires_all_source_backed_checks_and_permission_flow(
         checks.append({"id": item["id"], "status": "pass", "actual": actual})
         events.append(
             "prefix SNMG_TEST_EVENT "
-            + json.dumps({"schema": 1, "host": host, "id": item["id"]})
+            + json.dumps({"schema": "1.0", "host": host, "id": item["id"]})
         )
     request = {
-        "schema": 1,
+        "schema": "1.0",
         "host": host,
         "permission": cases["hosts"][host]["permission"],
         "action": cases["hosts"][host]["permission_action"],
     }
     terminal = {
-        "schema": 1,
+        "schema": "1.0",
         "suite": cases["suite"],
         "host": host,
-        "pluginName": f"snv4-{host}-acceptance-unit",
+        "pluginName": f"snmg-{host}-acceptance-unit",
         "status": "pass",
         "checks": checks,
     }
@@ -135,6 +136,7 @@ def test_device_evidence_requires_all_source_backed_checks_and_permission_flow(
     normalized = validate_evidence(log, cases, host, expected_file)
 
     assert normalized["status"] == "pass"
+    assert normalized["schema_version"] == "1.0"
     assert normalized["check_count"] == 15
     assert normalized["permission"]["requested"] == requested
 

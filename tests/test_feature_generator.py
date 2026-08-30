@@ -91,7 +91,7 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
     index = (feature / "index.js").read_text()
     package = json.loads((feature / "package.json").read_text())
 
-    assert "globalThis.__supernoteV4" in index
+    assert "globalThis.__supernoteModule" in index
     assert index.startswith("/* global globalThis */\n")
     assert "if (property === ERROR_CONSTRUCTOR_PROPERTY) return" not in index
     assert "{...descriptor, configurable: true}" in index
@@ -144,7 +144,7 @@ try {{
   earlyError = error;
 }}
 if (!earlyError || earlyError.message !==
-    'Document is not installed in the Supernote V4 runtime') {{
+    'Document is not installed in the Supernote generated runtime') {{
   throw new Error(`unexpected early-access result: ${{earlyError}}`);
 }}
 
@@ -158,7 +158,7 @@ const first = {{
       : undefined;
   }},
 }};
-globalThis.__supernoteV4 = {{
+globalThis.__supernoteModule = {{
   feature(id) {{
     if (id !== {json.dumps(feature_id)}) throw new Error(`wrong id: ${{id}}`);
     return first;
@@ -218,7 +218,7 @@ if (generated.default.__supernoteErrorConstructor !== undefined ||
 }}
 
 const second = {{greet: name => `second:${{name}}`, secondOnly: 2}};
-globalThis.__supernoteV4 = {{feature: () => second}};
+globalThis.__supernoteModule = {{feature: () => second}};
 if (generated.default.greet('Ada') !== 'second:Ada') {{
   throw new Error('feature wrapper retained a stale runtime binding');
 }}

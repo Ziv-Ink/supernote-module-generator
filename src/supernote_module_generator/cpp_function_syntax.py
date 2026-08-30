@@ -138,14 +138,14 @@ def _validate_owned_return(
             line,
             export_name,
             "raw pointers are not supported as marked C++ results; "
-            "return one canonical owned V4 type",
+            "return one canonical owned generated type",
         )
     if any(token.value in {"&", "&&"} for token in tokens):
         raise CppFunctionSyntaxError(
             line,
             export_name,
             "references are not supported as marked C++ results; return "
-            "one canonical owned V4 type",
+            "one canonical owned generated type",
         )
 
 
@@ -185,7 +185,7 @@ def function_head(
             first.line,
             pending_export,
             "not a supported top-level function definition: "
-            f"{description} {first.value!r}; expected one canonical V4 return "
+            f"{description} {first.value!r}; expected one canonical generated return "
             "type followed by a function name",
         )
 

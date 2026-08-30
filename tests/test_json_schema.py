@@ -32,9 +32,9 @@ from supernote_module_generator.models import (
     ValidationResult,
 )
 from supernote_module_generator.cli_operations import CliOperationService
-from supernote_module_generator.v4_validation import (
-    V4ValidationResult,
-    V4Validator,
+from supernote_module_generator.validation import (
+    GeneratedProjectValidationResult,
+    GeneratedProjectValidator,
     ValidationIssue,
 )
 
@@ -132,7 +132,7 @@ def test_staged_repair_validation_failure_conforms_to_schema(
     )[0] == 0
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-runtime\n", "")
     )
     issue = ValidationIssue(
         "SNMG_STAGED_REPAIR_REJECTED",
@@ -143,9 +143,9 @@ def test_staged_repair_validation_failure_conforms_to_schema(
         suggested_command="Fix the staged repair sentinel and rerun repair.",
     )
     monkeypatch.setattr(
-        V4Validator,
+        GeneratedProjectValidator,
         "validate",
-        lambda self, **kwargs: V4ValidationResult(
+        lambda self, **kwargs: GeneratedProjectValidationResult(
             "failure",
             "1" * 64,
             (issue,),
@@ -175,7 +175,7 @@ def test_staged_repair_partial_rollback_separates_plan_from_actual_residue(
     )[0] == 0
     settings = root / "android/settings.gradle"
     settings.write_text(
-        settings.read_text().replace("// end supernote-module-v4-runtime\n", "")
+        settings.read_text().replace("// end sn-module-gen-runtime\n", "")
     )
     preview_code, preview = invoke(root, ["repair", "--diff"])
     assert preview_code == 0
@@ -187,9 +187,9 @@ def test_staged_repair_partial_rollback_separates_plan_from_actual_residue(
         path="android/settings.gradle",
     )
     monkeypatch.setattr(
-        V4Validator,
+        GeneratedProjectValidator,
         "validate",
-        lambda self, **kwargs: V4ValidationResult(
+        lambda self, **kwargs: GeneratedProjectValidationResult(
             "failure", "1" * 64, (issue,)
         ),
     )
@@ -686,7 +686,7 @@ def test_usage_integrity_and_build_failures_conform_to_schema(
         )
 
     monkeypatch.setattr(
-        "supernote_module_generator.v4_validation.run_process", failed_build
+        "supernote_module_generator.validation.run_process", failed_build
     )
     _, build = invoke(root, ["check", "--build"])
     assert build["error"]["kind"] == "build_failed"  # type: ignore[index]
@@ -717,7 +717,7 @@ def test_build_guard_partial_restoration_preserves_authoritative_contract(
         if outcome == "cancelled":
             raise KeyboardInterrupt
         if outcome == "failure":
-            return V4ValidationResult(
+            return GeneratedProjectValidationResult(
                 status="failure",
                 generation_id="generation-failure-sentinel",
                 issues=(
@@ -733,7 +733,7 @@ def test_build_guard_partial_restoration_preserves_authoritative_contract(
                 diagnostics=("/tmp/build-failure-diagnostic.log",),
                 build_duration_ms=321,
             )
-        return V4ValidationResult(
+        return GeneratedProjectValidationResult(
             status="success",
             generation_id="generation-success-sentinel",
             issues=(),
@@ -742,7 +742,7 @@ def test_build_guard_partial_restoration_preserves_authoritative_contract(
             build_duration_ms=123,
         )
 
-    monkeypatch.setattr(V4Validator, "validate", validation_result)
+    monkeypatch.setattr(GeneratedProjectValidator, "validate", validation_result)
     original_finish = ProtectedSourceGuard.finish
     finish_calls = 0
     recovery_paths: list[Path] = []
@@ -811,7 +811,7 @@ def test_build_guard_partial_restoration_preserves_authoritative_contract(
     (
         ("modified:local_modules/alpha", "feature", "alpha", ["alpha"]),
         (
-            "modified:android/.supernote-module/v4-runtime",
+            "modified:android/.supernote-module/runtime",
             "runtime",
             None,
             ["shared runtime"],
@@ -835,9 +835,9 @@ def test_metadata_only_partial_build_restore_uses_exact_residue_scope(
     assert code == 0
 
     monkeypatch.setattr(
-        V4Validator,
+        GeneratedProjectValidator,
         "validate",
-        lambda self, **kwargs: V4ValidationResult(
+        lambda self, **kwargs: GeneratedProjectValidationResult(
             "success",
             "metadata-generation-sentinel",
             (),
@@ -930,7 +930,7 @@ def test_stage_failure_survives_independent_finalization_cancellation(
             source.write_text(source.read_text() + "// validator stage mutation\n")
             raise RuntimeError("validator root-cause sentinel")
 
-        monkeypatch.setattr(V4Validator, "validate", failing_validator)
+        monkeypatch.setattr(GeneratedProjectValidator, "validate", failing_validator)
 
     recovery_paths: list[Path] = []
     original_remove = ProtectedSourceGuard._remove_temporary
@@ -1466,7 +1466,7 @@ def test_stage_failure_without_mutation_keeps_cleanup_diagnostics_out_of_residue
         def failing_validator(self, **kwargs):
             raise RuntimeError("validator root-cause sentinel")
 
-        monkeypatch.setattr(V4Validator, "validate", failing_validator)
+        monkeypatch.setattr(GeneratedProjectValidator, "validate", failing_validator)
 
     original_remove = ProtectedSourceGuard._remove_temporary
     remove_calls = 0
@@ -1557,7 +1557,7 @@ def test_uninventoried_guard_residue_is_never_treated_as_verified_empty(
             source.write_text(source.read_text() + "// live mutation\n")
             raise RuntimeError("validator root-cause sentinel")
 
-        monkeypatch.setattr(V4Validator, "validate", failing_validator)
+        monkeypatch.setattr(GeneratedProjectValidator, "validate", failing_validator)
 
     original_finish = ProtectedSourceGuard.finish
     finish_calls = 0
