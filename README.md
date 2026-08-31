@@ -309,10 +309,10 @@ installation, and device debugging are covered by the
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md)
-for development and validation rules and
-[Architecture](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/ARCHITECTURE.md)
-for the runtime and type model.
+See [CONTRIBUTING.md](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/CONTRIBUTING.md), the
+[testing guide](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/TESTING.md), and [CI workflow](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/.github/workflows/quality.yml).
+The [architecture guide](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/docs/ARCHITECTURE.md) explains the runtime model. The [`v0.1.0` release record](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/maintainers/release-evidence/v0.1.0.md)
+lists exactly what was tested for the first public release.
 
 ## License
 
