@@ -15,6 +15,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -e '.[dev]'
+python3 -m pip install -r ci/release-requirements.txt
 ```
 
 Update the version in `src/supernote_module_generator/__init__.py`. Confirm that
@@ -31,7 +32,8 @@ python3 -m mypy
 python3 -m compileall -q src tests ci
 python3 -m coverage run -m pytest -q
 python3 -m coverage report
-python3 -m build
+python3 ci/reproducible_release_build.py \
+  --source . --output dist --commit "$(git rev-parse HEAD)"
 python3 -m twine check dist/*
 git diff --check
 ```
@@ -193,6 +195,14 @@ gh release create v0.1.0 --verify-tag \
 Set `RELEASE_SHA` to the independently approved exact commit. The workflow
 rejects every tag except `v0.1.0`, verifies that it matches the embedded package
 version, and refuses prerelease publication.
+
+The release builder derives `SOURCE_DATE_EPOCH` from the exact source commit,
+builds in two fresh detached clones separated in wall-clock time, normalizes
+source-distribution archive ownership and timestamps, and refuses to emit
+artifacts unless both wheel and source distribution are byte-identical. Release
+tool versions come from the exact-pinned `ci/release-requirements.txt`, and the
+build is non-isolated so a later package index update cannot change the approved
+bytes.
 
 Publishing the release runs `.github/workflows/publish.yml`. The reusable
 quality workflow checks out `github.sha`, verifies that exact checkout, runs the

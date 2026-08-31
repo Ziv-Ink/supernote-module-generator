@@ -245,9 +245,7 @@ jobs:
           python-version: "3.13"
           cache: pip
       - name: Install release tools
-        run: >-
-          python -m pip install
-          'build>=1,<2' 'twine>=5,<7' 'setuptools>=58' 'wheel>=0.41,<1'
+        run: python -m pip install -r ci/release-requirements.txt
       - name: Verify release tag
         if: inputs.release_tag != ''
         env:
@@ -262,8 +260,12 @@ jobs:
             echo "Release tag ${RELEASE_TAG} does not match package version v${version}." >&2
             exit 1
           }
-      - name: Build wheel and source distribution
-        run: python -m build
+      - name: Build byte-reproducible wheel and source distribution twice
+        run: >-
+          python ci/reproducible_release_build.py
+          --source .
+          --output dist
+          --commit "$GITHUB_SHA"
       - name: Validate package metadata
         run: python -m twine check dist/*
       - name: Record exact release provenance

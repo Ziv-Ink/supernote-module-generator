@@ -247,6 +247,9 @@ def test_release_version_has_a_dated_changelog_section() -> None:
 def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> None:
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
     setup = (ROOT / "setup.cfg").read_text(encoding="utf-8")
+    release_requirements = (ROOT / "ci/release-requirements.txt").read_text(
+        encoding="utf-8"
+    )
     platform_paths = (ROOT / "tests/test_platform_paths.py").read_text(
         encoding="utf-8"
     )
@@ -274,8 +277,9 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
     assert "Parse the PowerShell launch boundary" in quality
     assert "npm run run" in quality
     assert "template_launch_contract.py output" in quality
-    assert "'setuptools>=58'" in quality
-    assert "'wheel>=0.41,<1'" in quality
+    assert "pip install -r ci/release-requirements.txt" in quality
+    assert "setuptools==84.0.0" in release_requirements
+    assert "wheel==0.48.0" in release_requirements
     assert "--no-build-isolation" in quality
     assert "test_windows_junction_is_never_traversed_or_observed" in platform_paths
     assert (

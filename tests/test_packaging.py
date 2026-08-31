@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
-import re
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
+import time
+import zipfile
 from pathlib import Path
 
 from supernote_module_generator import __version__
@@ -163,6 +166,9 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     workflow = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release_requirements = (ROOT / "ci/release-requirements.txt").read_text(
+        encoding="utf-8"
+    )
 
     assert "release:" in workflow
     assert "types: [published]" in workflow
@@ -208,6 +214,18 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "Release tag ${RELEASE_TAG} does not match package version" in quality
     assert "EXPECTED_RELEASE_TAG: v0.1.0" in quality
     assert "release_provenance.py record" in quality
+    assert "reproducible_release_build.py" in quality
+    assert "Build byte-reproducible wheel and source distribution twice" in quality
+    assert "pip install -r ci/release-requirements.txt" in quality
+    assert release_requirements.splitlines() == [
+        "build==1.4.4",
+        "packaging==26.3",
+        "pyproject-hooks==1.2.0",
+        "setuptools==84.0.0",
+        "twine==6.2.0",
+        "wheel==0.48.0",
+    ]
+    assert "python -m build\n" not in quality
     assert "ci/release_provenance.py" in quality
     assert "python-package-provenance-${{ github.sha }}" in quality
     assert "Install wheel in a clean environment" in quality
@@ -374,6 +392,167 @@ def test_release_provenance_records_and_reverifies_built_distributions(
     )
     assert failed.returncode != 0
     assert "checksum manifest does not match" in failed.stderr
+
+
+def test_release_build_is_byte_reproducible_across_isolated_wall_clock_builds(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(
+        ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".pytest_cache",
+            "__pycache__",
+            "*.pyc",
+            "build",
+            "dist",
+            "*.egg-info",
+        ),
+    )
+    subprocess.run(("git", "init", "--quiet", str(source)), check=True)
+    subprocess.run(
+        ("git", "-C", str(source), "config", "user.name", "Release Test"),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(source), "config", "user.email", "release-test@example.invalid"),
+        check=True,
+    )
+    subprocess.run(("git", "-C", str(source), "add", "."), check=True)
+    commit_environment = os.environ.copy()
+    commit_environment["GIT_AUTHOR_DATE"] = "2026-08-31T00:00:00Z"
+    commit_environment["GIT_COMMITTER_DATE"] = "2026-08-31T00:00:00Z"
+    subprocess.run(
+        ("git", "-C", str(source), "commit", "--quiet", "-m", "release source"),
+        check=True,
+        env=commit_environment,
+    )
+    commit = subprocess.check_output(
+        ("git", "-C", str(source), "rev-parse", "HEAD"),
+        text=True,
+    ).strip()
+    dist = tmp_path / "dist"
+    started = time.monotonic()
+    result = subprocess.run(
+        (
+            sys.executable,
+            str(source / "ci/reproducible_release_build.py"),
+            "--source",
+            str(source),
+            "--output",
+            str(dist),
+            "--commit",
+            commit,
+            "--separation-seconds",
+            "2.0",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert time.monotonic() - started >= 2.0
+    evidence = json.loads(result.stdout)
+    assert evidence["source_commit"] == commit
+    assert evidence["source_date_epoch"] == 1788134400
+    assert evidence["builds"] == 2
+    assert evidence["separation_seconds"] == 2.0
+    assert {artifact["filename"] for artifact in evidence["artifacts"]} == {
+        "sn_module_gen-0.1.0-py3-none-any.whl",
+        "sn_module_gen-0.1.0.tar.gz",
+    }
+    for artifact in evidence["artifacts"]:
+        package = dist / artifact["filename"]
+        assert hashlib.sha256(package.read_bytes()).hexdigest() == artifact["sha256"]
+        assert package.stat().st_size == artifact["size"]
+
+    epoch = evidence["source_date_epoch"]
+    expected_zip_time = datetime.fromtimestamp(epoch, timezone.utc).timetuple()[:6]
+    with zipfile.ZipFile(next(dist.glob("*.whl"))) as wheel_archive:
+        assert {entry.date_time for entry in wheel_archive.infolist()} == {
+            expected_zip_time
+        }
+    with tarfile.open(next(dist.glob("*.tar.gz")), "r:gz") as sdist_archive:
+        members = sdist_archive.getmembers()
+        assert {member.mtime for member in members} == {epoch}
+        assert {member.uid for member in members} == {0}
+        assert {member.gid for member in members} == {0}
+        assert {member.uname for member in members} == {""}
+        assert {member.gname for member in members} == {""}
+
+    subprocess.run(
+        (sys.executable, "-m", "twine", "check", *map(str, sorted(dist.iterdir()))),
+        check=True,
+    )
+    provenance = tmp_path / "provenance"
+    provenance_command = (
+        sys.executable,
+        str(source / "ci/release_provenance.py"),
+        "record",
+        str(dist),
+        str(provenance),
+        "--repository",
+        "Ziv-Ink/supernote-module-generator",
+        "--commit",
+        commit,
+    )
+    subprocess.run(provenance_command, cwd=source, check=True)
+    subprocess.run(
+        (
+            sys.executable,
+            str(source / "ci/release_provenance.py"),
+            "verify",
+            str(dist),
+            str(provenance),
+            "--repository",
+            "Ziv-Ink/supernote-module-generator",
+            "--commit",
+            commit,
+        ),
+        cwd=source,
+        check=True,
+    )
+
+    environment = tmp_path / "environment"
+    subprocess.run((sys.executable, "-m", "venv", str(environment)), check=True)
+    scripts = environment / ("Scripts" if os.name == "nt" else "bin")
+    python = scripts / ("python.exe" if os.name == "nt" else "python")
+    launcher = scripts / ("sn-module-gen.exe" if os.name == "nt" else "sn-module-gen")
+    wheel = next(dist.glob("*.whl"))
+    subprocess.run(
+        (str(python), "-m", "pip", "install", "--no-deps", str(wheel)),
+        check=True,
+    )
+    version = subprocess.run(
+        (str(launcher), "--version"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert version.stdout == "sn-module-gen 0.1.0\n"
+    subprocess.run((str(launcher), "--help"), check=True, capture_output=True, text=True)
+
+    (source / "untracked-release-input").write_text("dirty\n", encoding="utf-8")
+    dirty_output = tmp_path / "dirty-output"
+    dirty = subprocess.run(
+        (
+            sys.executable,
+            str(source / "ci/reproducible_release_build.py"),
+            "--source",
+            str(source),
+            "--output",
+            str(dirty_output),
+            "--commit",
+            commit,
+        ),
+        capture_output=True,
+        text=True,
+    )
+    assert dirty.returncode != 0
+    assert "release source checkout is not clean" in dirty.stderr
+    assert not dirty_output.exists()
 
 
 def test_initial_release_notes_and_old_distribution_retirement_are_bounded():
