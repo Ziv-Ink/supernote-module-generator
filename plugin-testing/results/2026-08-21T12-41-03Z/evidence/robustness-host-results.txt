@@ -1,9 +1,0 @@
-Retained deterministic fuzz and ASan/UBSan campaign:
-  command: python3 -m pytest -q -rs tests/test_v3_phase2_frontends.py tests/test_jvm_manifest_projection.py tests/test_v3_semantic_model.py tests/test_v3_phase4_conversion.py tests/test_v3_phase4_generated_kernels.py tests/test_v3_phase5_cpp_object_runtime.py
-  result: 155 passed in 4.95s
-  skips: 0
-
-ThreadSanitizer runtime teardown/cancellation campaign:
-  command: env SUPERNOTE_V3_TSAN=1 python3 -m pytest -q -rs tests/test_plugin_runtime_codegen.py::test_generated_runtime_enforces_session_cancellation_and_cleanup_contracts
-  result: 1 passed in 1.91s
-  skips: 0

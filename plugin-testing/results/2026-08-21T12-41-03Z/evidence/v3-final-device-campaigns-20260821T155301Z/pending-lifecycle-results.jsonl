@@ -1,6 +1,0 @@
-{"kind":"pending_lifecycle_complete","run_id":"20260821154712633","status":"fail","resources":{"pid":"19801","threads":49,"vmRssKb":339788}}
-{"kind":"pending_lifecycle_case","run_id":"20260821154939409","scenario":"close","status":"pass","before":{"pid":"19801","threads":50,"vmRssKb":359396},"after":{"pid":"19801","threads":49,"vmRssKb":359392}}
-{"kind":"pending_lifecycle_case","run_id":"20260821154939409","scenario":"switch","status":"pass","before":{"pid":"19801","threads":50,"vmRssKb":376804},"after":{"pid":"19801","threads":49,"vmRssKb":376804}}
-{"kind":"pending_lifecycle_case","run_id":"20260821154939409","scenario":"sleep-wake","status":"pass","before":{"pid":"19801","threads":50,"vmRssKb":397592},"after":{"pid":"19801","threads":49,"vmRssKb":397588}}
-{"kind":"pending_lifecycle_case","run_id":"20260821154939409","scenario":"replacement","status":"pass","before":{"pid":"19801","threads":50,"vmRssKb":416196},"after":{"pid":"19801","threads":44,"vmRssKb":436156},"old_completion_markers":0}
-{"kind":"pending_lifecycle_complete","run_id":"20260821154939409","status":"pass","resources":{"pid":"19801","threads":49,"vmRssKb":432032}}
