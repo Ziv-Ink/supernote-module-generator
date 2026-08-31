@@ -183,8 +183,22 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "python-package-distributions-${{ github.sha }}" in workflow
     assert "python-package-provenance-${{ github.sha }}" in workflow
     assert "release_provenance.py verify" in workflow
+    assert "Refuse to replace an existing release asset" in workflow
+    assert "gh release view" in workflow
+    assert "--json assets" in workflow
+    assert "release_asset_preflight.py" in workflow
     assert "gh release upload" in workflow
-    assert "--clobber" in workflow
+    assert workflow.index("release_asset_preflight.py") < workflow.index("gh release upload")
+    for forbidden in (
+        "--clobber",
+        "--skip-existing",
+        "gh release delete-asset",
+        "gh api",
+        "actions/github-script",
+        "--method DELETE",
+        "-X DELETE",
+    ):
+        assert forbidden not in workflow
     assert "provenance/SHA256SUMS" in workflow
     assert "provenance/release-provenance.json" in workflow
     assert "Build wheel and source distribution" not in workflow
@@ -210,6 +224,61 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "npm run build" in quality
     assert "npm run verify" in quality
     assert "Stable 2.0.0 is blocked" not in workflow
+
+
+def _release_asset_preflight(
+    tmp_path: Path, assets: list[dict[str, object]]
+) -> subprocess.CompletedProcess[str]:
+    dist = tmp_path / "dist"
+    provenance = tmp_path / "provenance"
+    dist.mkdir()
+    provenance.mkdir()
+    (dist / "sn_module_gen-0.1.0-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "sn_module_gen-0.1.0.tar.gz").write_bytes(b"sdist")
+    (provenance / "SHA256SUMS").write_text("checksums\n", encoding="utf-8")
+    (provenance / "release-provenance.json").write_text("{}\n", encoding="utf-8")
+    inventory = tmp_path / "release.json"
+    inventory.write_text(json.dumps({"assets": assets}), encoding="utf-8")
+    return subprocess.run(
+        (
+            sys.executable,
+            str(ROOT / "ci/release_asset_preflight.py"),
+            str(inventory),
+            str(dist),
+            str(provenance),
+        ),
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_release_asset_preflight_allows_a_release_without_target_assets(
+    tmp_path: Path,
+) -> None:
+    result = _release_asset_preflight(
+        tmp_path,
+        [{"name": "unrelated.txt", "digest": "sha256:unrelated"}],
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_release_asset_preflight_rejects_one_existing_mismatched_asset(
+    tmp_path: Path,
+) -> None:
+    result = _release_asset_preflight(
+        tmp_path,
+        [
+            {
+                "name": "sn_module_gen-0.1.0-py3-none-any.whl",
+                "digest": "sha256:different-build-bytes",
+            }
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "release already contains target assets" in result.stderr
+    assert "refusing to replace or publish" in result.stderr
 
 
 def test_release_provenance_records_and_reverifies_built_distributions(

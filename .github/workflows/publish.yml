@@ -60,6 +60,17 @@ jobs:
           dist provenance
           --repository "$GITHUB_REPOSITORY"
           --commit "$GITHUB_SHA"
+      - name: Refuse to replace an existing release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets > "$RUNNER_TEMP/existing-release-assets.json"
+          python ci/release_asset_preflight.py \
+            "$RUNNER_TEMP/existing-release-assets.json" \
+            dist provenance
       - name: Attach qualified distributions and checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -69,7 +80,6 @@ jobs:
           dist/*.whl dist/*.tar.gz
           provenance/SHA256SUMS provenance/release-provenance.json
           --repo "$GITHUB_REPOSITORY"
-          --clobber
 
   publish:
     name: Publish qualified release to PyPI

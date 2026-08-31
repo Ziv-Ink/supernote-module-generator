@@ -62,6 +62,7 @@ jobs:
             src/supernote_module_generator/binding_codegen.py \
             src/supernote_module_generator/template_contract.py \
             src/supernote_module_generator/windows_authority.py \
+            ci/release_asset_preflight.py \
             ci/release_provenance.py \
             --select C901
       - name: Ratchet filesystem safety-boundary complexity
