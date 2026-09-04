@@ -298,7 +298,7 @@ def test_release_gate_pins_and_executes_wiki_and_real_project_contracts() -> Non
     ).read_text(encoding="utf-8")
 
     assert "af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f" in quality
-    assert "da2ab8afeb416d2695206d36d3e628cd620420fe" in quality
+    assert "28cee5a54ea452c91a570dd48cbbadbbfadf30d0" in quality
     assert "supernote-module-generator-wiki.bundle" in quality
     assert "file_reader_test-9f626ed.bundle" in quality
     assert "9f626ed39be82b43ff74eb735d10b7de61f51508" in quality
@@ -358,7 +358,7 @@ def test_self_contained_release_inputs_resolve_exact_revisions(tmp_path: Path) -
     subprocess.run(("git", "clone", str(project), str(tmp_path / "project")), check=True)
     assert subprocess.check_output(
         ("git", "-C", str(tmp_path / "wiki"), "rev-parse", "HEAD"), text=True
-    ).strip() == "da2ab8afeb416d2695206d36d3e628cd620420fe"
+    ).strip() == "28cee5a54ea452c91a570dd48cbbadbbfadf30d0"
     assert subprocess.check_output(
         ("git", "-C", str(tmp_path / "project"), "rev-parse", "HEAD"), text=True
     ).strip() == "9f626ed39be82b43ff74eb735d10b7de61f51508"
