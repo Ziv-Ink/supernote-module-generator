@@ -166,18 +166,18 @@ Keep the repository URL and the `main` default branch. Before release, confirm
 that the public description names `sn-module-gen` and that the topics include
 `sn-module-gen`, `supernote`, `code-generator`, `python`, `android`, `cpp`,
 `kotlin`, `jni`, `jsi`, `react-native`, and `pypi`. The default-branch README
-and the live Wiki must describe the same public `0.1.0` contract before the tag
+and the live Wiki must describe the same public `0.1.1` contract before the tag
 is created.
 
 ## Publish
 
-Confirm `main` CI is green and `0.1.0` is not already present on PyPI. Run
+Confirm `main` CI is green and `0.1.1` is not already present on PyPI. Run
 any required device canary for loader or lifecycle changes and link its evidence
-from the release notes. Review `maintainers/release-notes-v0.1.0.md`; it must
-continue to identify this as the first public release and must not promise
-pre-public migration. Create the signed or annotated `v0.1.0` tag from the
-approved release SHA, push that exact tag, and then create the GitHub release
-from the existing tag:
+from the release notes. Review `maintainers/release-notes-v0.1.1.md`; it must
+describe the host-filesystem fix without claiming unperformed native-filesystem,
+device, or runtime qualification. Create the signed or annotated `v0.1.1` tag
+from the approved release SHA, push that exact tag, and then create the GitHub
+release from the existing tag:
 
 The dated pre-public V4 qualification baseline is retained in
 [`device-evidence/v4-device-canary-2026-08-27.md`](device-evidence/v4-device-canary-2026-08-27.md).
@@ -185,15 +185,15 @@ A later loader, lifecycle, PluginHost, or firmware change requires new evidence;
 do not reuse this record as proof for a different candidate or target.
 
 ```bash
-git tag --annotate v0.1.0 "$RELEASE_SHA" --message 'sn-module-gen 0.1.0'
-git push origin v0.1.0
-gh release create v0.1.0 --verify-tag \
-  --title 'sn-module-gen 0.1.0' \
-  --notes-file maintainers/release-notes-v0.1.0.md
+git tag --annotate v0.1.1 "$RELEASE_SHA" --message 'sn-module-gen 0.1.1'
+git push origin v0.1.1
+gh release create v0.1.1 --verify-tag \
+  --title 'sn-module-gen 0.1.1' \
+  --notes-file maintainers/release-notes-v0.1.1.md
 ```
 
 Set `RELEASE_SHA` to the independently approved exact commit. The workflow
-rejects every tag except `v0.1.0`, verifies that it matches the embedded package
+rejects every tag except `v0.1.1`, verifies that it matches the embedded package
 version, and refuses prerelease publication.
 
 The release builder derives `SOURCE_DATE_EPOCH` from the exact source commit,

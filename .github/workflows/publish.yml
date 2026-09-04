@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   release-contract:
-    name: Verify first-public release event
+    name: Verify stable release event
     runs-on: ubuntu-latest
     steps:
       - name: Require the exact stable release tag
@@ -16,7 +16,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          test "$RELEASE_TAG" = "v0.1.0"
+          test "$RELEASE_TAG" = "v0.1.1"
           test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
           test "$RELEASE_PRERELEASE" = "false"
 

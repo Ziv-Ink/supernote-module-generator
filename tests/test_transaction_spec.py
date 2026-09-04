@@ -518,6 +518,81 @@ def test_restore_directory_metadata_verifies_atime(tmp_path: Path, monkeypatch):
     assert restore_protected_directory_metadata(tmp_path, metadata) == ("modified:.",)
 
 
+def _round_directory_timestamps_to_seconds(monkeypatch) -> None:
+    original_utime = os.utime
+
+    def rounded_utime(path, *, ns, **options):
+        original_utime(
+            path,
+            ns=tuple(value // 1_000_000_000 * 1_000_000_000 for value in ns),
+            **options,
+        )
+
+    monkeypatch.setattr(filesystem_module.os, "utime", rounded_utime)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX timestamp precision fixture")
+def test_restore_directory_metadata_accepts_stable_filesystem_timestamp_rounding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested_times = (
+        1_788_523_464_419_500_292,
+        1_788_523_465_519_600_393,
+    )
+    os.utime(tmp_path, ns=requested_times)
+    metadata = protected_directory_metadata(tmp_path)
+    os.utime(tmp_path, ns=(1_000_000_000, 2_000_000_000))
+    _round_directory_timestamps_to_seconds(monkeypatch)
+
+    assert restore_protected_directory_metadata(tmp_path, metadata) == ()
+
+    restored = tmp_path.lstat()
+    assert (restored.st_atime_ns, restored.st_mtime_ns) == tuple(
+        value // 1_000_000_000 * 1_000_000_000 for value in requested_times
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX timestamp precision fixture")
+def test_durable_recovery_removes_pointer_after_stable_timestamp_rounding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested_times = (
+        1_788_523_464_419_500_292,
+        1_788_523_465_519_600_393,
+    )
+    os.utime(tmp_path, ns=requested_times)
+    metadata = protected_directory_metadata(tmp_path)
+    pointer = transaction_module._recovery_pointer_path(tmp_path)
+    saw_published_pointer = False
+
+    def observe_pointer(name: str) -> None:
+        nonlocal saw_published_pointer
+        if name == "after_abandon_state_removal":
+            saw_published_pointer = pointer.is_file()
+
+    transaction = Transaction(
+        tmp_path,
+        "update",
+        ["alpha"],
+        fault_injector=observe_pointer,
+    )
+    transaction.record_directory_metadata(metadata)
+    _round_directory_timestamps_to_seconds(monkeypatch)
+
+    transaction.abandon_unmutated()
+
+    restored = tmp_path.lstat()
+    assert saw_published_pointer
+    assert not pointer.exists()
+    assert not transaction.journal_path.exists()
+    assert not transaction.state_dir.exists()
+    assert (restored.st_atime_ns, restored.st_mtime_ns) == tuple(
+        value // 1_000_000_000 * 1_000_000_000 for value in requested_times
+    )
+
+
 @pytest.mark.parametrize("phase", ["commit", "abandon"])
 def test_fresh_process_durable_cleanup_restores_directory_metadata(
     tmp_path: Path,

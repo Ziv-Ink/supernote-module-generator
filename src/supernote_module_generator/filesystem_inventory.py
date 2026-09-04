@@ -21,7 +21,7 @@ class InventoryOperations:
     same_entry: Callable[[os.stat_result, os.stat_result], bool]
     is_excluded: Callable[[str], bool]
     kind_from_mode: Callable[[int], str]
-    apply_descriptor_atime_only: Callable[[int, int], None]
+    apply_descriptor_atime_only: Callable[[int, int], int]
     read_symlink_target: Callable[[SymlinkAuthority], str]
     apply_symlink_atime: Callable[[SymlinkAuthority, os.stat_result], None]
     close_symlink_authority: Callable[[SymlinkAuthority], None]
@@ -160,13 +160,15 @@ def _verify_directory(
         raise _changed("directory", path)
     if after.st_atime_ns == before.st_atime_ns:
         return
-    operations.apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+    applied_atime_ns = operations.apply_descriptor_atime_only(
+        descriptor, before.st_atime_ns
+    )
     restored = os.fstat(descriptor)
     restored_live = _live_directory_metadata(path, parent_descriptor, name)
     if (
         not operations.same_entry(after, restored)
         or not operations.same_entry(restored, restored_live)
-        or restored.st_atime_ns != before.st_atime_ns
+        or restored.st_atime_ns != applied_atime_ns
     ):
         raise _changed("directory", path)
 
@@ -217,13 +219,15 @@ def _restore_file_atime(
     after: os.stat_result,
     operations: InventoryOperations,
 ) -> None:
-    operations.apply_descriptor_atime_only(descriptor, opened.st_atime_ns)
+    applied_atime_ns = operations.apply_descriptor_atime_only(
+        descriptor, opened.st_atime_ns
+    )
     restored = os.fstat(descriptor)
     restored_live = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
     if (
         not operations.same_entry(after, restored)
         or not operations.same_entry(restored, restored_live)
-        or restored.st_atime_ns != opened.st_atime_ns
+        or restored.st_atime_ns != applied_atime_ns
     ):
         raise _changed("file", path)
 

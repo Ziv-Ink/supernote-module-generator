@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +111,119 @@ def test_inventory_boundary_rejects_directory_change_at_final_verification(
 ) -> None:
     with pytest.raises(ConcurrentSourceMutation, match="directory"):
         inventory_posix_tree(tmp_path, _operations(fail_same_entry_call=1))
+
+
+def _advance_directory_atime_during_listing(
+    monkeypatch,
+    directory: Path,
+    atime_ns: int,
+) -> None:
+    original_listdir = os.listdir
+
+    def advancing_listdir(descriptor: int):
+        entries = original_listdir(descriptor)
+        current = os.fstat(descriptor)
+        os.utime(descriptor, ns=(atime_ns, current.st_mtime_ns))
+        return entries
+
+    monkeypatch.setattr(filesystem.os, "listdir", advancing_listdir)
+
+
+def test_observed_directory_accepts_stable_filesystem_timestamp_rounding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested_atime_ns = 1_788_523_464_419_500_292
+    requested_mtime_ns = 1_788_523_465_519_600_393
+    os.utime(tmp_path, ns=(requested_atime_ns, requested_mtime_ns))
+    before = tmp_path.lstat()
+    assert before.st_atime_ns % 1_000_000_000
+    _advance_directory_atime_during_listing(
+        monkeypatch,
+        tmp_path,
+        before.st_atime_ns + 2_000_000_000,
+    )
+    original_set_atime = filesystem._set_descriptor_atime_only
+
+    def set_rounded_atime(descriptor: int, atime_ns: int) -> None:
+        original_set_atime(descriptor, atime_ns // 1_000_000_000 * 1_000_000_000)
+
+    monkeypatch.setattr(
+        filesystem,
+        "_set_descriptor_atime_only",
+        set_rounded_atime,
+    )
+
+    children, observed = filesystem._observed_directory_entries(tmp_path)
+
+    restored = tmp_path.lstat()
+    assert children == []
+    assert observed.st_atime_ns == before.st_atime_ns
+    assert restored.st_atime_ns == before.st_atime_ns // 1_000_000_000 * 1_000_000_000
+    assert restored.st_mtime_ns == before.st_mtime_ns
+
+
+def test_observed_directory_preserves_exact_nanoseconds_when_representable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested_atime_ns = 1_788_523_464_419_500_292
+    requested_mtime_ns = 1_788_523_465_519_600_393
+    os.utime(tmp_path, ns=(requested_atime_ns, requested_mtime_ns))
+    before = tmp_path.lstat()
+    assert before.st_atime_ns % 1_000_000_000
+    _advance_directory_atime_during_listing(
+        monkeypatch,
+        tmp_path,
+        before.st_atime_ns + 2_000_000_000,
+    )
+
+    filesystem._observed_directory_entries(tmp_path)
+
+    restored = tmp_path.lstat()
+    assert restored.st_atime_ns == before.st_atime_ns
+    assert restored.st_mtime_ns == before.st_mtime_ns
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("st_ino", lambda value: value + 1),
+        ("st_mode", lambda value: value ^ stat.S_IWUSR),
+        ("st_size", lambda value: value + 1),
+        ("st_mtime_ns", lambda value: value + 1),
+    ],
+)
+def test_observed_directory_still_rejects_non_atime_metadata_changes(
+    tmp_path: Path,
+    monkeypatch,
+    field: str,
+    changed_value,
+) -> None:
+    original_fstat = os.fstat
+    calls = 0
+
+    def changing_fstat(descriptor: int):
+        nonlocal calls
+        calls += 1
+        current = original_fstat(descriptor)
+        if calls == 1:
+            return current
+        values = {
+            "st_dev": current.st_dev,
+            "st_ino": current.st_ino,
+            "st_mode": current.st_mode,
+            "st_size": current.st_size,
+            "st_atime_ns": current.st_atime_ns,
+            "st_mtime_ns": current.st_mtime_ns,
+        }
+        values[field] = changed_value(values[field])
+        return SimpleNamespace(**values)
+
+    monkeypatch.setattr(filesystem.os, "fstat", changing_fstat)
+
+    with pytest.raises(ConcurrentSourceMutation, match="directory changed"):
+        filesystem._observed_directory_entries(tmp_path)
 
 
 @pytest.mark.parametrize(

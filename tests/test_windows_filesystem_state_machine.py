@@ -2756,6 +2756,11 @@ def test_windows_protected_metadata_republishes_after_atime_only_observation(
 ) -> None:
     metadata = {".": (0o700, 1_000, 2_000)}
     applied: list[tuple[str, int, int, int]] = []
+
+    def apply_metadata(_root, relative, mode, atime_ns, mtime_ns):
+        applied.append((relative, mode, atime_ns, mtime_ns))
+        return atime_ns, mtime_ns
+
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
     monkeypatch.setattr(
         filesystem,
@@ -2766,9 +2771,7 @@ def test_windows_protected_metadata_republishes_after_atime_only_observation(
     monkeypatch.setattr(
         filesystem,
         "_apply_contained_directory_metadata",
-        lambda _root, relative, mode, atime_ns, mtime_ns: applied.append(
-            (relative, mode, atime_ns, mtime_ns)
-        ),
+        apply_metadata,
     )
     monkeypatch.setattr(
         filesystem,

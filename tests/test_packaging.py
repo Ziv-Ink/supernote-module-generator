@@ -94,7 +94,7 @@ def test_clean_wheel_installs_only_the_public_console_script(tmp_path: Path) -> 
         capture_output=True,
         text=True,
     )
-    assert version.stdout == "sn-module-gen 0.1.0\n"
+    assert version.stdout == "sn-module-gen 0.1.1\n"
 
 
 def test_release_license_and_manifest_are_present():
@@ -174,7 +174,7 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "types: [published]" in workflow
     assert "permissions: {}" in workflow
     assert "Require the exact stable release tag" in workflow
-    assert 'test "$RELEASE_TAG" = "v0.1.0"' in workflow
+    assert 'test "$RELEASE_TAG" = "v0.1.1"' in workflow
     assert 'test "$RELEASE_PRERELEASE" = "false"' in workflow
     assert "name: pypi" in workflow
     assert "url: https://pypi.org/project/sn-module-gen/" in workflow
@@ -212,7 +212,7 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "ref: ${{ github.sha }}" in quality
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in quality
     assert "Release tag ${RELEASE_TAG} does not match package version" in quality
-    assert "EXPECTED_RELEASE_TAG: v0.1.0" in quality
+    assert "EXPECTED_RELEASE_TAG: v0.1.1" in quality
     assert "release_provenance.py record" in quality
     assert "reproducible_release_build.py" in quality
     assert "Build byte-reproducible wheel and source distribution twice" in quality
@@ -251,8 +251,8 @@ def _release_asset_preflight(
     provenance = tmp_path / "provenance"
     dist.mkdir()
     provenance.mkdir()
-    (dist / "sn_module_gen-0.1.0-py3-none-any.whl").write_bytes(b"wheel")
-    (dist / "sn_module_gen-0.1.0.tar.gz").write_bytes(b"sdist")
+    (dist / "sn_module_gen-0.1.1-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "sn_module_gen-0.1.1.tar.gz").write_bytes(b"sdist")
     (provenance / "SHA256SUMS").write_text("checksums\n", encoding="utf-8")
     (provenance / "release-provenance.json").write_text("{}\n", encoding="utf-8")
     inventory = tmp_path / "release.json"
@@ -288,7 +288,7 @@ def test_release_asset_preflight_rejects_one_existing_mismatched_asset(
         tmp_path,
         [
             {
-                "name": "sn_module_gen-0.1.0-py3-none-any.whl",
+                "name": "sn_module_gen-0.1.1-py3-none-any.whl",
                 "digest": "sha256:different-build-bytes",
             }
         ],
@@ -347,11 +347,11 @@ def test_release_provenance_records_and_reverifies_built_distributions(
     assert manifest["repository"] == "Ziv-Ink/supernote-module-generator"
     assert manifest["source_commit"] == commit
     assert manifest["distribution"] == "sn-module-gen"
-    assert manifest["version"] == "0.1.0"
-    assert manifest["release_tag"] == "v0.1.0"
+    assert manifest["version"] == "0.1.1"
+    assert manifest["release_tag"] == "v0.1.1"
     assert {artifact["filename"] for artifact in manifest["artifacts"]} == {
-        "sn_module_gen-0.1.0-py3-none-any.whl",
-        "sn_module_gen-0.1.0.tar.gz",
+        "sn_module_gen-0.1.1-py3-none-any.whl",
+        "sn_module_gen-0.1.1.tar.gz",
     }
     for artifact in manifest["artifacts"]:
         path = dist / artifact["filename"]
@@ -460,8 +460,8 @@ def test_release_build_is_byte_reproducible_across_isolated_wall_clock_builds(
     assert evidence["builds"] == 2
     assert evidence["separation_seconds"] == 2.0
     assert {artifact["filename"] for artifact in evidence["artifacts"]} == {
-        "sn_module_gen-0.1.0-py3-none-any.whl",
-        "sn_module_gen-0.1.0.tar.gz",
+        "sn_module_gen-0.1.1-py3-none-any.whl",
+        "sn_module_gen-0.1.1.tar.gz",
     }
     for artifact in evidence["artifacts"]:
         package = dist / artifact["filename"]
@@ -531,7 +531,7 @@ def test_release_build_is_byte_reproducible_across_isolated_wall_clock_builds(
         capture_output=True,
         text=True,
     )
-    assert version.stdout == "sn-module-gen 0.1.0\n"
+    assert version.stdout == "sn-module-gen 0.1.1\n"
     subprocess.run((str(launcher), "--help"), check=True, capture_output=True, text=True)
 
     (source / "untracked-release-input").write_text("dirty\n", encoding="utf-8")
@@ -555,15 +555,29 @@ def test_release_build_is_byte_reproducible_across_isolated_wall_clock_builds(
     assert not dirty_output.exists()
 
 
-def test_initial_release_notes_and_old_distribution_retirement_are_bounded():
-    notes = (ROOT / "maintainers/release-notes-v0.1.0.md").read_text(
+def test_patch_release_notes_and_old_distribution_retirement_are_bounded():
+    notes = (ROOT / "maintainers/release-notes-v0.1.1.md").read_text(
+        encoding="utf-8"
+    )
+    initial_notes = (ROOT / "maintainers/release-notes-v0.1.0.md").read_text(
         encoding="utf-8"
     )
     guide = (ROOT / "maintainers/releasing.md").read_text(encoding="utf-8")
 
-    assert "first public release" in notes
-    assert "does not provide migration or compatibility" in " ".join(notes.split())
-    assert "--notes-file maintainers/release-notes-v0.1.0.md" in guide
+    assert "filesystem" in notes
+    assert "false concurrent-modification" in notes
+    assert "does not change generated APIs" in " ".join(notes.split())
+    assert "remains `0.1.0`" in notes
+    assert "first public release" in initial_notes
+    assert "does not provide migration or compatibility" in " ".join(
+        initial_notes.split()
+    )
+    assert "--notes-file maintainers/release-notes-v0.1.1.md" in guide
+    assert 'git tag --annotate v0.1.1 "$RELEASE_SHA"' in guide
+    assert "gh release create v0.1.1 --verify-tag" in guide
+    assert "without claiming unperformed native-filesystem" in " ".join(
+        guide.split()
+    )
     assert "only after `sn-module-gen==0.1.0` installs" in guide
     assert "Pre-public development package; replaced by sn-module-gen" in guide
     assert "Do not delete the project" in guide

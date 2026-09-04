@@ -6,6 +6,14 @@ should also check their installed version with `sn-module-gen --version`.
 
 ## Unreleased
 
+## 0.1.1 - 2026-09-04
+
+- Accept stable timestamp values applied by filesystems that cannot reproduce
+  requested nanoseconds exactly, preventing false concurrent-modification errors
+  during source inventory and durable directory-metadata recovery.
+- Keep exact inode, type, mode, size, and modification-time checks for metadata
+  the generator did not write.
+
 ## 0.1.0 - 2026-08-30
 
 - First public release as the `sn-module-gen` distribution and command.

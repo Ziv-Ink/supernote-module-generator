@@ -1,6 +1,7 @@
 """Link-aware filesystem primitives used by preservation and transactions."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -1384,7 +1385,9 @@ def _finish_observed_atime(
         # Windows may defer access-time updates. Reapply the captured value
         # unconditionally so this is also the boundary that detects a
         # concurrent write arriving between observation and publication.
-        _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        applied_atime_ns = _apply_descriptor_atime_only(
+            descriptor, before.st_atime_ns
+        )
         try:
             restored = path.lstat()
         except OSError:
@@ -1394,7 +1397,7 @@ def _finish_observed_atime(
             and (
                 (restored.st_atime_ns // 100 == before.st_atime_ns // 100)
                 if _windows_host()
-                else restored.st_atime_ns == before.st_atime_ns
+                else restored.st_atime_ns == applied_atime_ns
             )
         )
 
@@ -1406,7 +1409,9 @@ def _finish_observed_atime(
     if not _same_observed_entry(before, after) or not _same_observed_entry(after, live):
         return False
     if after.st_atime_ns != before.st_atime_ns:
-        _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        applied_atime_ns = _apply_descriptor_atime_only(
+            descriptor, before.st_atime_ns
+        )
         restored = os.fstat(descriptor)
         try:
             restored_live = path.lstat()
@@ -1415,7 +1420,7 @@ def _finish_observed_atime(
         return (
             _same_observed_entry(after, restored)
             and _same_observed_entry(restored, restored_live)
-            and restored.st_atime_ns == before.st_atime_ns
+            and restored.st_atime_ns == applied_atime_ns
         )
     return True
 
@@ -1442,17 +1447,19 @@ def _finish_contained_directory_atime(
     if not _same_observed_entry(after, live):
         return False
     if after.st_atime_ns != before.st_atime_ns:
-        _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+        applied_atime_ns = _apply_descriptor_atime_only(
+            descriptor, before.st_atime_ns
+        )
         restored = os.fstat(descriptor)
         return (
             _same_observed_entry(after, restored)
-            and restored.st_atime_ns == before.st_atime_ns
+            and restored.st_atime_ns == applied_atime_ns
         )
     return True
 
 
-def _apply_descriptor_atime_only(descriptor: int, atime_ns: int) -> None:
-    """Restore one descriptor's atime without writing any sampled mtime."""
+def _apply_descriptor_atime_only(descriptor: int, atime_ns: int) -> int:
+    """Restore atime and return the stable value represented by the filesystem."""
 
     if _windows_host():
         metadata = os.fstat(descriptor)
@@ -1463,7 +1470,25 @@ def _apply_descriptor_atime_only(descriptor: int, atime_ns: int) -> None:
             atime_ns=atime_ns,
             mtime_ns=None,
         )
-        return
+        return atime_ns
+    _set_descriptor_atime_only(descriptor, atime_ns)
+    applied_atime_ns = os.fstat(descriptor).st_atime_ns
+    if applied_atime_ns != atime_ns:
+        # Some filesystems accept nanoseconds but persist them at a coarser
+        # precision. Reapplying the observed value distinguishes a stable,
+        # representable result from a write path that keeps changing values.
+        _set_descriptor_atime_only(descriptor, applied_atime_ns)
+        if os.fstat(descriptor).st_atime_ns != applied_atime_ns:
+            raise OSError(
+                errno.EIO,
+                "Filesystem did not apply a stable access timestamp",
+            )
+    return applied_atime_ns
+
+
+def _set_descriptor_atime_only(descriptor: int, atime_ns: int) -> None:
+    """Write one descriptor's atime without writing any sampled mtime."""
+
     import ctypes
 
     class Timespec(ctypes.Structure):
@@ -1876,7 +1901,9 @@ def read_contained_regular_bytes_no_follow(
                 f"Source entry changed while it was read: {path}"
             )
         if after.st_atime_ns != before.st_atime_ns:
-            _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+            applied_atime_ns = _apply_descriptor_atime_only(
+                descriptor, before.st_atime_ns
+            )
             restored = os.fstat(descriptor)
             restored_live = os.stat(
                 leaf,
@@ -1886,7 +1913,7 @@ def read_contained_regular_bytes_no_follow(
             if (
                 not _same_observed_entry(after, restored)
                 or not _same_observed_entry(restored, restored_live)
-                or restored.st_atime_ns != before.st_atime_ns
+                or restored.st_atime_ns != applied_atime_ns
             ):
                 raise ConcurrentSourceMutation(
                     f"Source entry changed while it was read: {path}"
@@ -2566,18 +2593,24 @@ def restore_protected_directory_metadata(
     metadata = validate_protected_directory_metadata(root, metadata)
     _WINDOWS_AUTHORITY.reconcile()
     failures: list[str] = []
+    applied_metadata = dict(metadata)
     for relative, (mode, atime_ns, mtime_ns) in sorted(
         metadata.items(),
         key=lambda item: len(PurePosixPath(item[0]).parts),
         reverse=True,
     ):
         try:
-            _apply_contained_directory_metadata(
+            applied_atime_ns, applied_mtime_ns = _apply_contained_directory_metadata(
                 root, relative, mode, atime_ns, mtime_ns
+            )
+            applied_metadata[relative] = (
+                mode,
+                applied_atime_ns,
+                applied_mtime_ns,
             )
         except (OSError, FilesystemError):
             failures.append(f"modified:{relative}")
-    for relative, (mode, atime_ns, mtime_ns) in metadata.items():
+    for relative, (mode, atime_ns, mtime_ns) in applied_metadata.items():
         try:
             value = _stat_contained_directory(root, relative)
         except (OSError, FilesystemError):
@@ -2607,9 +2640,10 @@ def restore_protected_directory_metadata(
     if not failures:
         # Verification of a descendant can advance ancestor atime on some
         # filesystems. Reapply deepest-to-shallow once more and perform no
-        # further nested reads so the observable final metadata is exact.
+        # further nested reads so the observable final metadata is the stable
+        # value accepted by the filesystem.
         for relative, (mode, atime_ns, mtime_ns) in sorted(
-            metadata.items(),
+            applied_metadata.items(),
             key=lambda item: len(PurePosixPath(item[0]).parts),
             reverse=True,
         ):
@@ -2628,15 +2662,36 @@ def _apply_contained_directory_metadata(
     mode: int,
     atime_ns: int,
     mtime_ns: int,
-) -> None:
+) -> tuple[int, int]:
     if _descriptor_relative_io_supported():
         descriptor = _open_contained_directory_descriptor(root, relative)
         try:
+            before = os.fstat(descriptor)
             os.fchmod(descriptor, mode)
             os.utime(descriptor, ns=(atime_ns, mtime_ns))
+            applied = os.fstat(descriptor)
+            _verify_applied_directory_metadata(before, applied, mode)
+            if (applied.st_atime_ns, applied.st_mtime_ns) != (
+                atime_ns,
+                mtime_ns,
+            ):
+                os.utime(
+                    descriptor,
+                    ns=(applied.st_atime_ns, applied.st_mtime_ns),
+                )
+                stable = os.fstat(descriptor)
+                _verify_applied_directory_metadata(applied, stable, mode)
+                if (stable.st_atime_ns, stable.st_mtime_ns) != (
+                    applied.st_atime_ns,
+                    applied.st_mtime_ns,
+                ):
+                    raise OSError(
+                        errno.EIO,
+                        "Filesystem did not apply stable directory timestamps",
+                    )
+            return applied.st_atime_ns, applied.st_mtime_ns
         finally:
             os.close(descriptor)
-        return
     directory = root if relative == "." else root.joinpath(
         *validate_persisted_relative_path(relative).parts
     )
@@ -2673,11 +2728,48 @@ def _apply_contained_directory_metadata(
                 mtime_ns=mtime_ns,
                 regular=False,
             )
+            return atime_ns, mtime_ns
         finally:
             _windows_close_handle(handle)
-        return
+    before = directory.lstat()
     os.chmod(directory, mode, follow_symlinks=False)
     os.utime(directory, ns=(atime_ns, mtime_ns), follow_symlinks=False)
+    applied = directory.lstat()
+    _verify_applied_directory_metadata(before, applied, mode)
+    if (applied.st_atime_ns, applied.st_mtime_ns) != (atime_ns, mtime_ns):
+        os.utime(
+            directory,
+            ns=(applied.st_atime_ns, applied.st_mtime_ns),
+            follow_symlinks=False,
+        )
+        stable = directory.lstat()
+        _verify_applied_directory_metadata(applied, stable, mode)
+        if (stable.st_atime_ns, stable.st_mtime_ns) != (
+            applied.st_atime_ns,
+            applied.st_mtime_ns,
+        ):
+            raise OSError(
+                errno.EIO,
+                "Filesystem did not apply stable directory timestamps",
+            )
+    return applied.st_atime_ns, applied.st_mtime_ns
+
+
+def _verify_applied_directory_metadata(
+    before: os.stat_result,
+    after: os.stat_result,
+    mode: int,
+) -> None:
+    """Reject non-timestamp drift around one retained directory metadata write."""
+
+    if (
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or stat.S_IFMT(after.st_mode) != stat.S_IFDIR
+        or stat.S_IMODE(after.st_mode) != mode
+        or before.st_size != after.st_size
+    ):
+        raise OSError(errno.EIO, "Directory changed while restoring metadata")
 
 
 def _stat_contained_directory(root: Path, relative: str) -> os.stat_result:
