@@ -16,7 +16,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          test "$RELEASE_TAG" = "v0.1.1"
+          test "$RELEASE_TAG" = "v0.1.2"
           test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
           test "$RELEASE_PRERELEASE" = "false"
 

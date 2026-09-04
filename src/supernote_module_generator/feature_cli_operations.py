@@ -31,6 +31,7 @@ from .filesystem import (
     protected_directory_metadata,
     read_regular_bytes_no_follow,
     source_tree_changes,
+    source_tree_changes_after_restore,
     source_tree_inventory,
     validate_source_symlink_support,
 )
@@ -1589,8 +1590,8 @@ class FeatureCliOperationService:
         if baseline is None:
             return rollback, []
         try:
-            remaining = source_tree_changes(
-                baseline, source_tree_inventory(self.root)
+            remaining = source_tree_changes_after_restore(
+                self.root, baseline, source_tree_inventory(self.root)
             )
         except Exception as exc:
             remaining = (f"inventory_failed:{exc}",)

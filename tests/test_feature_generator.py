@@ -1,4 +1,5 @@
 import base64
+import errno
 import json
 from pathlib import Path
 import shutil
@@ -6,6 +7,7 @@ import subprocess
 
 import pytest
 
+import supernote_module_generator.feature_generator as feature_generator_module
 from supernote_module_generator.feature_generator import FeatureConfig, generate_feature, stage_feature
 from supernote_module_generator.feature_model import StarterFamily
 
@@ -41,6 +43,50 @@ def test_native_and_jvm_starters_create_user_source_without_backend_metadata(tmp
     assert "starters" not in metadata
     assert not (feature / "android/build.gradle.kts").exists()
     assert not (feature / "android/CMakeLists.txt").exists()
+
+
+def test_generation_uses_bounded_internal_names_for_long_output_component(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    component = "x" * 120
+    long_config = FeatureConfig(
+        output=tmp_path / component,
+        npm_name=f"@local/{component}",
+        package_version="2.0.0-dev.0",
+        android_namespace="com.example.longfeature",
+        public_name="LongFeature",
+        starters=(StarterFamily.NATIVE,),
+    )
+    original_mkdtemp = feature_generator_module.tempfile.mkdtemp
+    original_replace = feature_generator_module.os.replace
+
+    def name_limited_mkdtemp(*, prefix: str, dir: Path) -> str:
+        if len(f"{prefix}12345678".encode()) > 143:
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+        return original_mkdtemp(prefix=prefix, dir=dir)
+
+    def name_limited_replace(source: Path, destination: Path) -> None:
+        if len(destination.name.encode()) > 143:
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(
+        feature_generator_module.tempfile,
+        "mkdtemp",
+        name_limited_mkdtemp,
+    )
+    monkeypatch.setattr(
+        feature_generator_module.os,
+        "replace",
+        name_limited_replace,
+    )
+
+    generate_feature(long_config)
+    generated = generate_feature(long_config)
+
+    assert generated.name == component
+    assert (generated / "package.json").is_file()
 
 
 def test_update_preserves_added_and_deleted_user_starter_files(tmp_path: Path):

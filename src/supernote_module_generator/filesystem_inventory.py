@@ -16,6 +16,24 @@ SourceTreeInventory = Dict[str, Tuple[str, int, int, Optional[str]]]
 SymlinkAuthority = tuple[str, int]
 
 
+def _open_read_descriptor(
+    path: str | os.PathLike[str],
+    flags: int,
+    *,
+    dir_fd: int | None = None,
+) -> int:
+    """Open without access-time updates on Linux when ownership permits it."""
+
+    noatime = getattr(os, "O_NOATIME", 0) if sys.platform.startswith("linux") else 0
+    options = {} if dir_fd is None else {"dir_fd": dir_fd}
+    if noatime:
+        try:
+            return os.open(path, flags | noatime, **options)
+        except PermissionError:
+            pass
+    return os.open(path, flags, **options)
+
+
 @dataclass(frozen=True)
 class InventoryOperations:
     same_entry: Callable[[os.stat_result, os.stat_result], bool]
@@ -23,7 +41,7 @@ class InventoryOperations:
     kind_from_mode: Callable[[int], str]
     apply_descriptor_atime_only: Callable[[int, int], int]
     read_symlink_target: Callable[[SymlinkAuthority], str]
-    apply_symlink_atime: Callable[[SymlinkAuthority, os.stat_result], None]
+    apply_symlink_atime: Callable[[SymlinkAuthority, os.stat_result], int]
     close_symlink_authority: Callable[[SymlinkAuthority], None]
 
 
@@ -38,7 +56,7 @@ def inventory_posix_tree(
         | getattr(os, "O_NOFOLLOW", 0)
     )
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    root_descriptor = os.open(root, directory_flags)
+    root_descriptor = _open_read_descriptor(root, directory_flags)
     try:
         _walk(
             root,
@@ -98,12 +116,16 @@ def _open_symlink_authority(
     if sys.platform == "darwin":
         return (
             "darwin",
-            os.open(name, os.O_RDONLY | 0x00200000, dir_fd=parent_descriptor),
+            _open_read_descriptor(
+                name,
+                os.O_RDONLY | 0x00200000,
+                dir_fd=parent_descriptor,
+            ),
         )
     if hasattr(os, "O_PATH") and hasattr(os, "O_NOFOLLOW"):
         return (
             "linux",
-            os.open(
+            _open_read_descriptor(
                 name,
                 getattr(os, "O_PATH") | getattr(os, "O_NOFOLLOW"),
                 dir_fd=parent_descriptor,
@@ -121,13 +143,13 @@ def _restore_symlink_atime(
     after: os.stat_result,
     operations: InventoryOperations,
 ) -> None:
-    operations.apply_symlink_atime(authority, opened)
+    applied_atime_ns = operations.apply_symlink_atime(authority, opened)
     restored = os.fstat(authority[1])
     restored_live = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
     if (
         not operations.same_entry(after, restored)
         or not operations.same_entry(restored, restored_live)
-        or restored.st_atime_ns != opened.st_atime_ns
+        or restored.st_atime_ns != applied_atime_ns
     ):
         raise _changed("symbolic link", path)
 
@@ -181,7 +203,7 @@ def _hash_regular(
     file_flags: int,
     operations: InventoryOperations,
 ) -> str:
-    descriptor = os.open(name, file_flags, dir_fd=parent_descriptor)
+    descriptor = _open_read_descriptor(name, file_flags, dir_fd=parent_descriptor)
     try:
         opened = os.fstat(descriptor)
         if not operations.same_entry(before, opened):
@@ -314,7 +336,11 @@ def _walk_directory(
     file_flags: int,
     operations: InventoryOperations,
 ) -> None:
-    descriptor = os.open(name, directory_flags, dir_fd=parent_descriptor)
+    descriptor = _open_read_descriptor(
+        name,
+        directory_flags,
+        dir_fd=parent_descriptor,
+    )
     try:
         opened = os.fstat(descriptor)
         if not operations.same_entry(metadata, opened):

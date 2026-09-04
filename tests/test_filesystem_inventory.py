@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import stat
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -59,6 +60,218 @@ def _operations(*, fail_same_entry_call: int | None = None) -> InventoryOperatio
         ),
         close_symlink_authority=_close_symlink_metadata_authority,
     )
+
+
+def test_rollback_inventory_accepts_only_probed_timestamp_representation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested = 1_788_523_465_519_600_393
+    represented_mtime = requested // 1_000_000_000 * 1_000_000_000
+    before = {"source.cpp": ("file", 0o644, requested, "content-hash")}
+    represented = {
+        "source.cpp": ("file", 0o644, represented_mtime, "content-hash")
+    }
+    wrong_timestamp = {
+        "source.cpp": ("file", 0o644, represented_mtime + 1, "content-hash")
+    }
+    wrong_content = {
+        "source.cpp": ("file", 0o644, represented_mtime, "other-hash")
+    }
+    original_utime = os.utime
+
+    def rounded_utime(path, *, ns, **options):
+        original_utime(
+            path,
+            ns=(ns[0], ns[1] // 1_000_000_000 * 1_000_000_000),
+            **options,
+        )
+
+    monkeypatch.setattr(filesystem.os, "utime", rounded_utime)
+
+    assert filesystem.source_tree_changes_after_restore(
+        tmp_path,
+        before,
+        represented,
+    ) == ()
+    assert filesystem.source_tree_changes_after_restore(
+        tmp_path,
+        before,
+        wrong_timestamp,
+    ) == ("modified:source.cpp",)
+    assert filesystem.source_tree_changes_after_restore(
+        tmp_path,
+        before,
+        wrong_content,
+    ) == ("modified:source.cpp",)
+
+    before_link = {"link": ("symlink", 0o755, requested, "target")}
+    represented_link = {
+        "link": ("symlink", 0o755, represented_mtime, "target")
+    }
+    assert filesystem.source_tree_changes_after_restore(
+        tmp_path,
+        before_link,
+        represented_link,
+    ) == ()
+
+
+def test_timestamp_representation_probe_rejects_exact_and_unsupported(
+    tmp_path: Path,
+) -> None:
+    requested = 1_788_523_465_519_600_393
+
+    assert filesystem._probe_stable_mtime_representation(
+        tmp_path,
+        "file",
+        requested,
+    ) is None
+    assert filesystem._probe_stable_mtime_representation(
+        tmp_path,
+        "directory",
+        requested,
+    ) is None
+
+
+def test_rollback_inventory_reports_structural_and_directory_timestamp_changes(
+    tmp_path: Path,
+) -> None:
+    before = {
+        "deleted.cpp": ("file", 0o644, 10, "deleted-hash"),
+        "folder": ("directory", 0o755, 20, None),
+    }
+    after = {
+        "created.cpp": ("file", 0o644, 30, "created-hash"),
+        "folder": ("directory", 0o755, 21, None),
+    }
+
+    assert filesystem.source_tree_changes_after_restore(
+        tmp_path,
+        before,
+        after,
+    ) == (
+        "created:created.cpp",
+        "deleted:deleted.cpp",
+        "modified:folder",
+    )
+
+
+def test_timestamp_representation_probe_rejects_unstable_and_failed_application(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested = 1_788_523_465_519_600_393
+    original_utime = os.utime
+    calls = 0
+
+    def unstable_utime(path, *, ns, **options):
+        nonlocal calls
+        calls += 1
+        represented = ns[1] // 1_000_000_000 * 1_000_000_000
+        if calls == 2:
+            represented += 1
+        original_utime(path, ns=(ns[0], represented), **options)
+
+    monkeypatch.setattr(filesystem.os, "utime", unstable_utime)
+    assert filesystem._probe_stable_mtime_representation(
+        tmp_path,
+        "file",
+        requested,
+    ) is None
+
+    def unsupported_utime(*args, **kwargs):
+        raise NotImplementedError
+
+    monkeypatch.setattr(filesystem.os, "utime", unsupported_utime)
+    assert filesystem._probe_stable_mtime_representation(
+        tmp_path,
+        "file",
+        requested,
+    ) is None
+
+
+def _timestamp_matches_filesystem(
+    path: Path,
+    probe_parent: Path,
+    actual: int,
+    expected: int,
+    *,
+    attribute: str,
+) -> bool:
+    if actual == expected or (os.name == "nt" and actual // 100 == expected // 100):
+        return True
+    mode = path.lstat().st_mode
+    probed = _probe_timestamp_representation(
+        path,
+        probe_parent,
+        mode,
+        expected,
+        attribute=attribute,
+    )
+    if probed is None:
+        return False
+    represented, stable = probed
+    if represented == expected:
+        return False
+    if not stable:
+        return attribute == "atime" and stat.S_ISDIR(mode)
+    return actual == represented
+
+
+def _probe_timestamp_representation(
+    path: Path,
+    probe_parent: Path,
+    mode: int,
+    requested: int,
+    *,
+    attribute: str,
+) -> tuple[int, bool] | None:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="sn-module-gen-timestamp-probe-",
+            dir=probe_parent,
+        ) as temporary:
+            probe_root = Path(temporary)
+            if stat.S_ISDIR(mode):
+                probe = probe_root
+            elif stat.S_ISREG(mode):
+                probe = probe_root / "probe"
+                probe.write_bytes(b"")
+            elif stat.S_ISLNK(mode):
+                probe = probe_root / "probe"
+                probe.symlink_to("target")
+            else:
+                return None
+            probe_before = probe.lstat()
+            if probe_before.st_dev != path.lstat().st_dev:
+                return None
+            first_request = (
+                (requested, probe_before.st_mtime_ns)
+                if attribute == "atime"
+                else (probe_before.st_atime_ns, requested)
+            )
+            os.utime(
+                probe,
+                ns=first_request,
+                follow_symlinks=False,
+            )
+            represented = getattr(probe.lstat(), f"st_{attribute}_ns")
+            if represented == requested:
+                return represented, True
+            probe_current = probe.lstat()
+            stable_request = (
+                (represented, probe_current.st_mtime_ns)
+                if attribute == "atime"
+                else (probe_current.st_atime_ns, represented)
+            )
+            os.utime(probe, ns=stable_request, follow_symlinks=False)
+            stable = getattr(probe.lstat(), f"st_{attribute}_ns") == represented
+            if stable and attribute == "atime" and stat.S_ISDIR(mode):
+                os.listdir(probe)
+                stable = probe.lstat().st_atime_ns == represented
+            return represented, stable
+    except (NotImplementedError, OSError):
+        return None
 
 
 def test_inventory_boundary_records_each_entry_family_and_excludes_build_cache(
@@ -137,7 +350,8 @@ def test_observed_directory_accepts_stable_filesystem_timestamp_rounding(
     requested_mtime_ns = 1_788_523_465_519_600_393
     os.utime(tmp_path, ns=(requested_atime_ns, requested_mtime_ns))
     before = tmp_path.lstat()
-    assert before.st_atime_ns % 1_000_000_000
+    if before.st_atime_ns != requested_atime_ns:
+        pytest.skip("fixture requires subsecond timestamp representation")
     _advance_directory_atime_during_listing(
         monkeypatch,
         tmp_path,
@@ -171,7 +385,8 @@ def test_observed_directory_preserves_exact_nanoseconds_when_representable(
     requested_mtime_ns = 1_788_523_465_519_600_393
     os.utime(tmp_path, ns=(requested_atime_ns, requested_mtime_ns))
     before = tmp_path.lstat()
-    assert before.st_atime_ns % 1_000_000_000
+    if before.st_atime_ns != requested_atime_ns:
+        pytest.skip("fixture requires subsecond timestamp representation")
     _advance_directory_atime_during_listing(
         monkeypatch,
         tmp_path,
@@ -279,11 +494,14 @@ def test_inventory_atime_repair_uses_retained_entry_authority(
             opened = os.fstat(authority[1])
 
         changed_atime = max(1_000_000_000, opened.st_atime_ns - 1_000_000_000)
-        os.utime(
-            entry,
-            ns=(changed_atime, opened.st_mtime_ns),
-            follow_symlinks=entry_kind != "symlink",
-        )
+        if descriptor is not None:
+            filesystem._set_descriptor_atime_only(descriptor, changed_atime)
+        else:
+            os.utime(
+                entry,
+                ns=(changed_atime, opened.st_mtime_ns),
+                follow_symlinks=False,
+            )
 
         if entry_kind == "file":
             assert descriptor is not None
@@ -321,8 +539,20 @@ def test_inventory_atime_repair_uses_retained_entry_authority(
             )
             restored = os.fstat(authority[1])
 
-        assert restored.st_atime_ns == opened.st_atime_ns
-        assert restored.st_mtime_ns == opened.st_mtime_ns
+        assert _timestamp_matches_filesystem(
+            entry,
+            tmp_path.parent,
+            restored.st_atime_ns,
+            opened.st_atime_ns,
+            attribute="atime",
+        )
+        assert _timestamp_matches_filesystem(
+            entry,
+            tmp_path.parent,
+            restored.st_mtime_ns,
+            opened.st_mtime_ns,
+            attribute="mtime",
+        )
     finally:
         if authority is not None:
             _close_symlink_metadata_authority(authority)

@@ -59,7 +59,7 @@ def stage_feature(
     if not staging_parent.is_dir():
         raise ValueError(f"output parent does not exist: {parent}")
     temporary = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=staging_parent)
+        tempfile.mkdtemp(prefix=".sn-module-gen-feature-stage-", dir=staging_parent)
     )
     try:
         starter_files = []
@@ -334,7 +334,9 @@ def stage_feature(
 def activate_feature(staged: Path, destination: Path) -> Path | None:
     backup = None
     if destination.exists():
-        backup = destination.parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
+        backup = destination.parent / (
+            f".sn-module-gen-feature-backup-{uuid.uuid4().hex}"
+        )
         os.replace(destination, backup)
     try:
         os.replace(staged, destination)

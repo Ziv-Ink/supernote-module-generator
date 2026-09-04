@@ -11,11 +11,23 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, cast
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 from . import filesystem as filesystem_ops
 from .errors import ConcurrentSourceMutation, FilesystemError, PartialFailure
 from .filesystem import (
+    CopiedTimestampState,
     SourceTreeInventory,
     _descriptor_relative_io_supported,
     _is_build_or_cache_path,
@@ -700,12 +712,31 @@ class _WindowsConditionalReplacement:
     entry: Dict[str, object]
 
 
-def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
+class _ExactEntryStateRow(NamedTuple):
+    relative: str
+    kind: str
+    mode: int
+    atime_ns: int
+    mtime_ns: int
+    size: int
+    digest: str | None
+    dev: int
+    ino: int
+
+
+_ExactEntryState = Union[
+    Tuple[_ExactEntryStateRow, ...],
+    Tuple[Tuple[str, None]],
+]
+_MISSING_EXACT_ENTRY_STATE: Tuple[Tuple[str, None]] = ((".", None),)
+
+
+def _exact_entry_state(path: Path) -> _ExactEntryState:
     """Capture exact no-follow content and supported metadata for one entry tree."""
 
     kind = entry_kind(path)
     if kind is None:
-        return ((".", None),)
+        return _MISSING_EXACT_ENTRY_STATE
     paths = [path]
     directory_metadata: dict[Path, os.stat_result] = {}
     if kind == "directory":
@@ -714,13 +745,19 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
             paths.extend(iter_tree_no_follow(path))
         finally:
             _restore_exact_state_directory_atimes(directory_metadata)
-    state: list[tuple[object, ...]] = []
+    state: list[_ExactEntryStateRow] = []
     try:
         for current in paths:
             relative = "." if current == path else current.relative_to(path).as_posix()
             before = current.lstat()
             current_kind = entry_kind(current)
-            digest = _hash_path(current) if current_kind != "directory" else None
+            expected_atime_ns = before.st_atime_ns
+            digest: str | None = None
+            if current_kind != "directory":
+                digest, applied_atimes = filesystem_ops._hash_entry_no_follow_with_atimes(
+                    current
+                )
+                expected_atime_ns = applied_atimes.get(".", expected_atime_ns)
             after = current.lstat()
             if (
                 before.st_dev != after.st_dev
@@ -742,7 +779,7 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
                 or (
                     (before.st_atime_ns // 100 != after.st_atime_ns // 100)
                     if os.name == "nt"
-                    else before.st_atime_ns != after.st_atime_ns
+                    else expected_atime_ns != after.st_atime_ns
                 )
                 or before.st_size != after.st_size
             ):
@@ -759,25 +796,24 @@ def _exact_entry_state(path: Path) -> tuple[tuple[object, ...], ...]:
                 if os.name == "nt"
                 else after.st_mtime_ns
             )
-            observed_atime_ns = (
-                directory_metadata[current].st_atime_ns
-                if current_kind == "directory"
-                else after.st_atime_ns
-            )
+            observed_atime_ns = after.st_atime_ns
             atime_ns = (
                 (observed_atime_ns // 100) * 100
                 if os.name == "nt"
                 else observed_atime_ns
             )
+            assert current_kind is not None
             state.append(
-                (
-                    relative,
-                    current_kind,
-                    mode,
-                    atime_ns,
-                    mtime_ns,
-                    after.st_size,
-                    digest,
+                _ExactEntryStateRow(
+                    relative=relative,
+                    kind=current_kind,
+                    mode=mode,
+                    atime_ns=atime_ns,
+                    mtime_ns=mtime_ns,
+                    size=after.st_size,
+                    digest=digest,
+                    dev=after.st_dev,
+                    ino=after.st_ino,
                 )
             )
     finally:
@@ -801,7 +837,7 @@ def _copy_verified_entry(
     destination: Path,
     *,
     attempts: int = 3,
-) -> tuple[tuple[object, ...], ...]:
+) -> _ExactEntryState:
     """Copy one stable entry into a fresh recovery slot.
 
     The source is sampled before and after the copy, and the recovery payload
@@ -820,17 +856,20 @@ def _copy_verified_entry(
             )
         try:
             before = _exact_entry_state(source)
-            if before != ((".", None),):
-                copy_entry_no_follow(source, destination)
+            applied_timestamps: CopiedTimestampState = {}
+            if before != _MISSING_EXACT_ENTRY_STATE:
+                applied_timestamps = copy_entry_no_follow(source, destination)
                 _restore_exact_state_atimes(source, before)
                 _restore_exact_state_atimes(destination, before)
             after = _exact_entry_state(source)
             copied = _exact_entry_state(destination)
-            if before != after or copied != after:
+            if not _source_state_matches(before, after, applied_timestamps) or not (
+                _copied_state_matches(after, copied, applied_timestamps)
+            ):
                 raise ConcurrentSourceMutation(
                     f"Source entry changed while its recovery copy was created: {source}"
                 )
-            return copied
+            return after
         except ConcurrentSourceMutation as exc:
             last_error = exc
             if lexists(destination):
@@ -844,36 +883,108 @@ def _copy_verified_entry(
     raise last_error
 
 
+def _source_state_matches(
+    before: _ExactEntryState,
+    after: _ExactEntryState,
+    applied_timestamps: CopiedTimestampState,
+) -> bool:
+    """Accept only the source atime values applied by retained copy authority."""
+
+    if len(before) != len(after):
+        return False
+    if before == _MISSING_EXACT_ENTRY_STATE:
+        return after == before and not applied_timestamps
+    if after == _MISSING_EXACT_ENTRY_STATE:
+        return False
+    before_rows = cast(Tuple[_ExactEntryStateRow, ...], before)
+    after_rows = cast(Tuple[_ExactEntryStateRow, ...], after)
+    for left, right in zip(before_rows, after_rows):
+        if (
+            left.relative != right.relative
+            or left.kind != right.kind
+            or left.mode != right.mode
+            or left.mtime_ns != right.mtime_ns
+            or left.size != right.size
+            or left.digest != right.digest
+            or left.dev != right.dev
+            or left.ino != right.ino
+        ):
+            return False
+        represented = applied_timestamps.get(left.relative)
+        if represented is None or right.atime_ns != represented[0]:
+            return False
+    return True
+
+
+def _copied_state_matches(
+    source: _ExactEntryState,
+    copied: _ExactEntryState,
+    applied_timestamps: CopiedTimestampState,
+) -> bool:
+    """Verify payload data and the stable timestamps actually represented."""
+
+    if source == _MISSING_EXACT_ENTRY_STATE:
+        return copied == source and not applied_timestamps
+    if copied == _MISSING_EXACT_ENTRY_STATE:
+        return False
+    if len(source) != len(copied):
+        return False
+    source_rows = cast(Tuple[_ExactEntryStateRow, ...], source)
+    copied_rows = cast(Tuple[_ExactEntryStateRow, ...], copied)
+    for source_row, copied_row in zip(source_rows, copied_rows):
+        # A recovery copy must have different filesystem identity. Compare its
+        # path, kind, mode, size, and content while source-to-source checks keep
+        # the retained device/inode fields strict.
+        if (
+            source_row.relative != copied_row.relative
+            or source_row.kind != copied_row.kind
+            or source_row.mode != copied_row.mode
+            or source_row.size != copied_row.size
+            or source_row.digest != copied_row.digest
+        ):
+            return False
+        relative = source_row.relative
+        represented = applied_timestamps.get(relative)
+        if represented is None or (
+            copied_row.atime_ns,
+            copied_row.mtime_ns,
+        ) != represented[1:]:
+            return False
+    return set(applied_timestamps) == {row.relative for row in source_rows}
+
+
 def _restore_exact_state_atimes(
     root: Path,
-    state: tuple[tuple[object, ...], ...],
+    state: _ExactEntryState,
 ) -> None:
     if not _windows_host():
         return
     rows = sorted(
-        (row for row in state if row[1] in {"directory", "file"}),
-        key=lambda row: len(PurePosixPath(str(row[0])).parts),
+        (
+            row
+            for row in state
+            if isinstance(row, _ExactEntryStateRow)
+            and row.kind in {"directory", "file"}
+        ),
+        key=lambda row: len(PurePosixPath(row.relative).parts),
         reverse=True,
     )
     for row in rows:
-        relative, kind, mode, atime_ns, mtime_ns, size, _digest = row
-        expected_mode = cast(int, mode)
-        expected_atime_ns = cast(int, atime_ns)
-        expected_mtime_ns = cast(int, mtime_ns)
-        path = root if relative == "." else root.joinpath(
-            *PurePosixPath(str(relative)).parts
+        exact = row
+        path = root if exact.relative == "." else root.joinpath(
+            *PurePosixPath(exact.relative).parts
         )
         current = path.lstat()
         if (
-            entry_kind(path) != kind
+            entry_kind(path) != exact.kind
             or current.st_mode & stat.S_IWRITE
-            != expected_mode & stat.S_IWRITE
-            or current.st_mtime_ns // 100 != expected_mtime_ns // 100
-            or current.st_size != size
+            != exact.mode & stat.S_IWRITE
+            or current.st_mtime_ns // 100 != exact.mtime_ns // 100
+            or current.st_size != exact.size
             or not filesystem_ops._restore_observed_path_atime(
                 path,
                 current,
-                atime_ns=expected_atime_ns,
+                atime_ns=exact.atime_ns,
             )
         ):
             raise ConcurrentSourceMutation(
@@ -2103,7 +2214,7 @@ class Transaction:
                 continue
             index = len(self._entries())
             restore = restore_root / str(index)
-            copied: tuple[tuple[object, ...], ...] | None = None
+            copied: _ExactEntryState | None = None
             last_error: ConcurrentSourceMutation | None = None
             for _ in range(3):
                 candidate = restore_root / f"{index}-attempt-{uuid.uuid4().hex}"
@@ -2122,7 +2233,12 @@ class Transaction:
             if copied is None:
                 assert last_error is not None
                 raise last_error
-            copied_kind = copied[0][1]
+            first_copied_row = copied[0]
+            copied_kind = (
+                first_copied_row.kind
+                if isinstance(first_copied_row, _ExactEntryStateRow)
+                else None
+            )
             existed = copied_kind is not None
             entry = {
                 "path": str(managed),

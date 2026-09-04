@@ -4,6 +4,9 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
+import sys
+import tempfile
 
 import pytest
 
@@ -78,6 +81,244 @@ def _metadata(path: Path) -> tuple[int, int, int]:
     return value.st_mode, value.st_atime_ns, value.st_mtime_ns
 
 
+def assert_metadata_equivalent(
+    root: Path,
+    actual: dict[str, tuple[int, int, int]],
+    expected: dict[str, tuple[int, int, int]],
+) -> None:
+    assert actual.keys() == expected.keys()
+    for relative, (mode, atime_ns, mtime_ns) in actual.items():
+        expected_mode, expected_atime_ns, expected_mtime_ns = expected[relative]
+        assert mode == expected_mode
+        path = root if relative == "." else root.joinpath(*relative.split("/"))
+        assert _timestamp_matches_filesystem(
+            path,
+            root.parent,
+            mode,
+            atime_ns,
+            expected_atime_ns,
+            attribute="atime",
+        )
+        assert _timestamp_matches_filesystem(
+            path,
+            root.parent,
+            mode,
+            mtime_ns,
+            expected_mtime_ns,
+            attribute="mtime",
+        )
+
+
+def _timestamp_matches_filesystem(
+    path: Path,
+    probe_parent: Path,
+    mode: int,
+    actual: int,
+    expected: int,
+    *,
+    attribute: str,
+) -> bool:
+    if actual == expected or (os.name == "nt" and actual // 100 == expected // 100):
+        return True
+    probed = _probe_timestamp_representation(
+        path,
+        probe_parent,
+        mode,
+        expected,
+        attribute=attribute,
+    )
+    if probed is None:
+        return False
+    represented, stable = probed
+    if represented == expected:
+        return False
+    if not stable:
+        return attribute == "atime" and stat.S_ISDIR(mode)
+    return actual == represented
+
+
+def _probe_timestamp_representation(
+    path: Path,
+    probe_parent: Path,
+    mode: int,
+    requested: int,
+    *,
+    attribute: str,
+) -> tuple[int, bool] | None:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="sn-module-gen-timestamp-probe-",
+            dir=probe_parent,
+        ) as temporary:
+            probe_root = Path(temporary)
+            if stat.S_ISDIR(mode):
+                probe = probe_root
+            elif stat.S_ISREG(mode):
+                probe = probe_root / "probe"
+                probe.write_bytes(b"")
+            elif stat.S_ISLNK(mode):
+                probe = probe_root / "probe"
+                probe.symlink_to("target")
+            else:
+                return None
+            probe_before = probe.lstat()
+            if probe_before.st_dev != path.lstat().st_dev:
+                return None
+            first_request = (
+                (requested, probe_before.st_mtime_ns)
+                if attribute == "atime"
+                else (probe_before.st_atime_ns, requested)
+            )
+            os.utime(
+                probe,
+                ns=first_request,
+                follow_symlinks=False,
+            )
+            represented = getattr(probe.lstat(), f"st_{attribute}_ns")
+            if represented == requested:
+                return represented, True
+            probe_current = probe.lstat()
+            stable_request = (
+                (represented, probe_current.st_mtime_ns)
+                if attribute == "atime"
+                else (probe_current.st_atime_ns, represented)
+            )
+            os.utime(probe, ns=stable_request, follow_symlinks=False)
+            stable = getattr(probe.lstat(), f"st_{attribute}_ns") == represented
+            if stable and attribute == "atime" and stat.S_ISDIR(mode):
+                os.listdir(probe)
+                stable = probe.lstat().st_atime_ns == represented
+            return represented, stable
+    except (NotImplementedError, OSError):
+        return None
+
+
+def test_metadata_equivalence_keeps_directory_atime_strict_on_capable_filesystem(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "plugin"
+    root.mkdir()
+    metadata = _metadata(root)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_probe_timestamp_representation",
+        lambda _path, _parent, _mode, requested, **_kwargs: (requested, True),
+    )
+
+    with pytest.raises(AssertionError):
+        assert_metadata_equivalent(
+            root,
+            {".": (metadata[0], metadata[1] + 1, metadata[2])},
+            {".": metadata},
+        )
+
+
+def test_metadata_equivalence_omits_only_unstable_directory_atime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "plugin"
+    root.mkdir()
+    source = root / "source.cpp"
+    source.write_text("int value = 1;\n", encoding="utf-8")
+    root_metadata = _metadata(root)
+    source_metadata = _metadata(source)
+    expected = {".": root_metadata, "source.cpp": source_metadata}
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_probe_timestamp_representation",
+        lambda _path, _parent, _mode, requested, **_kwargs: (
+            requested - 1_000,
+            False,
+        ),
+    )
+
+    assert_metadata_equivalent(
+        root,
+        {
+            ".": (root_metadata[0], root_metadata[1] + 1, root_metadata[2]),
+            "source.cpp": source_metadata,
+        },
+        expected,
+    )
+    with pytest.raises(AssertionError):
+        assert_metadata_equivalent(
+            root,
+            {
+                ".": (root_metadata[0], root_metadata[1], root_metadata[2] + 1),
+                "source.cpp": source_metadata,
+            },
+            expected,
+        )
+    with pytest.raises(AssertionError):
+        assert_metadata_equivalent(
+            root,
+            {
+                ".": root_metadata,
+                "source.cpp": (
+                    source_metadata[0],
+                    source_metadata[1] + 1,
+                    source_metadata[2],
+                ),
+            },
+            expected,
+        )
+
+
+def test_timestamp_mismatch_requires_stable_probed_representation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.cpp"
+    source.write_text("int value = 1;\n", encoding="utf-8")
+    mode = source.lstat().st_mode
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_probe_timestamp_representation",
+        lambda *_args, **_kwargs: (4_000, True),
+    )
+
+    assert _timestamp_matches_filesystem(
+        source,
+        tmp_path.parent,
+        mode,
+        4_000,
+        4_999,
+        attribute="mtime",
+    )
+    assert not _timestamp_matches_filesystem(
+        source,
+        tmp_path.parent,
+        mode,
+        4_001,
+        4_999,
+        attribute="mtime",
+    )
+
+
+def test_timestamp_mismatch_rejects_probe_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.cpp"
+    source.write_text("int value = 1;\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_probe_timestamp_representation",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert not _timestamp_matches_filesystem(
+        source,
+        tmp_path.parent,
+        source.lstat().st_mode,
+        4_000,
+        4_999,
+        attribute="atime",
+    )
+
+
 PUBLIC_COMMANDS = (
     ("add", "new"),
     ("update", "alpha", "--yes"),
@@ -123,7 +364,9 @@ def test_public_commands_reject_legacy_v4_runtime_without_mutation(
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
     assert "does not migrate or reinterpret V1-V4" in result["error"]["message"]
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
     assert outside.read_bytes() == outside_before
@@ -149,7 +392,9 @@ def test_public_commands_reject_legacy_v4_wiring_without_mutation(
 
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
 
 
@@ -269,7 +514,9 @@ def test_public_commands_reject_legacy_runtime_before_any_mutation(
     assert result["error"]["phase"] == "preflight"
     assert "does not migrate" in result["error"]["message"]
     assert "Create a clean plugin" in result["next_action"]
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
 
@@ -307,7 +554,9 @@ def test_every_public_command_rejects_known_historical_layouts_exactly(
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
     assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
 
@@ -344,7 +593,9 @@ def test_manifest_never_masks_known_historical_layouts(
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
 
 
@@ -367,7 +618,9 @@ def test_manifest_never_masks_legacy_runtime_roots(
 
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
 
 
@@ -401,7 +654,9 @@ def test_manifest_claim_never_masks_live_legacy_feature_metadata(
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
     assert result["error"]["phase"] == "preflight"
-    assert exact_metadata(root) == before_metadata
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
 
 
@@ -583,8 +838,10 @@ def test_add_rejects_real_v2_wiring_without_any_mutation(tmp_path: Path):
 
     assert code == 1
     assert result["error"]["kind"] == "unsupported_legacy_project"
+    assert_metadata_equivalent(
+        root, exact_metadata(root), before_metadata
+    )
     assert inventory_project(root) == before
-    assert exact_metadata(root) == before_metadata
     assert not (root / ".supernote-module/manifest.json").exists()
 
 

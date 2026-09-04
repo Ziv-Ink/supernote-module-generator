@@ -15,7 +15,7 @@ permissions:
 env:
   SUPERNOTE_TEMPLATE_COMMIT: af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f
   SUPERNOTE_WIKI_COMMIT: 28cee5a54ea452c91a570dd48cbbadbbfadf30d0
-  EXPECTED_RELEASE_TAG: v0.1.1
+  EXPECTED_RELEASE_TAG: v0.1.2
   DISTRIBUTION_ARTIFACT: python-package-distributions-${{ github.sha }}
   PROVENANCE_ARTIFACT: python-package-provenance-${{ github.sha }}
 

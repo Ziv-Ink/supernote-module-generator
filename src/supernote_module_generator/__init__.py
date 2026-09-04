@@ -1,3 +1,3 @@
 """Safe generator for local native code modules in Supernote React Native plugins."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

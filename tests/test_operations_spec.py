@@ -152,6 +152,48 @@ def test_add_scaffolds_selected_families_without_backend_metadata(
     assert "supernote-runtime" in (root / "android/settings.gradle").read_text()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX timestamp precision fixture")
+def test_failed_add_accepts_stable_coarse_rollback_timestamps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = plugin(tmp_path)
+    original_utime = os.utime
+
+    def rounded_utime(path, *, ns, **options):
+        original_utime(
+            path,
+            ns=tuple(value // 1_000_000_000 * 1_000_000_000 for value in ns),
+            **options,
+        )
+
+    monkeypatch.setattr(transaction_module.filesystem_ops.os, "utime", rounded_utime)
+
+    code, stdout, stderr = invoke(
+        root,
+        [
+            "--json",
+            "add",
+            "rollback-feature",
+            "--starter",
+            "cpp",
+            "--starter",
+            "kotlin",
+            "--skip-install",
+            "--yes",
+        ],
+    )
+    result = json.loads(stdout)
+
+    assert code == 1
+    assert stderr == ""
+    assert result["status"] == "failure"
+    assert result["rollback"]["status"] == "completed"
+    assert result["changes"] == []
+    assert not (root / "local_modules").exists()
+    assert not (root / "android/.supernote-module").exists()
+
+
 def test_add_and_update_render_semantic_api_without_gradle_source_writes(
     tmp_path: Path, monkeypatch
 ):

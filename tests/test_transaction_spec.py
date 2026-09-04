@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 
 import pytest
 
@@ -393,7 +394,11 @@ def test_fresh_process_rollback_restores_persisted_directory_metadata(tmp_path: 
     outcome = recover_pending(tmp_path)
 
     assert outcome.rollback.status == "completed"
-    assert protected_directory_metadata(tmp_path) == metadata
+    assert _protected_metadata_matches(
+        tmp_path,
+        protected_directory_metadata(tmp_path),
+        metadata,
+    )
     assert source.read_text() == "before\n"
 
 
@@ -554,6 +559,169 @@ def test_restore_directory_metadata_accepts_stable_filesystem_timestamp_rounding
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX timestamp precision fixture")
+@pytest.mark.parametrize("source_kind", ("file", "directory", "symlink"))
+def test_exact_state_accepts_only_reported_coarse_atime_restoration(
+    tmp_path: Path,
+    monkeypatch,
+    source_kind: str,
+) -> None:
+    source = tmp_path / "source"
+    if source_kind == "file":
+        source.write_text("content\n", encoding="utf-8")
+    elif source_kind == "directory":
+        source.mkdir()
+    else:
+        source.symlink_to("target")
+    requested = (
+        1_788_523_464_419_500_292,
+        1_788_523_465_519_600_393,
+    )
+    os.utime(source, ns=requested, follow_symlinks=source_kind != "symlink")
+    represented_mtime_ns = source.lstat().st_mtime_ns
+    original_utime = os.utime
+
+    def coarse_finish(path, descriptor, before):
+        applied = before.st_atime_ns // 1_000_000_000 * 1_000_000_000
+        original_utime(descriptor, ns=(applied, before.st_mtime_ns))
+        return applied
+
+    monkeypatch.setattr(
+        filesystem_module,
+        "_finish_observed_atime_value",
+        coarse_finish,
+    )
+    if source_kind == "symlink":
+        original_read = filesystem_module._read_symlink_authority_target
+
+        def advancing_read(authority):
+            target = original_read(authority)
+            current = source.lstat()
+            original_utime(
+                source,
+                ns=(current.st_atime_ns + 1_000_000_000, current.st_mtime_ns),
+                follow_symlinks=False,
+            )
+            return target
+
+        def coarse_symlink_restore(path, operation, authority, before, after):
+            applied = before.st_atime_ns // 1_000_000_000 * 1_000_000_000
+            original_utime(
+                path,
+                ns=(applied, before.st_mtime_ns),
+                follow_symlinks=False,
+            )
+            return applied
+
+        monkeypatch.setattr(
+            filesystem_module,
+            "_read_symlink_authority_target",
+            advancing_read,
+        )
+        monkeypatch.setattr(
+            filesystem_module,
+            "_restore_symlink_observation_atime",
+            coarse_symlink_restore,
+        )
+
+    state = transaction_module._exact_entry_state(source)
+
+    row = state[0]
+    assert isinstance(row, transaction_module._ExactEntryStateRow)
+    assert row.atime_ns == requested[0] // 1_000_000_000 * 1_000_000_000
+    assert row.mtime_ns == represented_mtime_ns
+
+
+def test_verified_copy_rejects_unreported_source_atime_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "recovery.txt"
+    source.write_text("content\n", encoding="utf-8")
+    os.utime(source, ns=(1_000_000_000, 2_000_000_000))
+    original_copy = transaction_module.copy_entry_no_follow
+
+    def mutate_after_copy(source_path: Path, destination_path: Path):
+        result = original_copy(source_path, destination_path)
+        current = source_path.lstat()
+        os.utime(
+            source_path,
+            ns=(9_000_000_000, current.st_mtime_ns),
+        )
+        return result
+
+    monkeypatch.setattr(
+        transaction_module,
+        "copy_entry_no_follow",
+        mutate_after_copy,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation):
+        transaction_module._copy_verified_entry(source, destination)
+
+
+def test_verified_copy_rejects_atomic_source_identity_substitution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "recovery.txt"
+    replacement = tmp_path / "replacement.txt"
+    source.write_text("content\n", encoding="utf-8")
+    source.chmod(0o600)
+    os.utime(source, ns=(3_000_000_000, 4_000_000_000))
+    original_copy = transaction_module.copy_entry_no_follow
+    original_metadata = source.lstat()
+    original_identity = (original_metadata.st_dev, original_metadata.st_ino)
+    replacement_identity: tuple[int, int] | None = None
+
+    def replace_after_copy(source_path: Path, destination_path: Path):
+        nonlocal replacement_identity
+        result = original_copy(source_path, destination_path)
+        current = source_path.lstat()
+        replacement.write_bytes(source_path.read_bytes())
+        replacement.chmod(stat.S_IMODE(current.st_mode))
+        os.utime(
+            replacement,
+            ns=(result["."][0], current.st_mtime_ns),
+        )
+        replacement_identity = (
+            replacement.lstat().st_dev,
+            replacement.lstat().st_ino,
+        )
+        os.replace(replacement, source_path)
+        return result
+
+    monkeypatch.setattr(
+        transaction_module,
+        "copy_entry_no_follow",
+        replace_after_copy,
+    )
+
+    with pytest.raises(ConcurrentSourceMutation, match="recovery copy was created"):
+        transaction_module._copy_verified_entry(source, destination)
+
+    assert replacement_identity is not None
+    assert replacement_identity != original_identity
+    live = source.lstat()
+    assert (live.st_dev, live.st_ino) == replacement_identity
+    precision = 100 if os.name == "nt" else 1
+    assert (
+        live.st_mode,
+        live.st_size,
+        live.st_atime_ns // precision,
+        live.st_mtime_ns // precision,
+    ) == (
+        original_metadata.st_mode,
+        original_metadata.st_size,
+        original_metadata.st_atime_ns // precision,
+        original_metadata.st_mtime_ns // precision,
+    )
+    assert source.read_bytes() == b"content\n"
+    assert destination.read_bytes() == b"content\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX timestamp precision fixture")
 def test_durable_recovery_removes_pointer_after_stable_timestamp_rounding(
     tmp_path: Path,
     monkeypatch,
@@ -609,7 +777,11 @@ def test_fresh_process_durable_cleanup_restores_directory_metadata(
     outcome = recover_pending(tmp_path)
 
     assert outcome.rollback.status == "not_needed"
-    assert protected_directory_metadata(tmp_path) == metadata
+    assert _protected_metadata_matches(
+        tmp_path,
+        protected_directory_metadata(tmp_path),
+        metadata,
+    )
     assert not (tmp_path / JOURNAL_NAME).exists()
 
 
@@ -1265,8 +1437,20 @@ def test_hash_inventory_snapshot_and_guard_preserve_directory_atimes(tmp_path: P
     for directory, values in expected.items():
         current = directory.lstat()
         assert current.st_mode & 0o7777 == values[0]
-        assert current.st_atime_ns == values[1]
-        assert current.st_mtime_ns == values[2]
+        assert _timestamp_matches_filesystem(
+            directory,
+            tmp_path.parent,
+            current.st_atime_ns,
+            values[1],
+            attribute="atime",
+        )
+        assert _timestamp_matches_filesystem(
+            directory,
+            tmp_path.parent,
+            current.st_mtime_ns,
+            values[2],
+            attribute="mtime",
+        )
 
 
 @pytest.mark.parametrize("concurrent_change", ["mode_mtime", "replacement"])
@@ -1417,6 +1601,14 @@ def test_source_inventory_reads_symlink_target_from_retained_identity_during_aba
     os.utime(external, ns=(2_000_000_021_000_000_000, 2_000_000_022_000_000_000), follow_symlinks=False)
     external_before = external.lstat()
     root_before = root.lstat()
+    os.utime(root, ns=(root_before.st_atime_ns, root_before.st_mtime_ns))
+    represented_root = root.lstat()
+    if (
+        represented_root.st_atime_ns != root_before.st_atime_ns
+        or represented_root.st_mtime_ns != root_before.st_mtime_ns
+    ):
+        pytest.skip("ABA fixture requires exactly representable root timestamps")
+    root_before = represented_root
     displaced = tmp_path / "owned-displaced"
     original_read = filesystem_module._read_symlink_authority_target
     injected = False
@@ -1475,20 +1667,20 @@ def test_failed_file_copy_preserves_a_concurrent_destination_replacement(
     replacement.chmod(0o604)
     replacement_times = (2_000_000_001_000_000_000, 2_000_000_002_000_000_000)
     os.utime(replacement, ns=replacement_times)
-    original_finish = filesystem_module._finish_observed_atime
+    original_finish = filesystem_module._finish_observed_atime_value
     injected = False
 
     def replace_before_failed_copy_cleanup(path, descriptor, before):
         nonlocal injected
         if path == source and not injected:
-            injected = True
-            os.replace(replacement, destination)
-            return False
+                injected = True
+                os.replace(replacement, destination)
+                return None
         return original_finish(path, descriptor, before)
 
     monkeypatch.setattr(
         filesystem_module,
-        "_finish_observed_atime",
+        "_finish_observed_atime_value",
         replace_before_failed_copy_cleanup,
     )
 
@@ -1730,8 +1922,17 @@ def test_observation_atime_restore_preserves_concurrent_mtime_update(
     created = source.lstat()
     os.utime(source, ns=(1_000_000_000, created.st_mtime_ns))
     original_apply = filesystem_module._apply_descriptor_atime_only
+    original_set_atime = filesystem_module._set_descriptor_atime_only
+    original_read = filesystem_module.os.read
     external_mtime = source.lstat().st_mtime_ns + 9_000_000_000
     injected = False
+
+    def advance_atime_during_read(descriptor, size):
+        content = original_read(descriptor, size)
+        if content:
+            current = os.fstat(descriptor)
+            original_set_atime(descriptor, current.st_atime_ns + 1_000_000_000)
+        return content
 
     def change_mtime_then_restore(descriptor, atime_ns):
         nonlocal injected
@@ -1745,6 +1946,7 @@ def test_observation_atime_restore_preserves_concurrent_mtime_update(
         "_apply_descriptor_atime_only",
         change_mtime_then_restore,
     )
+    monkeypatch.setattr(filesystem_module.os, "read", advance_atime_during_read)
 
     with pytest.raises(FilesystemError, match="changed while"):
         filesystem_module.read_regular_bytes_no_follow(source)
@@ -2011,7 +2213,172 @@ def _entry_stat(path: Path) -> tuple[int, int, int]:
 def _directory_metadata_matches(root: Path, expected) -> bool:
     for relative, metadata in expected.items():
         path = root if relative == "." else root.joinpath(*relative.split("/"))
-        if _entry_stat(path) != metadata:
+        if not _metadata_tuple_matches(
+            path,
+            root.parent,
+            _entry_stat(path),
+            metadata,
+        ):
+            return False
+    return True
+
+
+def _protected_metadata_matches(root: Path, actual, expected) -> bool:
+    return actual.keys() == expected.keys() and all(
+        _metadata_tuple_matches(
+            root if relative == "." else root.joinpath(*relative.split("/")),
+            root.parent,
+            actual[relative],
+            metadata,
+        )
+        for relative, metadata in expected.items()
+    )
+
+
+def _metadata_tuple_matches(
+    path: Path,
+    probe_parent: Path,
+    actual,
+    expected,
+) -> bool:
+    return (
+        actual[0] == expected[0]
+        and _timestamp_matches_filesystem(
+            path,
+            probe_parent,
+            actual[1],
+            expected[1],
+            attribute="atime",
+        )
+        and _timestamp_matches_filesystem(
+            path,
+            probe_parent,
+            actual[2],
+            expected[2],
+            attribute="mtime",
+        )
+    )
+
+
+def _timestamp_matches_filesystem(
+    path: Path,
+    probe_parent: Path,
+    actual: int,
+    expected: int,
+    *,
+    attribute: str,
+) -> bool:
+    if actual == expected or (os.name == "nt" and actual // 100 == expected // 100):
+        return True
+    mode = path.lstat().st_mode
+    probed = _probe_timestamp_representation(
+        path,
+        probe_parent,
+        mode,
+        expected,
+        attribute=attribute,
+    )
+    if probed is None:
+        return False
+    represented, stable = probed
+    if represented == expected:
+        return False
+    if not stable:
+        return attribute == "atime" and stat.S_ISDIR(mode)
+    return actual == represented
+
+
+def _probe_timestamp_representation(
+    path: Path,
+    probe_parent: Path,
+    mode: int,
+    requested: int,
+    *,
+    attribute: str,
+) -> tuple[int, bool] | None:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="sn-module-gen-timestamp-probe-",
+            dir=probe_parent,
+        ) as temporary:
+            probe_root = Path(temporary)
+            if stat.S_ISDIR(mode):
+                probe = probe_root
+            elif stat.S_ISREG(mode):
+                probe = probe_root / "probe"
+                probe.write_bytes(b"")
+            elif stat.S_ISLNK(mode):
+                probe = probe_root / "probe"
+                probe.symlink_to("target")
+            else:
+                return None
+            probe_before = probe.lstat()
+            if probe_before.st_dev != path.lstat().st_dev:
+                return None
+            first_request = (
+                (requested, probe_before.st_mtime_ns)
+                if attribute == "atime"
+                else (probe_before.st_atime_ns, requested)
+            )
+            os.utime(
+                probe,
+                ns=first_request,
+                follow_symlinks=False,
+            )
+            represented = getattr(probe.lstat(), f"st_{attribute}_ns")
+            if represented == requested:
+                return represented, True
+            probe_current = probe.lstat()
+            stable_request = (
+                (represented, probe_current.st_mtime_ns)
+                if attribute == "atime"
+                else (probe_current.st_atime_ns, represented)
+            )
+            os.utime(probe, ns=stable_request, follow_symlinks=False)
+            stable = getattr(probe.lstat(), f"st_{attribute}_ns") == represented
+            if stable and attribute == "atime" and stat.S_ISDIR(mode):
+                os.listdir(probe)
+                stable = probe.lstat().st_atime_ns == represented
+            return represented, stable
+    except (NotImplementedError, OSError):
+        return None
+
+
+def _exact_states_are_equivalent(root: Path, actual, expected) -> bool:
+    if len(actual) != len(expected):
+        return False
+    for actual_row, expected_row in zip(actual, expected):
+        if not isinstance(
+            actual_row,
+            transaction_module._ExactEntryStateRow,
+        ) or not isinstance(expected_row, transaction_module._ExactEntryStateRow):
+            return actual_row == expected_row
+        # Rollback equivalence permits a restored entry to have a new identity.
+        if (
+            actual_row.relative != expected_row.relative
+            or actual_row.kind != expected_row.kind
+            or actual_row.mode != expected_row.mode
+            or actual_row.size != expected_row.size
+            or actual_row.digest != expected_row.digest
+        ):
+            return False
+        relative = actual_row.relative
+        path = root if relative == "." else root.joinpath(*relative.split("/"))
+        if not _timestamp_matches_filesystem(
+            path,
+            root.parent,
+            actual_row.atime_ns,
+            expected_row.atime_ns,
+            attribute="atime",
+        ):
+            return False
+        if not _timestamp_matches_filesystem(
+            path,
+            root.parent,
+            actual_row.mtime_ns,
+            expected_row.mtime_ns,
+            attribute="mtime",
+        ):
             return False
     return True
 
@@ -2132,7 +2499,11 @@ def test_snapshot_versions_a_stable_recovery_payload_across_copy_races(
     rollback = recover_pending(tmp_path).rollback
 
     assert rollback.status == "completed"
-    assert transaction_module._exact_entry_state(source) == expected
+    assert _exact_states_are_equivalent(
+        source,
+        transaction_module._exact_entry_state(source),
+        expected,
+    )
     assert leaf.read_text(encoding="utf-8") == "concurrent\n"
     assert not transaction.journal_path.exists()
     assert not transaction.state_dir.exists()
@@ -2205,6 +2576,57 @@ def test_exact_entry_state_distinguishes_different_supported_atimes(
     assert first != second
 
 
+def test_windows_exact_state_restores_100ns_atime_from_identity_row(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.cpp"
+    source.write_text("stable\n", encoding="utf-8")
+    requested_atime_ns = 61_000_000_099
+    expected_atime_ns = requested_atime_ns // 100 * 100
+    expected_mtime_ns = 62_000_000_000
+    os.utime(source, ns=(expected_atime_ns, expected_mtime_ns))
+    metadata = source.lstat()
+    mode = (
+        (stat.S_IWRITE if metadata.st_mode & stat.S_IWRITE else 0)
+        | stat.S_IREAD
+    )
+    state = (
+        transaction_module._ExactEntryStateRow(
+            relative=".",
+            kind="file",
+            mode=mode,
+            atime_ns=expected_atime_ns,
+            mtime_ns=expected_mtime_ns,
+            size=metadata.st_size,
+            digest=hashlib.sha256(source.read_bytes()).hexdigest(),
+            dev=metadata.st_dev,
+            ino=metadata.st_ino,
+        ),
+    )
+    os.utime(source, ns=(63_000_000_000, expected_mtime_ns))
+    restored_atimes: list[int] = []
+
+    def restore_atime(path, before, *, atime_ns=None):
+        assert path == source
+        assert atime_ns is not None
+        restored_atimes.append(atime_ns)
+        os.utime(path, ns=(atime_ns, before.st_mtime_ns))
+        return path.lstat().st_atime_ns == atime_ns
+
+    monkeypatch.setattr(transaction_module, "_windows_host", lambda: True)
+    monkeypatch.setattr(
+        filesystem_module,
+        "_restore_observed_path_atime",
+        restore_atime,
+    )
+
+    transaction_module._restore_exact_state_atimes(source, state)
+
+    assert restored_atimes == [expected_atime_ns]
+    assert source.lstat().st_atime_ns == expected_atime_ns
+
+
 def test_exact_entry_state_restores_nested_directory_atimes(tmp_path: Path) -> None:
     source = tmp_path / "source"
     nested = source / "nested"
@@ -2218,9 +2640,13 @@ def test_exact_entry_state_restores_nested_directory_atimes(tmp_path: Path) -> N
     state = transaction_module._exact_entry_state(source)
 
     precision = 100 if os.name == "nt" else 1
-    rows = {row[0]: row for row in state}
-    assert rows["."][3] == root_times[0] // precision * precision
-    assert rows["nested"][3] == nested_times[0] // precision * precision
+    rows = {
+        row.relative: row
+        for row in state
+        if isinstance(row, transaction_module._ExactEntryStateRow)
+    }
+    assert rows["."].atime_ns == root_times[0] // precision * precision
+    assert rows["nested"].atime_ns == nested_times[0] // precision * precision
     assert source.lstat().st_atime_ns == root_times[0]
     assert nested.lstat().st_atime_ns == nested_times[0]
 
@@ -2428,7 +2854,11 @@ def test_failed_adoption_keeps_the_previous_recovery_payload_actionable(
     current_entry = transaction.data["entries"][0]
     assert isinstance(current_entry, dict)
     assert Path(str(current_entry["restore"])) == original_restore
-    assert transaction_module._exact_entry_state(original_restore) == original_payload
+    assert _exact_states_are_equivalent(
+        original_restore,
+        transaction_module._exact_entry_state(original_restore),
+        original_payload,
+    )
     outcome = recover_pending(tmp_path)
 
     assert outcome.rollback.status == "completed"

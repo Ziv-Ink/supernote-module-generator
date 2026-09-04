@@ -29,6 +29,7 @@ from .filesystem import (
     protected_source_snapshot_roots,
     restore_protected_directory_metadata,
     source_tree_changes,
+    source_tree_changes_after_restore,
     source_tree_inventory,
 )
 from .platform_tools import gradle_wrapper_command, gradle_wrapper_path
@@ -1831,8 +1832,8 @@ class CliOperationService:
             )
         rollback = transaction.rollback()
         try:
-            remaining = source_tree_changes(
-                baseline, source_tree_inventory(self.root)
+            remaining = source_tree_changes_after_restore(
+                self.root, baseline, source_tree_inventory(self.root)
             )
         except Exception as exc:
             remaining = (f"inventory_failed:{exc}",)

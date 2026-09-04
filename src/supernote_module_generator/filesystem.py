@@ -40,6 +40,26 @@ def _detect_descriptor_relative_io_support() -> bool:
 _DESCRIPTOR_RELATIVE_IO_SUPPORTED = _detect_descriptor_relative_io_support()
 
 
+def _open_read_descriptor(
+    path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    flags: int,
+    *,
+    dir_fd: int | None = None,
+) -> int:
+    """Open read authority without perturbing atime when Linux permits it."""
+
+    noatime = getattr(os, "O_NOATIME", 0) if sys.platform.startswith("linux") else 0
+    options = {} if dir_fd is None else {"dir_fd": dir_fd}
+    if noatime:
+        try:
+            return os.open(path, flags | noatime, **options)
+        except PermissionError:
+            # O_NOATIME requires ownership or CAP_FOWNER. Readable trees owned
+            # by another user must still work through the stable-restore path.
+            pass
+    return os.open(path, flags, **options)
+
+
 from .windows_authority import (
     GenerationAuthority as _WindowsGenerationAuthority,
     RawCloseOutcome as _WindowsRawCloseOutcome,
@@ -1247,7 +1267,7 @@ def _open_observed(path: Path, *, directory: bool = False) -> tuple[int, os.stat
         flags |= os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
+    descriptor = _open_read_descriptor(path, flags)
     return descriptor, os.fstat(descriptor)
 
 
@@ -1368,46 +1388,23 @@ def _same_entry_identity(before: os.stat_result, after: os.stat_result) -> bool:
     )
 
 
-def _finish_observed_atime(
+def _finish_observed_atime_value(
     path: Path,
     descriptor: int,
     before: os.stat_result,
-) -> bool:
+) -> int | None:
     """Restore only read-induced atime on the same otherwise-unchanged entry."""
 
     if _windows_host():
-        try:
-            after = path.lstat()
-        except OSError:
-            return False
-        if not _same_observed_entry(before, after):
-            return False
-        # Windows may defer access-time updates. Reapply the captured value
-        # unconditionally so this is also the boundary that detects a
-        # concurrent write arriving between observation and publication.
-        applied_atime_ns = _apply_descriptor_atime_only(
-            descriptor, before.st_atime_ns
-        )
-        try:
-            restored = path.lstat()
-        except OSError:
-            return False
-        return (
-            _same_observed_entry(before, restored)
-            and (
-                (restored.st_atime_ns // 100 == before.st_atime_ns // 100)
-                if _windows_host()
-                else restored.st_atime_ns == applied_atime_ns
-            )
-        )
+        return _finish_windows_observed_atime_value(path, descriptor, before)
 
     after = os.fstat(descriptor)
     try:
         live = path.lstat()
     except OSError:
-        return False
+        return None
     if not _same_observed_entry(before, after) or not _same_observed_entry(after, live):
-        return False
+        return None
     if after.st_atime_ns != before.st_atime_ns:
         applied_atime_ns = _apply_descriptor_atime_only(
             descriptor, before.st_atime_ns
@@ -1416,13 +1413,49 @@ def _finish_observed_atime(
         try:
             restored_live = path.lstat()
         except OSError:
-            return False
-        return (
-            _same_observed_entry(after, restored)
-            and _same_observed_entry(restored, restored_live)
-            and restored.st_atime_ns == applied_atime_ns
-        )
-    return True
+            return None
+        if (
+            not _same_observed_entry(after, restored)
+            or not _same_observed_entry(restored, restored_live)
+            or restored.st_atime_ns != applied_atime_ns
+        ):
+            return None
+        return restored.st_atime_ns
+    return after.st_atime_ns
+
+
+def _finish_windows_observed_atime_value(
+    path: Path,
+    descriptor: int,
+    before: os.stat_result,
+) -> int | None:
+    try:
+        after = path.lstat()
+    except OSError:
+        return None
+    if not _same_observed_entry(before, after):
+        return None
+    # Windows may defer access-time updates. Reapply the captured value
+    # unconditionally so this is also the boundary that detects a concurrent
+    # write arriving between observation and publication.
+    applied_atime_ns = _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
+    try:
+        restored = path.lstat()
+    except OSError:
+        return None
+    if not _same_observed_entry(before, restored) or (
+        restored.st_atime_ns // 100 != applied_atime_ns // 100
+    ):
+        return None
+    return restored.st_atime_ns
+
+
+def _finish_observed_atime(
+    path: Path,
+    descriptor: int,
+    before: os.stat_result,
+) -> bool:
+    return _finish_observed_atime_value(path, descriptor, before) is not None
 
 
 def _finish_contained_directory_atime(
@@ -1506,12 +1539,12 @@ def _set_descriptor_atime_only(descriptor: int, atime_ns: int) -> None:
         raise OSError(error, os.strerror(error))
 
 
-def _restore_observed_path_atime(
+def _restore_observed_path_atime_value(
     path: Path,
     before: os.stat_result,
     *,
     atime_ns: int | None = None,
-) -> bool:
+) -> int | None:
     if _windows_host() and (
         stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode)
     ):
@@ -1523,17 +1556,21 @@ def _restore_observed_path_atime(
                 desired_access=0x100 | 0x80,
             )
         except OSError:
-            return False
+            return None
         try:
-            return _restore_windows_observed_atime(
+            restored = _restore_windows_observed_atime(
                 path,
                 handle,
                 before,
                 atime_ns=before.st_atime_ns if atime_ns is None else atime_ns,
                 regular=stat.S_ISREG(before.st_mode),
             )
+            if not restored:
+                return None
+            requested_atime_ns = before.st_atime_ns if atime_ns is None else atime_ns
+            return (requested_atime_ns // 100) * 100
         except OSError:
-            return False
+            return None
         finally:
             _windows_close_handle(handle)
     try:
@@ -1541,11 +1578,27 @@ def _restore_observed_path_atime(
             path, directory=stat.S_ISDIR(before.st_mode)
         )
     except OSError:
-        return False
+        return None
     try:
-        return _finish_observed_atime(path, descriptor, before)
+        return _finish_observed_atime_value(path, descriptor, before)
     finally:
         _close_descriptor(descriptor)
+
+
+def _restore_observed_path_atime(
+    path: Path,
+    before: os.stat_result,
+    *,
+    atime_ns: int | None = None,
+) -> bool:
+    return (
+        _restore_observed_path_atime_value(
+            path,
+            before,
+            atime_ns=atime_ns,
+        )
+        is not None
+    )
 
 
 def _restore_windows_observed_atime(
@@ -1812,7 +1865,7 @@ def contained_tree_entries_no_follow(
                 rows.append((child_path, kind))
                 if kind != "directory":
                     continue
-                child_descriptor = os.open(
+                child_descriptor = _open_read_descriptor(
                     name,
                     directory_flags,
                     dir_fd=current_descriptor,
@@ -1877,7 +1930,7 @@ def read_contained_regular_bytes_no_follow(
     descriptor = -1
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(leaf, flags, dir_fd=parent_descriptor)
+        descriptor = _open_read_descriptor(leaf, flags, dir_fd=parent_descriptor)
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise FilesystemError(f"Source entry is not a regular file: {path}")
@@ -1943,10 +1996,10 @@ def _open_contained_parent_descriptor(root: Path, path: Path) -> tuple[int, str]
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
-    descriptor = os.open(canonical_root, flags)
+    descriptor = _open_read_descriptor(canonical_root, flags)
     try:
         for part in parsed.parts[:-1]:
-            child = os.open(part, flags, dir_fd=descriptor)
+            child = _open_read_descriptor(part, flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
         return descriptor, parsed.parts[-1]
@@ -1966,11 +2019,11 @@ def _open_contained_directory_descriptor(
         | getattr(os, "O_NOFOLLOW", 0)
     )
     if relative == ".":
-        return os.open(canonical_root, flags)
+        return _open_read_descriptor(canonical_root, flags)
     path = canonical_root.joinpath(*validate_persisted_relative_path(relative).parts)
     parent_descriptor, leaf = _open_contained_parent_descriptor(canonical_root, path)
     try:
-        return os.open(leaf, flags, dir_fd=parent_descriptor)
+        return _open_read_descriptor(leaf, flags, dir_fd=parent_descriptor)
     finally:
         os.close(parent_descriptor)
 
@@ -2025,8 +2078,8 @@ def _capture_directory_tree_metadata(root: Path) -> Dict[Path, os.stat_result]:
     return captured
 
 
-def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
-    """Apply the supported exact mode and timestamps without following links."""
+def _apply_entry_stat(path: Path, metadata: os.stat_result) -> tuple[int, int]:
+    """Apply mode/timestamps and return the stable timestamps represented."""
 
     desired_mode = stat.S_IMODE(metadata.st_mode)
     directory = stat.S_ISDIR(metadata.st_mode)
@@ -2058,7 +2111,10 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
             _verify_windows_entry_metadata(path, handle, metadata)
         finally:
             _windows_close_handle(handle)
-        return
+        return (
+            (metadata.st_atime_ns // 100) * 100,
+            (metadata.st_mtime_ns // 100) * 100,
+        )
 
     descriptor: int | None = None
     try:
@@ -2075,19 +2131,48 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> None:
                 descriptor,
                 ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
             )
-            restored = os.fstat(descriptor)
+            applied = os.fstat(descriptor)
+            _verify_stable_applied_entry_metadata(current, applied, desired_mode)
+            if (applied.st_atime_ns, applied.st_mtime_ns) != (
+                metadata.st_atime_ns,
+                metadata.st_mtime_ns,
+            ):
+                os.utime(
+                    descriptor,
+                    ns=(applied.st_atime_ns, applied.st_mtime_ns),
+                )
+                stable = os.fstat(descriptor)
+                _verify_stable_applied_entry_metadata(applied, stable, desired_mode)
+                if (stable.st_atime_ns, stable.st_mtime_ns) != (
+                    applied.st_atime_ns,
+                    applied.st_mtime_ns,
+                ):
+                    raise OSError(
+                        errno.EIO,
+                        "Filesystem did not apply stable entry timestamps",
+                    )
+            return applied.st_atime_ns, applied.st_mtime_ns
         finally:
             os.close(descriptor)
     else:
         raise AssertionError("POSIX metadata descriptor was not opened")
 
+    raise AssertionError("POSIX metadata descriptor did not return")
+
+
+def _verify_stable_applied_entry_metadata(
+    before: os.stat_result,
+    after: os.stat_result,
+    mode: int,
+) -> None:
+    """Reject non-timestamp drift around one retained entry metadata write."""
+
     if (
-        stat.S_IFMT(restored.st_mode) != stat.S_IFMT(metadata.st_mode)
-        or stat.S_IMODE(restored.st_mode) != desired_mode
-        or restored.st_atime_ns != metadata.st_atime_ns
-        or restored.st_mtime_ns != metadata.st_mtime_ns
+        not _same_entry_identity(before, after)
+        or stat.S_IMODE(after.st_mode) != mode
+        or before.st_size != after.st_size
     ):
-        raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
+        raise OSError(errno.EIO, "Entry changed while restoring metadata")
 
 
 def _verify_windows_entry_metadata(
@@ -2156,7 +2241,10 @@ def _verify_windows_metadata_values(
             )
     raise FilesystemError(f"Could not preserve exact entry metadata: {path}")
 
-def copy_entry_no_follow(source: Path, destination: Path) -> None:
+def copy_entry_no_follow(
+    source: Path,
+    destination: Path,
+) -> CopiedTimestampState:
     """Copy one entry recursively while preserving symlinks as symlinks."""
 
     kind = entry_kind(source)
@@ -2165,45 +2253,110 @@ def copy_entry_no_follow(source: Path, destination: Path) -> None:
     if lexists(destination):
         remove_entry_no_follow(destination)
     if kind == "symlink":
-        _copy_symlink(source, destination)
-        return
+        return {".": _copy_symlink(source, destination)}
     if kind == "file":
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _copy_file_preserve_stat(source, destination)
-        return
+        return {".": _copy_file_preserve_stat(source, destination)}
     if kind == "directory":
-        source_directories = _capture_directory_tree_metadata(source)
-        copied_directories: list[tuple[Path, Path]] = []
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            copied_directories.append((source, destination))
-            for child in iter_tree_no_follow(source):
-                relative = child.relative_to(source)
-                child_kind = entry_kind(child)
-                target = destination / relative
-                if child_kind == "directory":
-                    target.mkdir(parents=True, exist_ok=True)
-                    copied_directories.append((child, target))
-                elif child_kind == "file":
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    _copy_file_preserve_stat(child, target)
-                elif child_kind == "symlink":
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    _copy_symlink(child, target)
-                else:
-                    raise FilesystemError(
-                        f"Cannot preserve unsupported source entry type: {child}"
-                    )
-            for source_directory, target_directory in reversed(copied_directories):
-                _apply_entry_stat(target_directory, source_directories[source_directory])
-        finally:
-            for source_directory, metadata in reversed(tuple(source_directories.items())):
-                if not _restore_observed_path_atime(source_directory, metadata):
-                    raise ConcurrentSourceMutation(
-                        f"Source directory changed while it was copied: {source_directory}"
-                    )
-        return
+        return _copy_directory_no_follow(source, destination)
     raise FilesystemError(f"Cannot preserve unsupported source entry type: {source}")
+
+
+def _copy_directory_no_follow(
+    source: Path,
+    destination: Path,
+) -> CopiedTimestampState:
+    source_directories = _capture_directory_tree_metadata(source)
+    copied_directories: list[tuple[Path, Path]] = []
+    applied_timestamps: CopiedTimestampState = {}
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        copied_directories.append((source, destination))
+        for child in iter_tree_no_follow(source):
+            relative = child.relative_to(source)
+            child_kind = entry_kind(child)
+            target = destination / relative
+            if child_kind == "directory":
+                target.mkdir(parents=True, exist_ok=True)
+                copied_directories.append((child, target))
+            elif child_kind == "file":
+                target.parent.mkdir(parents=True, exist_ok=True)
+                applied_timestamps[relative.as_posix()] = _copy_file_preserve_stat(
+                    child, target
+                )
+            elif child_kind == "symlink":
+                target.parent.mkdir(parents=True, exist_ok=True)
+                applied_timestamps[relative.as_posix()] = _copy_symlink(child, target)
+            else:
+                raise FilesystemError(
+                    f"Cannot preserve unsupported source entry type: {child}"
+                )
+        _apply_copied_directory_metadata(
+            source,
+            source_directories,
+            copied_directories,
+            applied_timestamps,
+        )
+    finally:
+        _restore_copied_source_directory_atimes(
+            source,
+            source_directories,
+            applied_timestamps,
+        )
+    return applied_timestamps
+
+
+def _apply_copied_directory_metadata(
+    source: Path,
+    source_directories: Dict[Path, os.stat_result],
+    copied_directories: list[tuple[Path, Path]],
+    applied_timestamps: CopiedTimestampState,
+) -> None:
+    for source_directory, target_directory in reversed(copied_directories):
+        relative_key = (
+            "."
+            if source_directory == source
+            else source_directory.relative_to(source).as_posix()
+        )
+        destination_atime_ns, destination_mtime_ns = _apply_entry_stat(
+            target_directory,
+            source_directories[source_directory],
+        )
+        applied_timestamps[relative_key] = (
+            source_directories[source_directory].st_atime_ns,
+            destination_atime_ns,
+            destination_mtime_ns,
+        )
+
+
+def _restore_copied_source_directory_atimes(
+    source: Path,
+    source_directories: Dict[Path, os.stat_result],
+    applied_timestamps: CopiedTimestampState,
+) -> None:
+    for source_directory, metadata in reversed(tuple(source_directories.items())):
+        source_atime_ns = _restore_observed_path_atime_value(
+            source_directory,
+            metadata,
+        )
+        if source_atime_ns is None:
+            raise ConcurrentSourceMutation(
+                f"Source directory changed while it was copied: {source_directory}"
+            )
+        relative_key = (
+            "."
+            if source_directory == source
+            else source_directory.relative_to(source).as_posix()
+        )
+        if relative_key in applied_timestamps:
+            _source_atime, destination_atime, destination_mtime = (
+                applied_timestamps[relative_key]
+            )
+            applied_timestamps[relative_key] = (
+                source_atime_ns,
+                destination_atime,
+                destination_mtime,
+            )
 
 
 def copy_tree_contents_no_follow(source: Path, destination: Path) -> None:
@@ -2266,19 +2419,35 @@ def remove_entry_no_follow(path: Path) -> None:
 def hash_entry_no_follow(path: Path) -> Optional[str]:
     """Hash content, modes, entry kinds, and exact symlink target text."""
 
+    digest, _applied_atimes = _hash_entry_no_follow_with_atimes(path)
+    return digest
+
+
+def _hash_entry_no_follow_with_atimes(
+    path: Path,
+) -> tuple[Optional[str], Dict[str, int]]:
+    """Hash one entry and report bounded atime restoration results."""
+
     kind = entry_kind(path)
     if kind is None:
-        return None
+        return None, {}
     digest = hashlib.sha256()
-    _update_entry_hash(digest, path, Path("."))
+    applied_atimes: Dict[str, int] = {}
+    _update_entry_hash(digest, path, Path("."), applied_atimes)
     if kind == "directory":
         for child in iter_tree_no_follow(path):
-            _update_entry_hash(digest, child, child.relative_to(path))
-    return digest.hexdigest()
+            _update_entry_hash(
+                digest,
+                child,
+                child.relative_to(path),
+                applied_atimes,
+            )
+    return digest.hexdigest(), applied_atimes
 
 
 SourceTreeInventory = Dict[str, Tuple[str, int, int, Optional[str]]]
 ProtectedDirectoryMetadata = Dict[str, Tuple[int, int, int]]
+CopiedTimestampState = Dict[str, Tuple[int, int, int]]
 
 _MAX_PERSISTED_TIMESTAMP_NS = (1 << 63) - 1
 
@@ -2446,7 +2615,7 @@ def source_tree_inventory(root: Path) -> SourceTreeInventory:
                     else metadata.st_mtime_ns
                 )
                 if child.is_symlink():
-                    target, _link_metadata = _read_symlink_identity_bound(
+                    target, _link_metadata, _applied_atime = _read_symlink_identity_bound(
                         path,
                         operation="inventoried",
                     )
@@ -2513,6 +2682,102 @@ def source_tree_changes(
         elif before[path] != after[path]:
             changed.append(f"modified:{path}")
     return tuple(changed)
+
+
+def source_tree_changes_after_restore(
+    root: Path,
+    before: SourceTreeInventory,
+    after: SourceTreeInventory,
+) -> Tuple[str, ...]:
+    """Compare rollback state while accepting only stable timestamp representation.
+
+    Some filesystems can report subsecond creation mtimes but round every
+    explicit ``utime`` request. A recovery copy therefore cannot reproduce the
+    originally observed value even though its bytes, kind, and mode are exact.
+    Ordinary inventory comparison stays strict; this narrower comparison is
+    only for a completed restore and requires a fresh same-filesystem probe.
+    """
+
+    root = root.resolve(strict=True)
+    changed = []
+    for relative in sorted(set(before) | set(after)):
+        if relative not in before:
+            changed.append(f"created:{relative}")
+        elif relative not in after:
+            changed.append(f"deleted:{relative}")
+        elif before[relative] != after[relative] and not _restored_inventory_entry_matches(
+            root,
+            before[relative],
+            after[relative],
+        ):
+            changed.append(f"modified:{relative}")
+    return tuple(changed)
+
+
+def _restored_inventory_entry_matches(
+    root: Path,
+    before: Tuple[str, int, int, Optional[str]],
+    after: Tuple[str, int, int, Optional[str]],
+) -> bool:
+    if before[:2] + before[3:] != after[:2] + after[3:]:
+        return False
+    kind = before[0]
+    if kind not in {"file", "symlink"}:
+        return False
+    expected_mtime_ns = before[2]
+    represented = _probe_stable_mtime_representation(
+        root,
+        kind,
+        expected_mtime_ns,
+    )
+    return (
+        represented is not None
+        and represented != expected_mtime_ns
+        and after[2] == represented
+    )
+
+
+def _probe_stable_mtime_representation(
+    root: Path,
+    kind: str,
+    requested_mtime_ns: int,
+) -> int | None:
+    """Return a non-exact stable mtime representation on ``root``'s filesystem."""
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".sn-module-gen-timestamp-probe-",
+            dir=root.parent,
+        ) as temporary:
+            probe = Path(temporary) / "entry"
+            if kind == "file":
+                probe.write_bytes(b"")
+            elif kind == "symlink":
+                probe.symlink_to("target")
+            else:
+                return None
+            before = probe.lstat()
+            if before.st_dev != root.lstat().st_dev:
+                return None
+            os.utime(
+                probe,
+                ns=(before.st_atime_ns, requested_mtime_ns),
+                follow_symlinks=False,
+            )
+            applied = probe.lstat()
+            if applied.st_mtime_ns == requested_mtime_ns:
+                return None
+            os.utime(
+                probe,
+                ns=(applied.st_atime_ns, applied.st_mtime_ns),
+                follow_symlinks=False,
+            )
+            stable = probe.lstat()
+            if stable.st_mtime_ns != applied.st_mtime_ns:
+                return None
+            return applied.st_mtime_ns
+    except (NotImplementedError, OSError):
+        return None
 
 
 def protected_source_snapshot_roots(root: Path) -> Tuple[Path, ...]:
@@ -3494,7 +3759,7 @@ def _open_symlink_metadata_authority(
     if sys.platform == "darwin":
         # Darwin's O_SYMLINK is intentionally not exposed by every supported
         # Python, but it opens the link object itself rather than its target.
-        descriptor = os.open(path, os.O_RDONLY | 0x00200000)
+        descriptor = _open_read_descriptor(path, os.O_RDONLY | 0x00200000)
         opened = os.fstat(descriptor)
         if not _same_observed_entry(expected, opened):
             os.close(descriptor)
@@ -3503,7 +3768,7 @@ def _open_symlink_metadata_authority(
             )
         return ("darwin", descriptor)
     if hasattr(os, "O_PATH") and hasattr(os, "O_NOFOLLOW"):
-        descriptor = os.open(
+        descriptor = _open_read_descriptor(
             path,
             getattr(os, "O_PATH") | getattr(os, "O_NOFOLLOW"),
         )
@@ -3530,6 +3795,40 @@ def _apply_symlink_authority_metadata(
     metadata: os.stat_result,
     *,
     atime_only: bool = False,
+) -> int:
+    _set_symlink_authority_metadata(authority, metadata, atime_only=atime_only)
+    kind, value = authority
+    if kind == "windows":
+        return (metadata.st_atime_ns // 100) * 100
+
+    applied = os.fstat(value)
+    timestamp_changed = applied.st_atime_ns != metadata.st_atime_ns or (
+        not atime_only and applied.st_mtime_ns != metadata.st_mtime_ns
+    )
+    if timestamp_changed:
+        _set_symlink_authority_metadata(
+            authority,
+            applied,
+            atime_only=atime_only,
+        )
+        stable = os.fstat(value)
+        if (
+            not _same_entry_identity(applied, stable)
+            or stable.st_atime_ns != applied.st_atime_ns
+            or (not atime_only and stable.st_mtime_ns != applied.st_mtime_ns)
+        ):
+            raise OSError(
+                errno.EIO,
+                "Filesystem did not apply stable symbolic-link timestamps",
+            )
+    return applied.st_atime_ns
+
+
+def _set_symlink_authority_metadata(
+    authority: tuple[str, int],
+    metadata: os.stat_result,
+    *,
+    atime_only: bool,
 ) -> None:
     kind, value = authority
     if kind == "windows":
@@ -3652,7 +3951,7 @@ def _read_symlink_identity_bound(
     path: Path,
     *,
     operation: str,
-) -> tuple[str, os.stat_result]:
+) -> tuple[str, os.stat_result, int]:
     before, authority = _open_read_symlink_authority(path, operation)
     try:
         target = _read_symlink_authority_target(authority)
@@ -3661,14 +3960,14 @@ def _read_symlink_identity_bound(
             raise ConcurrentSourceMutation(
                 f"Source symbolic link changed while it was {operation}: {path}"
             )
-        _restore_symlink_observation_atime(
+        applied_atime_ns = _restore_symlink_observation_atime(
             path,
             operation,
             authority,
             before,
             after,
         )
-        return target, before
+        return target, before, applied_atime_ns
     finally:
         _close_symlink_metadata_authority(authority)
 
@@ -3706,21 +4005,26 @@ def _restore_symlink_observation_atime(
     authority: tuple[str, int],
     before: os.stat_result,
     after: os.stat_result,
-) -> None:
+) -> int:
     if after.st_atime_ns == before.st_atime_ns:
-        return
-    _apply_symlink_authority_metadata(authority, before, atime_only=True)
+        return after.st_atime_ns
+    applied_atime_ns = _apply_symlink_authority_metadata(
+        authority,
+        before,
+        atime_only=True,
+    )
     restored = path.lstat()
     if not _same_observed_entry(before, restored) or (
-        restored.st_atime_ns != before.st_atime_ns
+        restored.st_atime_ns != applied_atime_ns
     ):
         raise ConcurrentSourceMutation(
             f"Source symbolic link changed while it was {operation}: {path}"
         )
+    return restored.st_atime_ns
 
 
-def _copy_symlink(source: Path, destination: Path) -> None:
-    target, source_metadata = _read_symlink_identity_bound(
+def _copy_symlink(source: Path, destination: Path) -> tuple[int, int, int]:
+    target, source_metadata, source_atime_ns = _read_symlink_identity_bound(
         source,
         operation="read",
     )
@@ -3739,13 +4043,14 @@ def _copy_symlink(source: Path, destination: Path) -> None:
         if authority is not None:
             try:
                 _apply_symlink_authority_metadata(authority, source_metadata)
+                applied = os.fstat(authority[1])
                 retained_target = _read_symlink_authority_target(authority)
                 # Reading the retained link text can itself advance the link's
                 # access time on Linux.  Restore only that field through the
                 # same retained link identity before publishing success.
                 _apply_symlink_authority_metadata(
                     authority,
-                    source_metadata,
+                    applied,
                     atime_only=True,
                 )
                 live = destination.lstat()
@@ -3754,15 +4059,23 @@ def _copy_symlink(source: Path, destination: Path) -> None:
                     or not _same_entry_identity(destination_metadata, live)
                     or stat.S_IMODE(live.st_mode)
                     != stat.S_IMODE(source_metadata.st_mode)
-                    or live.st_atime_ns != source_metadata.st_atime_ns
-                    or live.st_mtime_ns != source_metadata.st_mtime_ns
+                    or live.st_atime_ns != applied.st_atime_ns
+                    or live.st_mtime_ns != applied.st_mtime_ns
                 ):
                     raise ConcurrentSourceMutation(
                         "Destination symbolic link changed while it was copied: "
                         f"{destination}"
                     )
+                return (
+                    source_atime_ns,
+                    applied.st_atime_ns,
+                    applied.st_mtime_ns,
+                )
             finally:
                 _close_symlink_metadata_authority(authority)
+        raise SymlinkPreservationError(
+            f"Could not retain destination symbolic-link authority: {destination}"
+        )
     except OSError as exc:
         raise SymlinkPreservationError(
             f"Could not preserve symbolic link {source} -> {target!r}. "
@@ -3770,7 +4083,10 @@ def _copy_symlink(source: Path, destination: Path) -> None:
         ) from exc
 
 
-def _copy_file_preserve_stat(source: Path, destination: Path) -> None:
+def _copy_file_preserve_stat(
+    source: Path,
+    destination: Path,
+) -> tuple[int, int, int]:
     """Copy a regular file without letting the read change captured atime."""
 
     if lexists(destination):
@@ -3781,7 +4097,12 @@ def _copy_file_preserve_stat(source: Path, destination: Path) -> None:
         destination_descriptor = _open_copy_destination(destination, metadata)
         _copy_descriptor_bytes(source_descriptor, destination_descriptor)
         os.fsync(destination_descriptor)
-        if not _finish_observed_atime(source, source_descriptor, metadata):
+        source_atime_ns = _finish_observed_atime_value(
+            source,
+            source_descriptor,
+            metadata,
+        )
+        if source_atime_ns is None:
             raise ConcurrentSourceMutation(
                 f"Source file changed while it was copied: {source}"
             )
@@ -3792,6 +4113,7 @@ def _copy_file_preserve_stat(source: Path, destination: Path) -> None:
             raise ConcurrentSourceMutation(
                 f"Destination file changed while it was copied: {destination}"
             )
+        return source_atime_ns, retained.st_atime_ns, retained.st_mtime_ns
     except BaseException:
         _cleanup_failed_file_copy(
             destination,
@@ -3857,8 +4179,27 @@ def _apply_descriptor_metadata(
     if _windows_host():
         _windows_apply_handle_metadata(_windows_descriptor_handle(descriptor), metadata)
         return
-    os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
+    before = os.fstat(descriptor)
+    desired_mode = stat.S_IMODE(metadata.st_mode)
+    os.fchmod(descriptor, desired_mode)
     os.utime(descriptor, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    applied = os.fstat(descriptor)
+    _verify_stable_applied_entry_metadata(before, applied, desired_mode)
+    if (applied.st_atime_ns, applied.st_mtime_ns) != (
+        metadata.st_atime_ns,
+        metadata.st_mtime_ns,
+    ):
+        os.utime(descriptor, ns=(applied.st_atime_ns, applied.st_mtime_ns))
+        stable = os.fstat(descriptor)
+        _verify_stable_applied_entry_metadata(applied, stable, desired_mode)
+        if (stable.st_atime_ns, stable.st_mtime_ns) != (
+            applied.st_atime_ns,
+            applied.st_mtime_ns,
+        ):
+            raise OSError(
+                errno.EIO,
+                "Filesystem did not apply stable file timestamps",
+            )
 
 
 def _symlink_is_directory(path: Path, metadata: os.stat_result | None = None) -> bool:
@@ -3875,7 +4216,12 @@ def _symlink_is_directory(path: Path, metadata: os.stat_result | None = None) ->
     )
 
 
-def _update_entry_hash(digest: _Digest, path: Path, relative: Path) -> None:
+def _update_entry_hash(
+    digest: _Digest,
+    path: Path,
+    relative: Path,
+    applied_atimes: Dict[str, int] | None = None,
+) -> None:
     metadata = path.lstat()
     kind = entry_kind(path)
     digest.update(relative.as_posix().encode("utf-8"))
@@ -3890,10 +4236,17 @@ def _update_entry_hash(digest: _Digest, path: Path, relative: Path) -> None:
     digest.update(f"{mode:o}".encode("ascii"))
     digest.update(b"\0")
     if kind == "symlink":
-        target, _before = _read_symlink_identity_bound(path, operation="hashed")
+        target, _before, applied_atime_ns = _read_symlink_identity_bound(
+            path,
+            operation="hashed",
+        )
+        if applied_atimes is not None:
+            applied_atimes[relative.as_posix()] = applied_atime_ns
         digest.update(os.fsencode(target))
     elif kind == "file":
-        _update_digest_from_file(digest, path)
+        applied_atime_ns = _update_digest_from_file(digest, path)
+        if applied_atimes is not None:
+            applied_atimes[relative.as_posix()] = applied_atime_ns
 
 
 def _file_sha256(path: Path) -> str:
@@ -3902,7 +4255,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _update_digest_from_file(digest: _Digest, path: Path) -> None:
+def _update_digest_from_file(digest: _Digest, path: Path) -> int:
     """Hash a file while restoring any access-time side effect of reading it."""
 
     descriptor, before = _open_observed(path)
@@ -3914,10 +4267,12 @@ def _update_digest_from_file(digest: _Digest, path: Path) -> None:
             if not chunk:
                 break
             digest.update(chunk)
-        if not _finish_observed_atime(path, descriptor, before):
+        applied_atime_ns = _finish_observed_atime_value(path, descriptor, before)
+        if applied_atime_ns is None:
             raise ConcurrentSourceMutation(
                 f"Source file changed while it was hashed: {path}"
             )
+        return applied_atime_ns
     finally:
         _close_descriptor(descriptor)
 

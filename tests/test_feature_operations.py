@@ -1,6 +1,10 @@
 import json
+import os
 from pathlib import Path
 
+import pytest
+
+import supernote_module_generator.filesystem as filesystem_module
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.feature_operations import FeatureOperationService
@@ -51,6 +55,42 @@ def test_add_regenerates_one_shared_registry(tmp_path: Path):
     assert "namespace supernote_feature_Alpha" in alpha_source
     assert "namespace supernote_feature_Beta" in beta_source
     assert "namespace supernote_feature_Beta" not in alpha_source
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX timestamp precision fixture")
+def test_add_accepts_stable_coarse_filesystem_timestamps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = plugin(tmp_path)
+    requested = (
+        1_788_523_464_419_500_292,
+        1_788_523_465_519_600_393,
+    )
+    for path in (
+        root / "android/settings.gradle",
+        root / "android/app/build.gradle",
+        root / "package.json",
+    ):
+        os.utime(path, ns=requested)
+    original_utime = os.utime
+
+    def rounded_utime(path, *, ns, **options):
+        original_utime(
+            path,
+            ns=tuple(value // 1_000_000_000 * 1_000_000_000 for value in ns),
+            **options,
+        )
+
+    monkeypatch.setattr(filesystem_module.os, "utime", rounded_utime)
+    service = FeatureOperationService(root)
+
+    alpha = service.add(config(root, "alpha"))
+    beta = service.add(config(root, "beta"))
+
+    assert alpha.is_dir()
+    assert beta.is_dir()
+    assert not (root / ".supernote-module-transaction.json").exists()
 
 def test_jvm_only_feature_is_scaffolded_for_ksp_without_python_source_parsing(
     tmp_path: Path,

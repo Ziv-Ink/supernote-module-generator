@@ -6,6 +6,20 @@ should also check their installed version with `sn-module-gen --version`.
 
 ## Unreleased
 
+## 0.1.2 - 2026-09-05
+
+- Use the stable timestamp representation actually stored by the host filesystem
+  for files, directories, and symlinks, avoiding false concurrent-modification
+  failures when timestamps are rounded or otherwise coarsened.
+- Keep feature staging and backup component names within restrictive filesystem
+  limits such as eCryptFS `NAME_MAX=143`, including for the longest accepted
+  feature and package names.
+- Verify completed rollback against the filesystem's stable timestamp
+  representation while retaining strict checks for content, type, mode, and
+  size.
+- Reject a recovery copy if its source was atomically replaced by a different
+  device/inode identity, even when content and other visible metadata match.
+
 ## 0.1.1 - 2026-09-04
 
 - Accept stable timestamp values applied by filesystems that cannot reproduce
