@@ -106,6 +106,7 @@ def test_release_license_and_manifest_are_present():
     assert "include README.md" in manifest
     assert "include CHANGELOG.md" in manifest
     assert "include CONTRIBUTING.md" in manifest
+    assert "include .gitattributes" in manifest
     assert "recursive-include docs *.md" in manifest
     assert "recursive-include .github *.yml" in manifest
     assert "recursive-include maintainers *" in manifest
@@ -672,6 +673,7 @@ def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(
         package.extractall(unpacked)
     root = next(unpacked.iterdir())
     required = (
+        ".gitattributes",
         ".github/workflows/quality.yml",
         "maintainers/release-notes-v0.1.3.md",
         "npm/supernote-runtime/runtime-manifest.json",
@@ -679,8 +681,10 @@ def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(
         "src/supernote_module_generator/node/resolve-packages.js",
         "tests/test_q5_installed_qualification.py",
         "tests/test_q5_combined_installed_acceptance.py",
+        "tests/test_hosted_qualification.py",
     )
     assert all((root / relative).is_file() for relative in required)
+    assert (root / ".gitattributes").read_bytes() == (ROOT / ".gitattributes").read_bytes()
     assert not (root / "evidence").exists()
     assert not (root / "AGENTS.md").exists()
     subprocess.run(
@@ -692,6 +696,7 @@ def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(
             "tests/test_packaging.py::test_package_contains_only_the_active_workflow_and_runtime_templates",
             "tests/test_release_qualification.py::test_reusable_release_gate_covers_platforms_compileall_and_coverage",
             "tests/test_release_qualification.py::test_release_gate_is_generator_only_and_uses_installed_artifacts",
+            "tests/test_hosted_qualification.py",
         ),
         cwd=root,
         check=True,
