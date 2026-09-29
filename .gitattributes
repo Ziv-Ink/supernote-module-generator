@@ -1,0 +1,2 @@
+# Runtime manifest hashes describe the distributed LF bytes on every host.
+/npm/supernote-runtime/** text=auto eol=lf

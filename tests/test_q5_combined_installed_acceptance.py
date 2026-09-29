@@ -1243,12 +1243,13 @@ tasks.register('runHarness', JavaExec) {
         + '\n  println("Q5_HOST_JVM_EXECUTION=Kotlin:K,Java:J,Mixed:M")\n}\n',
     )
     gradle = Path(os.environ["SUPERNOTE_GRADLE_COMMAND"])
+    # Fresh hosted runners must resolve pinned AGP/Kotlin dependencies. The
+    # immutable npm inputs and consumer generator/KSP guards remain enforced.
     result = _run(
         (
             gradle,
             "--no-daemon",
             "--console=plain",
-            "--offline",
             "-p",
             consumer / "android",
             "-PsupernoteModuleCmakeVersion=4.1.2",
