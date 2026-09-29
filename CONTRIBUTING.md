@@ -27,7 +27,6 @@ python3 -m ruff check src/supernote_module_generator/cpp_source_routing.py --sel
 python3 -m ruff check src/supernote_module_generator/jsi_binding_decisions.py --select C901
 python3 -m ruff check src/supernote_module_generator/cpp_type_syntax.py --select C901
 python3 -m ruff check src/supernote_module_generator/binding_codegen.py --select C901
-python3 -m ruff check src/supernote_module_generator/template_contract.py --select C901
 python3 -m ruff check src/supernote_module_generator/windows_authority.py --select C901
 python3 ci/check_filesystem_complexity.py
 python3 ci/check_transaction_complexity.py
@@ -70,13 +69,12 @@ copyability, stream separation, machine output, keyboard safety, or recovery.
 ## Test layers and confidence
 
 - Unit tests cover parsing, naming, source and semantic projection, typed
-  lowering/code generation, rendering, transactions, and generated file shape.
-- Integration tests cover CLI lifecycle behavior against temporary plugin
-  roots, parent wiring, source preservation, rollback, and documentation
-  artifacts.
-- Android fixture tests must compile the single plugin-level generated runtime with
-  mixed C/C++ and Kotlin/Java feature input. Do not describe Python-only tests
-  or generated-text checks as Android compilation proof.
+  lowering/code generation, rendering, publication, and generated file shape.
+- Integration tests cover CLI lifecycle behavior against temporary generator
+  roots, source preservation, rerunnable publication, and documentation artifacts.
+- Installed-consumer tests compile generated C/C++ and Kotlin/Java artifacts in
+  immutable consumer roots. Do not describe Python-only tests or generated-text
+  checks as generated-code compilation proof.
 - Device tests are relevant only when qualifying generated runtime integration,
   especially JSI. Record firmware, PluginHost, ABI, SELinux mode, commands, and
   logs; distinguish generated, compiled, loaded, and executed outcomes.
@@ -137,7 +135,6 @@ python3 -m ruff check src/supernote_module_generator/cpp_source_routing.py --sel
 python3 -m ruff check src/supernote_module_generator/jsi_binding_decisions.py --select C901
 python3 -m ruff check src/supernote_module_generator/cpp_type_syntax.py --select C901
 python3 -m ruff check src/supernote_module_generator/binding_codegen.py --select C901
-python3 -m ruff check src/supernote_module_generator/template_contract.py --select C901
 python3 -m ruff check src/supernote_module_generator/windows_authority.py --select C901
 python3 ci/check_filesystem_complexity.py
 python3 ci/check_transaction_complexity.py
@@ -164,12 +161,16 @@ are below the ceiling. Mypy is intentionally gradual: its checked-in file list
 covers the public identity, semantic types/IR, artifact-plan, integrity-manifest,
 C++ lexical, declaration, member-segmentation, member-decision, member-shape,
 class-definition, free-function, global-function, source-family, and type-syntax
-source models, JSI binding decisions, transaction, command-result, and public CLI
+source models, JSI binding decisions, command-result, and public CLI
 grammar contracts. Expand that list only after the new boundary is clean; do
 not weaken the existing boundary to admit a new error.
 
 Also inspect `git diff --stat` and generated samples. A successful Python suite
-does not prove Android compilation or device runtime behavior; report the exact
+does not prove generated-code execution. For delivery changes, also install the
+canonical wheel outside the checkout, rebuild and install a wheel from the
+source distribution, and run the installed publisher/immutable-consumer tests
+documented in `docs/TESTING.md`. Template and app build/package/deploy scripts
+are separate product surfaces, not generator validation. Report the exact
 validation tier completed.
 
 ## Repository boundaries

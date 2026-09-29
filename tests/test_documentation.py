@@ -145,11 +145,20 @@ def test_root_readme_explains_the_public_model():
     assert "no V2 users or migration requirements" not in readme
     assert "development line for first-class native objects" not in readme
     assert "C23" in readme and "C++23" in readme
-    assert "--delete-build-files" in readme
-    assert "plugin root's optional `devconfig.json`" in readme
-    assert "preserves the corresponding launch-environment value" in normalized_readme
-    assert "do not change the parent shell" in normalized_readme
-    assert "do not change the parent shell or `android/local.properties` on disk" in normalized_readme
+    assert "sn-module-gen update --yes" in readme
+    assert "sn-module-gen validate" in readme
+    assert "prints the npm/Yarn dependency command" in normalized_readme
+    assert "Authors own source, `package.json`, lockfiles" in normalized_readme
+    assert "There is no generator `remove`" in normalized_readme
+    assert "nodeLinker: node-modules" in readme
+    for retired in (
+        "--delete-build-files",
+        "sn-module-gen update document",
+        "sn-module-gen validate --all",
+        "sn-module-gen doctor --build",
+        "sn-module-gen template sync",
+    ):
+        assert retired not in readme
     assert (
         "destroys C++ receivers and resources away from the JavaScript thread"
         in " ".join(readme.split())
@@ -161,30 +170,27 @@ def test_root_readme_explains_the_public_model():
 def test_initial_feature_readme_is_package_specific_and_generation_owned(
     tmp_path: Path,
 ):
-    from supernote_module_generator.feature_generator import (
-        FeatureConfig,
-        stage_feature,
-    )
-    from supernote_module_generator.feature_model import StarterFamily
+    from supernote_module_generator.readme_codegen import render_feature_readme
+    from supernote_module_generator.semantic import SemanticApi
 
-    feature = stage_feature(
-        FeatureConfig(
-            output=tmp_path / "typed-feature",
-            npm_name="typed-feature",
-            package_version="4.0.0-dev.0",
-            public_name="TypedFeature",
-            android_namespace="com.example.typed_feature",
-            starters=(StarterFamily.NATIVE, StarterFamily.JVM),
-        )
+    readme = render_feature_readme(
+        npm_name="typed-feature",
+        public_name="TypedFeature",
+        description="",
+        generator_version="0.1.3",
+        implementation_roots=(
+            ("C/C++", "android/src/main/cpp"),
+            ("Kotlin/Java", "android/src/main/java"),
+        ),
+        api=SemanticApi(),
     )
-    readme = (feature / "README.md").read_text(encoding="utf-8")
 
     assert "import TypedFeature from 'typed-feature';" in readme
-    assert "C/C++: `android/src/main/cpp/`" in readme
-    assert "Kotlin/Java: `android/src/main/java/`" in readme
+    assert "C/C++: `android/src/main/cpp`" in readme
+    assert "Kotlin/Java: `android/src/main/java`" in readme
     assert "No JavaScript-public declarations are currently generated" in readme
-    assert "sn-module-gen update typed-feature" in readme
-    assert "replace this README and `index.d.ts`" in readme
+    assert "sn-module-gen update\n" in readme
+    assert "Plain update replaces this generated README and `index.d.ts`" in readme
     assert "Cross-family native-object proxies" not in readme
     assert "/wiki/Managing-Modules" in readme
     assert "/wiki/Error-Handling" in readme
@@ -226,14 +232,17 @@ def test_accepted_policies_forbid_positive_legacy_migration_claims():
 
 def test_release_guide_uses_the_language_neutral_feature_model():
     guide = (ROOT / "maintainers/releasing.md").read_text(encoding="utf-8")
-    assert "C/C++ starter" in guide
-    assert "Kotlin/Java starter" in guide
-    assert "one plugin runtime component" in guide
-    assert "exact release commit" in guide
-    assert "true no-op" in guide
-    assert "Gradle, KSP, Kotlin, CMake, JNI, and JSI" in guide
-    assert "official plugin build and package-verification scripts" in guide
-    assert "never rebuilds an unqualified artifact" in guide
+    normalized = " ".join(guide.split())
+    assert "C++, Kotlin, Java, and mixed authored features" in normalized
+    assert "production-generated module/runtime payloads" in normalized
+    assert "immutable tarballs" in normalized
+    assert "exact release commit" in normalized
+    assert "byte-identical to the directly" in normalized
+    assert "CMake 3.24.4" in normalized
+    assert "consumer KSP is absent" in normalized
+    assert "app build/package/deploy scripts" in normalized
+    assert "separate products" in normalized
+    assert "never rebuilds an unqualified artifact" in normalized
     assert "all three module types" not in guide
     assert "Add a Module" not in guide
 
@@ -270,15 +279,13 @@ def test_cli_identifies_an_existing_plugin_as_the_product_boundary():
 
 def test_update_help_and_ownership_adr_describe_the_active_plan_contract():
     update_help = COMMAND_HELP["update"]
-    ownership_adr = (
-        ROOT / "architecture/decisions/0001-generated-ownership-and-transactions.md"
-    ).read_text(encoding="utf-8")
 
-    assert "one or all managed features" in ROOT_HELP
-    assert "--all selects the complete managed project" in update_help
-    assert "update --all --dry-run" in update_help
-    assert "read-only `--dry-run` plan" in ownership_adr
-    assert "does not offer\na dry-run" not in ownership_adr
+    assert "Regenerate every feature" in ROOT_HELP
+    assert "renders every module and shared runtime" in update_help
+    assert "never installs dependencies" in update_help
+    assert "runs an app build" in update_help
+    assert "--all" not in update_help
+    assert "--dry-run" not in update_help
 
 
 def test_jsi_is_supported_without_overstating_runtime_availability():
@@ -292,6 +299,8 @@ def test_jsi_is_supported_without_overstating_runtime_availability():
     combined = "\n".join(path.read_text(encoding="utf-8") for path in current_material)
     lower = combined.lower()
     assert "experimental" not in lower
-    assert "not that a particular Supernote firmware" in combined
+    assert "do not prove that a particular Supernote firmware" in " ".join(
+        combined.split()
+    )
     for runtime_constraint in ("compile", "pluginhost", "selinux"):
         assert runtime_constraint in lower

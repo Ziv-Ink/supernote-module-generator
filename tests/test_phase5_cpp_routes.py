@@ -266,6 +266,7 @@ std::vector<std::byte> echoBytes(std::vector<std::byte> value) {
     assert "BigInt::fromInt64" in source
     assert "supernote_copy_uint8_array" in source
     assert "supernote_array_has_own_index" in source
+    assert "supernote_object_has_own_property" in source
     own_index = source.index("if (!supernote_array_has_own_index")
     item_read = source.index("array.getValueAtIndex", own_index)
     assert own_index < item_read
@@ -303,6 +304,15 @@ std::vector<std::byte> echoBytes(std::vector<std::byte> value) {
         assert "supernote_copy_uint8_array" not in preflight
         assert "std::vector<std::byte> result" not in preflight
     assert 'range ? "LIMIT_EXCEEDED" : "TYPE_MISMATCH"' in source
+    assert (
+        '"LIMIT_EXCEEDED", failure.path(),\n'
+        '        "within generated conversion limits", "rejected"'
+    ) in source
+    assert (
+        '"OUT_OF_RANGE", path, "int32", '
+        "supernote_describe_value(runtime, value)"
+    ) in source
+    assert '"MISSING_FIELD", field_0_path, "present field", "missing"' in source
     assert "supernote_make_uint8_array" in source
     assert "supernote_module_throw_conversion_failure" in source
     assert "supernote_validate_js_" in source

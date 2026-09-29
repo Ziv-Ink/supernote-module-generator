@@ -2,32 +2,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 import shutil
 import subprocess
-import time
 from typing import Dict, Iterable, Mapping, Tuple
 
-from .diagnostics import relevant_diagnostic_lines, write_process_diagnostics
 from .errors import FilesystemError
 from .filesystem import (
     contained_entry_kind_no_follow,
-    protected_directory_metadata,
     read_regular_bytes_no_follow,
-    restore_protected_directory_metadata,
-    source_tree_changes,
-    source_tree_inventory,
 )
 from .generation_plan import ArtifactAction
 from .generation_service import GenerationService
+from .integrity_manifest import INCOMPLETE_MARKER_PATH
 from .jvm_manifest import JvmSourceManifest
 from .models import SubprocessError
-from .platform_tools import gradle_wrapper_command, gradle_wrapper_path
 from .project_model import ProjectFeature, ProjectModel
-from .project import dependency_link_path, dependency_value, read_parent_package
 from .semantic import SemanticApi
-from .subprocesses import run_process
 
 
 @dataclass(frozen=True)
@@ -71,15 +62,7 @@ class GeneratedProjectValidationResult:
     build_error: SubprocessError | None = None
     diagnostics: Tuple[str, ...] = ()
     build_duration_ms: int = 0
-
-
-@dataclass(frozen=True)
-class _BuildResult:
-    status: str
-    issues: Tuple[ValidationIssue, ...]
-    error: SubprocessError | None
-    diagnostics: Tuple[str, ...]
-    duration_ms: int
+    dependency_link: str = "not_requested"
 
 
 class GeneratedProjectValidator:
@@ -91,19 +74,40 @@ class GeneratedProjectValidator:
         *,
         jvm_apis: Mapping[str, SemanticApi] | None = None,
         jvm_manifests: Mapping[str, JvmSourceManifest] | None = None,
-        build: bool = False,
-        validate_dependencies: bool = False,
-        parent_transaction_id: str | None = None,
+        jvm_adapter_sources: Mapping[str, bytes] | None = None,
+        include_dependencies: bool = True,
     ) -> GeneratedProjectValidationResult:
+        incomplete_kind = contained_entry_kind_no_follow(
+            self.root, self.root / INCOMPLETE_MARKER_PATH
+        )
+        incomplete_issue = (
+            ValidationIssue(
+                "SNMG_GENERATION_INCOMPLETE",
+                "error",
+                "generated artifact",
+                "generated publication is incomplete; rerun plain `sn-module-gen update`",
+                path=INCOMPLETE_MARKER_PATH,
+                expected="absent",
+                actual=incomplete_kind,
+                suggested_command="sn-module-gen update",
+            )
+            if incomplete_kind is not None
+            else None
+        )
         try:
             project = ProjectModel.discover(self.root)
             plan = GenerationService(self.root).plan(
-                operation="check",
+                operation="validate",
                 requested_targets=(
                     feature.identity.npm_name for feature in project.features
                 ),
                 jvm_apis=jvm_apis,
                 jvm_manifests=jvm_manifests,
+                jvm_adapter_sources=(
+                    jvm_adapter_sources
+                    if jvm_adapter_sources is not None
+                    else getattr(jvm_manifests, "adapter_sources", {})
+                ),
             )
         except Exception as exc:
             issue = ValidationIssue(
@@ -111,14 +115,21 @@ class GeneratedProjectValidator:
                 "error",
                 "user source",
                 str(exc),
-                suggested_command="Fix the reported source/configuration issue and rerun sn-module-gen check.",
+                suggested_command=(
+                    "Fix the reported source/configuration issue and rerun plain "
+                    "`sn-module-gen validate`."
+                ),
             )
-            return GeneratedProjectValidationResult("failure", None, (issue,))
+            return GeneratedProjectValidationResult(
+                "failure",
+                None,
+                tuple(item for item in (incomplete_issue, issue) if item is not None),
+            )
         features_by_path = {
             feature.root.relative_to(self.root).as_posix(): feature
             for feature in project.features
         }
-        issues = []
+        issues = [incomplete_issue] if incomplete_issue is not None else []
         for change in plan.changes:
             artifact = change.artifact
             feature = _feature_for_path(features_by_path, change.path)
@@ -150,241 +161,31 @@ class GeneratedProjectValidator:
                     path=change.path,
                     expected=(artifact.sha256 if artifact is not None else "absent"),
                     actual="missing" if change.action is ArtifactAction.CREATE else "different",
-                    suggested_command="sn-module-gen update --all",
-                )
-            )
-        for action in plan.wiring_actions:
-            if any(action.path in message for message in plan.wiring_issues):
-                continue
-            issues.append(
-                ValidationIssue(
-                    "SNMG_WIRING_INVALID",
-                    "error",
-                    "runtime",
-                    f"runtime wiring is not canonical: {action.path}",
-                    path=action.path,
-                    expected="canonical marker block",
-                    actual="different",
-                    suggested_command="sn-module-gen repair --dry-run",
-                )
-            )
-        for message in plan.wiring_issues:
-            issues.append(
-                ValidationIssue(
-                    "SNMG_WIRING_INVALID",
-                    "error",
-                    "runtime",
-                    message,
-                    suggested_command="Fix the malformed marker structure, then run sn-module-gen repair --dry-run.",
+                    suggested_command="sn-module-gen update",
                 )
             )
         issues.extend(self._javascript_issues(project))
-        if validate_dependencies:
-            issues.extend(self._dependency_issues(project))
+        dependency_status = "not_requested"
+        if include_dependencies:
+            from .npm_package_validation import validate_author_package_inputs
+
+            dependency_issues = validate_author_package_inputs(self.root, project)
+            issues.extend(dependency_issues)
+            dependency_status = "failed" if dependency_issues else "passed"
         deduplicated = _deduplicate(issues)
         if deduplicated:
             return GeneratedProjectValidationResult(
-                "failure", plan.generation_id, deduplicated
-            )
-        build_status = "not_run"
-        build_diagnostics: Tuple[str, ...] = ()
-        build_duration_ms = 0
-        if build:
-            # Compilation is deliberately additive and begins only after the
-            # authoritative integrity/syntax stages have succeeded.
-            build_result = self._build(
+                "failure",
                 plan.generation_id,
-                parent_transaction_id=parent_transaction_id,
+                deduplicated,
+                dependency_link=dependency_status,
             )
-            if build_result.status != "passed":
-                return GeneratedProjectValidationResult(
-                    "failure",
-                    plan.generation_id,
-                    build_result.issues,
-                    "failed",
-                    build_result.error,
-                    build_result.diagnostics,
-                    build_result.duration_ms,
-                )
-            build_status = "passed"
-            build_diagnostics = build_result.diagnostics
-            build_duration_ms = build_result.duration_ms
         return GeneratedProjectValidationResult(
             "success",
             plan.generation_id,
             (),
-            build_status,
-            diagnostics=build_diagnostics,
-            build_duration_ms=build_duration_ms,
-        )
-
-    def _dependency_issues(self, project: ProjectModel) -> list[ValidationIssue]:
-        _, package = read_parent_package(self.root)
-        dependencies = package.get("dependencies", {})
-        issues = []
-        for feature in project.features:
-            npm_name = feature.identity.npm_name
-            expected = dependency_value(npm_name)
-            actual = (
-                dependencies.get(npm_name)
-                if isinstance(dependencies, dict)
-                else None
-            )
-            if actual != expected:
-                issues.append(
-                    ValidationIssue(
-                        "SNMG_DEPENDENCY_INVALID",
-                        "error",
-                        "feature",
-                        f"{npm_name} is not linked from package.json",
-                        feature_id=feature.identity.feature_id,
-                        path="package.json",
-                        expected=expected,
-                        actual=str(actual) if actual is not None else "missing",
-                        suggested_command="sn-module-gen update --all",
-                    )
-                )
-            link = dependency_link_path(self.root, npm_name)
-            try:
-                linked = link.exists() and link.resolve() == feature.root.resolve()
-            except OSError:
-                linked = False
-            if not linked:
-                issues.append(
-                    ValidationIssue(
-                        "SNMG_DEPENDENCY_LINK_MISSING",
-                        "error",
-                        "feature",
-                        f"{npm_name} is not installed in node_modules",
-                        feature_id=feature.identity.feature_id,
-                        path=link.relative_to(self.root).as_posix(),
-                        expected=feature.root.relative_to(self.root).as_posix(),
-                        actual="missing or incorrect link",
-                        suggested_command="npm install",
-                    )
-                )
-        return issues
-
-    def _build(
-        self,
-        generation_id: str,
-        *,
-        parent_transaction_id: str | None,
-    ) -> _BuildResult:
-        try:
-            before_directories = protected_directory_metadata(self.root)
-            before = source_tree_inventory(self.root)
-            wrapper = gradle_wrapper_path(self.root)
-            command = gradle_wrapper_command(wrapper, [":app:assembleDebug"])
-        except Exception as exc:
-            issue = ValidationIssue(
-                "SNMG_BUILD_PREFLIGHT_FAILED",
-                "error",
-                "toolchain",
-                f"Android build preflight failed: {exc}",
-                suggested_command="Restore the Android Gradle wrapper and rerun sn-module-gen check --build.",
-            )
-            return _BuildResult("failed", (issue,), None, (), 0)
-
-        started = time.monotonic()
-        stdout = ""
-        stderr = ""
-        exit_code = 1
-        try:
-            environment = os.environ.copy()
-            environment["SUPERNOTE_MODULE_PARENT_GENERATION_ID"] = generation_id
-            if parent_transaction_id is not None:
-                environment["SUPERNOTE_MODULE_PARENT_TRANSACTION_ID"] = (
-                    parent_transaction_id
-                )
-            else:
-                environment.pop("SUPERNOTE_MODULE_PARENT_TRANSACTION_ID", None)
-            result = run_process(
-                command,
-                cwd=self.root / "android",
-                timeout=1200,
-                env=environment,
-            )
-            stdout = result.stdout
-            stderr = result.stderr
-            exit_code = result.returncode
-        except subprocess.TimeoutExpired as exc:
-            stdout = _process_text(exc.stdout)
-            stderr = _process_text(exc.stderr)
-            exit_code = 124
-            stderr = (stderr + "\nAndroid build timed out after 1200 seconds.").strip()
-        except OSError as exc:
-            stderr = str(exc)
-        duration_ms = round((time.monotonic() - started) * 1000)
-        diagnostic_path = write_process_diagnostics(
-            self.root,
-            name="check-build",
-            command=command,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-        )
-        diagnostics = (diagnostic_path,) if diagnostic_path is not None else ()
-        try:
-            directory_mutations = restore_protected_directory_metadata(
-                self.root, before_directories
-            )
-        except Exception as exc:
-            directory_mutations = (f"restore_failed:{exc}",)
-        try:
-            mutations = source_tree_changes(before, source_tree_inventory(self.root))
-        except Exception as exc:
-            mutations = (f"inventory_failed:{exc}",)
-        mutations = (*mutations, *(
-            f"directory_metadata:{item}" for item in directory_mutations
-        ))
-
-        issues = []
-        combined = stdout + "\n" + stderr
-        relevant = relevant_diagnostic_lines(combined)
-        if exit_code != 0:
-            message = (
-                relevant[0]
-                if relevant
-                else f"Android build failed with exit code {exit_code}."
-            )
-            issues.append(
-                ValidationIssue(
-                    "SNMG_BUILD_FAILED",
-                    "error",
-                    "toolchain",
-                    message,
-                    expected="exit code 0",
-                    actual=f"exit code {exit_code}",
-                    suggested_command="Review the diagnostics log, correct the build error, and rerun sn-module-gen check --build.",
-                )
-            )
-        if mutations:
-            issues.append(
-                ValidationIssue(
-                    "SNMG_BUILD_MUTATED_SOURCE",
-                    "error",
-                    "plugin",
-                    "Android build changed source-tree state: "
-                    + ", ".join(mutations[:8]),
-                    expected="source tree unchanged",
-                    actual="; ".join(mutations),
-                    suggested_command="Remove source-writing build hooks and run sn-module-gen update --all before rebuilding.",
-                )
-            )
-        if not issues:
-            return _BuildResult("passed", (), None, diagnostics, duration_ms)
-        subprocess_error = SubprocessError(
-            list(command),
-            exit_code if exit_code != 0 else 1,
-            list(relevant or mutations[:12]),
-        )
-        return _BuildResult(
-            "failed",
-            tuple(issues),
-            subprocess_error,
-            diagnostics,
-            duration_ms,
+            "not_run",
+            dependency_link=dependency_status,
         )
 
     def _javascript_issues(
@@ -395,7 +196,7 @@ class GeneratedProjectValidator:
             return ()
         issues = []
         for feature in project.features:
-            path = feature.root / "index.js"
+            path = feature.root / ".supernote-generated/index.js"
             relative = path.relative_to(self.root).as_posix()
             try:
                 kind = contained_entry_kind_no_follow(self.root, path)
@@ -440,7 +241,7 @@ class GeneratedProjectValidator:
                         path=relative,
                         suggested_command=(
                             "Restore a working Node.js installation, then rerun "
-                            "sn-module-gen check."
+                            "sn-module-gen validate."
                         ),
                     )
                 )
@@ -457,7 +258,7 @@ class GeneratedProjectValidator:
                         _javascript_diagnostic(diagnostic),
                         feature_id=feature.identity.feature_id,
                         path=relative,
-                        suggested_command="sn-module-gen update --all",
+                        suggested_command="sn-module-gen update",
                     )
                 )
         return tuple(issues)
@@ -475,11 +276,13 @@ class GeneratedProjectValidator:
             f"Generated JavaScript is unsafe or unreadable: {detail}",
             feature_id=feature.identity.feature_id,
             path=relative,
-            suggested_command="sn-module-gen update --all",
+            suggested_command="sn-module-gen update",
         )
 
 
-def _feature_for_path(features: Mapping[str, object], path: str):
+def _feature_for_path(
+    features: Mapping[str, ProjectFeature], path: str
+) -> ProjectFeature | None:
     for root, feature in features.items():
         if path == root or path.startswith(root + "/"):
             return feature

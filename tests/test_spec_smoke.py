@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -38,11 +39,11 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def test_add_validate_remove_smoke(tmp_path: Path, make_directory_symlink):
+def test_add_validate_author_delete_update_smoke(tmp_path: Path):
     root = plugin(tmp_path)
     code, stdout, stderr = invoke(
         root,
-        ["add", "local-math", "--starter", "cpp", "--skip-install", "--yes"],
+        ["add", "local-math", "--starter", "cpp", "--yes"],
     )
     assert code == 0, stderr
     assert stdout.splitlines()[0].endswith('Added feature "local-math"')
@@ -51,18 +52,13 @@ def test_add_validate_remove_smoke(tmp_path: Path, make_directory_symlink):
     assert json.loads((module / "package.json").read_text())["name"] == "local-math"
     assert "description" not in json.loads((module / "package.json").read_text())
 
-    link = root / "node_modules/local-math"
-    link.parent.mkdir()
-    make_directory_symlink(link, module)
-    code, stdout, stderr = invoke(root, ["validate", "local-math"])
+    code, stdout, stderr = invoke(root, ["validate"])
     assert code == 0, stderr
-    assert stdout.splitlines()[0].endswith('Feature "local-math" is valid')
+    assert stdout.splitlines()[0].endswith("1 feature is valid")
 
-    code, stdout, stderr = invoke(
-        root, ["remove", "local-math", "--skip-install", "--yes"]
-    )
+    shutil.rmtree(module)
+    code, stdout, stderr = invoke(root, ["update"])
     assert code == 0, stderr
-    assert stdout.splitlines()[0].endswith('Removed feature "local-math"')
     assert not module.exists()
 
 
@@ -77,7 +73,6 @@ def test_first_scoped_package_add_succeeds_in_a_clean_plugin(tmp_path: Path):
             "@scope/local-math",
             "--starter",
             "cpp",
-            "--skip-install",
             "--yes",
         ],
     )
@@ -91,6 +86,7 @@ def test_first_scoped_package_add_succeeds_in_a_clean_plugin(tmp_path: Path):
     ] == "@scope/local-math"
 
 
+@pytest.mark.skip(reason="installed dependency validation belongs to Q3 package input")
 def test_validate_missing_dependency_link_gives_install_action_without_rollback(
     tmp_path: Path,
 ):
@@ -109,16 +105,17 @@ def test_validate_missing_dependency_link_gives_install_action_without_rollback(
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "expected"),
     [
-        ["update", "missing", "--skip-install", "--yes"],
-        ["validate", "missing"],
-        ["remove", "missing", "--skip-install", "--yes"],
+        (["update", "missing"], "update no longer accepts a module name"),
+        (["validate", "missing"], "validate no longer accepts a module name"),
+        (["remove", "missing"], "remove was removed"),
     ],
 )
-def test_explicit_missing_target_fails_in_a_zero_feature_plugin(
+def test_retired_targeted_forms_fail_precisely_in_a_zero_feature_plugin(
     tmp_path: Path,
     arguments: list[str],
+    expected: str,
 ):
     root = plugin(tmp_path)
 
@@ -126,25 +123,19 @@ def test_explicit_missing_target_fails_in_a_zero_feature_plugin(
 
     assert code != 0
     assert stdout == ""
-    assert "feature not found: missing" in stderr
+    assert expected in stderr
     assert "No features were found" not in stderr
     assert not (root / ".supernote-module-transaction.json").exists()
 
 
-def test_validate_all_uses_singular_copy_for_one_feature(
-    tmp_path: Path, make_directory_symlink
-):
+def test_plain_validate_uses_singular_copy_for_one_feature(tmp_path: Path):
     root = plugin(tmp_path)
     assert invoke(
         root,
-        ["add", "local-math", "--starter", "cpp", "--skip-install", "--yes"],
+        ["add", "local-math", "--starter", "cpp", "--yes"],
     )[0] == 0
-    feature = root / "local_modules/local-math"
-    link = root / "node_modules/local-math"
-    link.parent.mkdir()
-    make_directory_symlink(link, feature)
 
-    code, stdout, stderr = invoke(root, ["validate", "--all"])
+    code, stdout, stderr = invoke(root, ["validate"])
 
     assert code == 0, stderr
     assert stdout.splitlines()[0].endswith("1 feature is valid")
@@ -160,7 +151,6 @@ def test_json_add_has_stable_envelope_and_empty_stderr(tmp_path: Path):
             "local-json",
             "--starter",
             "cpp",
-            "--skip-install",
             "--yes",
         ],
     )
@@ -220,4 +210,4 @@ def test_noninteractive_add_without_yes_lists_all_missing_decisions(tmp_path: Pa
     assert "--javascript-name <NAME>" in stderr
     assert "--android-namespace <NAMESPACE>" in stderr
     assert "--package-version <VERSION>" in stderr
-    assert "--package-manager <npm|yarn>" in stderr
+    assert "--package-manager <npm|yarn>" not in stderr

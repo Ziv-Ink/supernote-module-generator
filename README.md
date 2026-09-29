@@ -53,38 +53,26 @@ small marked C++ boundary.
 Common commands:
 
 ```bash
-sn-module-gen update document --yes
-sn-module-gen validate document
-sn-module-gen validate --all --build
+sn-module-gen update --yes
+sn-module-gen validate
 sn-module-gen doctor
-sn-module-gen remove document --yes
 ```
 
-The generator uses the plugin root's optional `devconfig.json` for plugin operations
-and Doctor. `javaHome` selects Gradle's Java, `androidSdk` sets both SDK variables,
-and `adb` is passed to children as `ADB_BIN`. A missing, `null`, malformed, or unusable
-value warns and preserves the corresponding launch-environment value.
+Authors own source, `package.json`, lockfiles, dependency installation, and app
+builds. `add` scaffolds a feature and prints the npm/Yarn dependency command to
+run separately. It never invokes a package manager, app build, or Git operation.
+Plain `update` always regenerates every current local feature and the shared
+generated runtime. Generated output is disposable and manual edits to it are
+overwritten; authored files are preserved.
 
-The overrides apply only while the command runs and do not change the parent shell
-or `android/local.properties` on disk. Build and check paths are source-tree read-only.
+To remove a feature, delete its authored module directory, remove its dependency
+with npm or Yarn, and run plain `sn-module-gen update`. There is no generator
+`remove`, selective update, dry-run/diff preview, or app-build command.
 
-Doctor reads the literal `compileSdkVersion`, `buildToolsVersion`, and `ndkVersion`;
-it never substitutes another installed NDK. JSON distinguishes `configured`, `found`,
-`selected`, `executable_probed`, `compiler_probed`, `project_built`, and
-`device_tested`. Plain Doctor never infers a build or device test from file detection.
-Use `sn-module-gen doctor --build` for the read-only Gradle/KSP/Kotlin/CMake/JNI/JSI
-gate; `device_tested` stays false until a separate device canary.
-
-Removal preserves plugin build output by default. To remove the three known
-generated build directories as part of an explicit removal:
-
-```bash
-sn-module-gen remove document --delete-build-files --yes
-```
-
-That option targets only `build/`, `android/build/`, and
-`android/app/build/`. `--yes` by itself never enables build-output deletion or
-widens a single-feature target to all features.
+Doctor reports only generator-relevant host setup and package provenance. It can
+probe Node package resolution, CMake, a C23/C++23 compiler, and Java/Kotlin/KSP
+when the current project requires them. Doctor never installs tools, invokes an
+app build, accesses a device, or claims PluginHost execution.
 
 ## Marking exports
 
@@ -274,30 +262,31 @@ resource must be released on a particular thread, the plugin must arrange that
 itself. The generated runtime releases JNI global references; the JVM decides
 when the underlying objects are collected.
 
-## Validation
+## Validation and package consumption
 
-The integrity manifest records the required official-template capability. Compare the
-surrounding plugin's Bash and PowerShell launch scripts without writing anything:
+`sn-module-gen validate` checks all authored local modules, declared direct module
+dependencies, exported APIs, generated output, completion state, and compatibility
+records without publishing files. It may run bounded compiler/KSP analysis in the
+designated build scratch area, but it does not regenerate output, install
+dependencies, or invoke the app build.
 
-```bash
-sn-module-gen template status
-```
+Plain `update` creates complete package-local output beneath
+`.supernote-generated/`. A publisher can run ordinary `npm pack` after update.
+Consumers install that module package and `@supernote/runtime` as direct
+dependencies with npm, Yarn classic, or modern Yarn configured with
+`nodeLinker: node-modules`. Consumer builds use the packaged CMake, registration,
+and JVM adapter sources without running `sn-module-gen` or KSP. Yarn Plug'n'Play
+is not supported. Install author module packages as copied packages; external
+linked author-source directories are unsupported. A supported shared-runtime
+link does not imply support for linked author sources.
 
-Preview or explicitly apply the recognized capability update:
+For the 0.1.3 features and bounded host/device qualification, see the
+[release notes](https://github.com/Ziv-Ink/supernote-module-generator/blob/main/maintainers/release-notes-v0.1.3.md).
 
-```bash
-sn-module-gen template sync --dry-run
-sn-module-gen template sync --yes
-```
-
-Sync is transactional and refuses missing files, unsafe entry kinds, or unrecognized
-script content. A synchronized launch still reports runtime success as unverified
-unless it observes a plugin-correlated marker.
-
-`sn-module-gen validate` checks generated structure by default; `--build` also
-invokes Android. A local build proves generation and compilation for that environment,
-not that a particular Supernote firmware, PluginHost, linker namespace, or SELinux
-policy will execute the code. Validate target-device behavior on the intended device.
+Host generation, compilation, and package consumption do not prove that a
+particular Supernote firmware, PluginHost, linker namespace, or SELinux policy
+will execute the code. Validate target-device behavior separately on the intended
+device when device evidence is required.
 
 PluginHost can load up to 32 native generations for one plugin component in the
 same process. Restart PluginHost before installing another changed native

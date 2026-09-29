@@ -8,6 +8,7 @@ import supernote_module_generator.filesystem as filesystem_module
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.feature_operations import FeatureOperationService
+from supernote_module_generator.generation_service import GenerationService
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -40,11 +41,19 @@ def registry(root: Path) -> dict:
     )
 
 
-def test_add_regenerates_one_shared_registry(tmp_path: Path):
+def test_authored_add_then_full_generation_writes_one_shared_registry(tmp_path: Path):
     root = plugin(tmp_path)
     service = FeatureOperationService(root)
     alpha = service.add(config(root, "alpha"))
     beta = service.add(config(root, "beta"))
+    generation = GenerationService(root)
+    generation.execute(
+        generation.plan(
+            operation="update",
+            requested_targets=("alpha", "beta"),
+            allow_unmanifested_bootstrap=True,
+        )
+    )
 
     assert [item["public_name"] for item in registry(root)["features"]] == [
         "Alpha",
@@ -92,7 +101,7 @@ def test_add_accepts_stable_coarse_filesystem_timestamps(
     assert beta.is_dir()
     assert not (root / ".supernote-module-transaction.json").exists()
 
-def test_jvm_only_feature_is_scaffolded_for_ksp_without_python_source_parsing(
+def test_jvm_only_feature_scaffold_is_authored_and_runtime_generation_is_separate(
     tmp_path: Path,
 ):
     root = plugin(tmp_path)
@@ -103,6 +112,4 @@ def test_jvm_only_feature_is_scaffolded_for_ksp_without_python_source_parsing(
     assert created == jvm.output
     assert not (created / "android/src/main/cpp").exists()
     assert (created / "android/src/main/java/com/example/jvm/FeatureApi.kt").is_file()
-    gradle = (root / "android/.supernote-module/runtime/build.gradle").read_text()
-    assert "local_modules/jvm/android/src/main/java" in gradle
-    assert "com.google.devtools.ksp" in gradle
+    assert not (root / "android/.supernote-module/runtime").exists()

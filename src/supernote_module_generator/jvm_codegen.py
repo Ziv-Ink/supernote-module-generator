@@ -19,7 +19,7 @@ from .jvm_manifest import JvmSourceManifest
 from .jvm_object_binding_codegen import render_jvm_object_bindings
 from .jvm_object_runtime_codegen import render_jvm_object_runtime
 from .jvm_routes import JvmRouteError, plan_jvm_routes
-from .internal_codegen import internal_header_path, internal_namespace
+from .internal_codegen import internal_namespace
 from .semantic import (
     DeclarationRole,
     ExecutionMode,
@@ -256,7 +256,7 @@ def render_jvm_feature_jsi(
 #include <vector>
 
 #include "runtime_services.hpp"
-#include <{internal_header_path(feature_id).removeprefix("include/")}>
+#include "internal.hpp"
 
 namespace supernote::generated::jvm_feature_{suffix} {{
 namespace {{
@@ -298,8 +298,7 @@ class AttachedEnv {{
     if (vm_ == nullptr) return;
     const auto status = vm_->GetEnv(
         reinterpret_cast<void **>(&env_), JNI_VERSION_1_6);
-    if (status == JNI_EDETACHED &&
-        vm_->AttachCurrentThread(&env_, nullptr) == JNI_OK) {{
+    if (status == JNI_EDETACHED && attach_current_thread() == JNI_OK) {{
       attached_ = true;
     }}
   }}
@@ -307,6 +306,14 @@ class AttachedEnv {{
   JNIEnv *get() const noexcept {{ return env_; }}
 
  private:
+  jint attach_current_thread() noexcept {{
+#if defined(__ANDROID__)
+    return vm_->AttachCurrentThread(&env_, nullptr);
+#else
+    return vm_->AttachCurrentThread(
+        reinterpret_cast<void **>(&env_), nullptr);
+#endif
+  }}
   JavaVM *vm_{{nullptr}};
   JNIEnv *env_{{nullptr}};
   bool attached_{{false}};

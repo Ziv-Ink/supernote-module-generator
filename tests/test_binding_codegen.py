@@ -1397,7 +1397,7 @@ public:
             self.assertIn("untagged global definition", message)
             self.assertIn("routable C++ name 'add'", message)
 
-    def test_rejects_untagged_declaration_in_another_source(self):
+    def test_ignores_untagged_declaration_in_another_source(self):
         with tempfile.TemporaryDirectory() as directory:
             module = self.make_module(Path(directory))
             (
@@ -1406,12 +1406,8 @@ public:
                 "double add(double value);\n",
                 encoding="utf-8",
             )
-            with self.assertRaises(binding_codegen.CodegenError) as raised:
-                binding_codegen.scan_sources(module)
-            message = str(raised.exception)
-            self.assertIn("forward.cc:1", message)
-            self.assertIn("untagged global declaration", message)
-            self.assertIn("math.cpp:1", message)
+            exports = binding_codegen.scan_sources(module)
+            self.assertEqual([item.cpp_name for item in exports], ["add"])
 
     def test_calls_inside_function_bodies_are_not_overloads(self):
         source = (

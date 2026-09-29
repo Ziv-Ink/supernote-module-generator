@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
 import time
+
+import pytest
 
 from supernote_module_generator.readme_codegen import render_feature_readme
 from supernote_module_generator.semantic import (
@@ -23,6 +30,7 @@ from supernote_module_generator.semantic import (
     semantic_type_id,
 )
 from supernote_module_generator.semantic_types import SemanticType
+from supernote_module_generator.typescript_codegen import render_typescript
 
 
 FEATURE_ID = "supernote:feature:readme"
@@ -200,6 +208,197 @@ def test_readme_lists_imports_and_the_complete_public_call_surface():
     assert "hidden" not in readme
 
 
+def test_readme_documents_normal_npm_and_yarn_consumer_workflow():
+    readme = _render()
+    normalized = " ".join(readme.split())
+
+    assert "npm install @supernote/runtime local-drawing" in readme
+    assert "yarn add @supernote/runtime local-drawing" in readme
+    assert "`nodeLinker: node-modules`" in readme
+    assert "./buildPlugin.sh" in readme
+    assert ".\\buildPlugin.ps1" in readme
+    assert "Do not apply the runtime Gradle helper manually" in normalized
+    assert "do not run `sn-module-gen` in the consumer" in normalized
+
+
+def test_readme_documents_exact_negative_status_messages():
+    readme = _render()
+
+    assert (
+        "`runtime-unavailable: @supernote/runtime is not loaded for local-drawing. "
+        "Add @supernote/runtime as a direct dependency and rebuild the plugin.`"
+    ) in readme
+    assert (
+        "`feature-unavailable: local-drawing is not loaded in the Supernote runtime. "
+        "Add local-drawing as a direct dependency and rebuild the plugin.`"
+    ) in readme
+
+
+def test_generated_readme_example_type_checks_against_generated_surface(
+    tmp_path: Path,
+):
+    tsc = shutil.which("tsc")
+    if tsc is None:
+        pytest.skip("TypeScript compiler is unavailable")
+    api = _api()
+    readme = _render(api)
+    examples = re.findall(r"```ts\n(.*?)```", readme, flags=re.DOTALL)
+    assert "async function exampleCall(path: string)" in examples[-1]
+    assert "function exampleCreate(point: Point)" in examples[-1]
+
+    package = tmp_path / "node_modules/local-drawing"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps({"name": "local-drawing", "types": "index.d.ts"}) + "\n",
+        encoding="utf-8",
+    )
+    (package / "index.d.ts").write_text(
+        render_typescript("Drawing", api), encoding="utf-8"
+    )
+    (tmp_path / "consumer.ts").write_text(
+        "\n".join(examples), encoding="utf-8"
+    )
+    completed = subprocess.run(
+        [
+            tsc,
+            "--noEmit",
+            "--strict",
+            "--target",
+            "ES2020",
+            "--module",
+            "Node16",
+            "--moduleResolution",
+            "Node16",
+            "consumer.ts",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    (
+        (
+            "result",
+            "function exampleCall(resultValue: string) {\n"
+            "  const result = Drawing.echo(resultValue);\n}",
+        ),
+        (
+            "stroke",
+            "function exampleCreate(strokeValue: string) {\n"
+            "  const stroke = Drawing.Stroke.create(strokeValue);\n}",
+        ),
+        (
+            "module-static-async",
+            "async function exampleCall(DrawingValue: string) {\n"
+            "  const result = await Drawing.Tool.run(DrawingValue);\n}",
+        ),
+    ),
+)
+def test_generated_readme_examples_avoid_identifier_collisions(
+    tmp_path: Path,
+    case: str,
+    expected: str,
+):
+    tsc = shutil.which("tsc")
+    if tsc is None:
+        pytest.skip("TypeScript compiler is unavailable")
+
+    if case == "result":
+        api = SemanticApi(
+            functions=(
+                _binding(
+                    "echo",
+                    result=SemanticType.STRING,
+                    parameters=(
+                        SemanticParameter("result", SemanticType.STRING),
+                    ),
+                ),
+            )
+        )
+    else:
+        object_name = "Stroke" if case == "stroke" else "Tool"
+        object_id = semantic_type_id(FEATURE_ID, object_name)
+        projection = SemanticProjection(
+            BackendFamily.CPP,
+            _source(f"projection:{object_name.lower()}"),
+        )
+        if case == "stroke":
+            item = SemanticObjectDeclaration(
+                FEATURE_ID,
+                object_id,
+                object_name,
+                projection,
+                SemanticConstructor(
+                    _source("constructor:stroke"),
+                    (SemanticParameter("stroke", SemanticType.STRING),),
+                ),
+            )
+        else:
+            item = SemanticObjectDeclaration(
+                FEATURE_ID,
+                object_id,
+                object_name,
+                projection,
+                methods=(
+                    _binding(
+                        "run",
+                        result=SemanticType.STRING,
+                        parameters=(
+                            SemanticParameter("Drawing", SemanticType.STRING),
+                        ),
+                        execution=ExecutionMode.ASYNC,
+                        owner_id=object_id,
+                        owner_name=object_name,
+                        scope=MemberScope.STATIC,
+                    ),
+                ),
+            )
+        api = SemanticApi(declarations=(item,))
+
+    readme = _render(api)
+    examples = re.findall(r"```ts\n(.*?)```", readme, flags=re.DOTALL)
+    assert expected in examples[-1]
+
+    package = tmp_path / "node_modules/local-drawing"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps({"name": "local-drawing", "types": "index.d.ts"}) + "\n",
+        encoding="utf-8",
+    )
+    (package / "index.d.ts").write_text(
+        render_typescript("Drawing", api), encoding="utf-8"
+    )
+    (tmp_path / "consumer.ts").write_text(
+        "\n".join(examples), encoding="utf-8"
+    )
+    completed = subprocess.run(
+        [
+            tsc,
+            "--noEmit",
+            "--strict",
+            "--target",
+            "ES2020",
+            "--module",
+            "Node16",
+            "--moduleResolution",
+            "Node16",
+            "consumer.ts",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_readme_distinguishes_async_calls_and_copied_types():
     readme = _render()
 
@@ -222,7 +421,7 @@ def test_readme_without_public_declarations_stays_useful_and_brief():
     assert "import type" not in readme
     assert "No JavaScript-public declarations are currently generated" in readme
     assert "After marking an API" in readme
-    assert len(readme.splitlines()) < 70
+    assert len(readme.splitlines()) < 80
 
 
 def test_readme_is_deterministic():

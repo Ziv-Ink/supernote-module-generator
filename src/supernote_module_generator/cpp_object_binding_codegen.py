@@ -264,6 +264,10 @@ def _validate_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
             for field in route.fields:
                 lines.extend([
                     f"  auto {field.cpp_name}_path = supernote::conversion::field_path(path, {json.dumps(field.public_name)});",
+                    f"  if (!supernote_object_has_own_property(runtime, object, {json.dumps(field.public_name)})) {{",
+                    f"    supernote_throw_type_error(runtime, {field.cpp_name}_path + \": expected a present field\",",
+                    f"        \"MISSING_FIELD\", {field.cpp_name}_path, \"present field\", \"missing\");",
+                    "  }",
                     f"  auto {field.cpp_name}_value = object.getProperty(runtime, {json.dumps(field.public_name)});",
                     f"  {_validate_js_name(field.semantic_type)}(",
                     f"      runtime, {field.cpp_name}_value, budget, {field.cpp_name}_path, depth + 1);",
@@ -331,7 +335,8 @@ def _from_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                     "  if (!std::isfinite(number) || std::trunc(number) != number ||",
                     "      number < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||",
                     "      number > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {",
-                    "    supernote_throw_range_error(runtime, path + \": int32 value is out of range\");",
+                    "    supernote_throw_range_error(runtime, path + \": int32 value is out of range\",",
+                    "        \"OUT_OF_RANGE\", path, \"int32\", supernote_describe_value(runtime, value));",
                     "  }",
                     "  return static_cast<std::int32_t>(number);",
                 ])
@@ -340,7 +345,8 @@ def _from_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                     f"  if (!value.isBigInt()) {_input_type_error('an int64 bigint')};",
                     "  const auto bigint = value.getBigInt(runtime);",
                     "  if (!bigint.isInt64(runtime)) {",
-                    "    supernote_throw_range_error(runtime, path + \": int64 value is out of range\");",
+                    "    supernote_throw_range_error(runtime, path + \": int64 value is out of range\",",
+                    "        \"OUT_OF_RANGE\", path, \"int64 bigint\", \"bigint\");",
                     "  }",
                     "  return static_cast<std::int64_t>(bigint.asInt64(runtime));",
                 ])
@@ -351,7 +357,8 @@ def _from_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                     "  if (std::isfinite(number) &&",
                     "      (number < static_cast<double>(std::numeric_limits<float>::lowest()) ||",
                     "       number > static_cast<double>(std::numeric_limits<float>::max()))) {",
-                    "    supernote_throw_range_error(runtime, path + \": float32 value is out of range\");",
+                    "    supernote_throw_range_error(runtime, path + \": float32 value is out of range\",",
+                    "        \"OUT_OF_RANGE\", path, \"float32\", \"number\");",
                     "  }",
                     "  return static_cast<float>(number);",
                 ])
@@ -453,6 +460,10 @@ def _from_js_definition(semantic: SemanticType, plan: CppRoutePlan) -> str:
                 locals_.append(f"std::move({local})")
                 lines.extend([
                     f"  auto {local}_path = supernote::conversion::field_path(path, {json.dumps(field.public_name)});",
+                    f"  if (!supernote_object_has_own_property(runtime, object, {json.dumps(field.public_name)})) {{",
+                    f"    supernote_throw_type_error(runtime, {local}_path + \": expected a present field\",",
+                    f"        \"MISSING_FIELD\", {local}_path, \"present field\", \"missing\");",
+                    "  }",
                     f"  auto {local}_value = object.getProperty(runtime, {json.dumps(field.public_name)});",
                     f"  auto {local} = {child}(runtime, {local}_value, budget, retained, {local}_path, depth + 1);",
                 ])
@@ -641,10 +652,14 @@ supernote_module_object_registry(facebook::jsi::Runtime &runtime) {
     facebook::jsi::Runtime &runtime,
     const supernote::conversion::Failure &failure) {
   if (failure.kind() == supernote::conversion::FailureKind::TYPE) {
-    supernote_throw_type_error(runtime, failure.what());
+    supernote_throw_type_error(
+        runtime, failure.what(), "TYPE_MISMATCH", failure.path(),
+        "valid generated value", "rejected");
   }
   if (failure.kind() == supernote::conversion::FailureKind::RANGE) {
-    supernote_throw_range_error(runtime, failure.what());
+    supernote_throw_range_error(
+        runtime, failure.what(), "LIMIT_EXCEEDED", failure.path(),
+        "within generated conversion limits", "rejected");
   }
   supernote_throw_error(runtime, "INTERNAL", failure.what());
 }'''

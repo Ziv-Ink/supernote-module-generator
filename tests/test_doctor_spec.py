@@ -3,20 +3,18 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from supernote_module_generator.doctor import DoctorService
+from supernote_module_generator.doctor import DoctorService, _properties_value
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.feature_operations import FeatureOperationService
 from supernote_module_generator.filesystem import (
-    lexists,
     protected_directory_metadata,
-    remove_entry_no_follow,
-    restore_protected_source_backup,
     source_tree_inventory,
 )
 from supernote_module_generator.rendering import Renderer, TerminalCapabilities
@@ -26,6 +24,11 @@ from supernote_module_generator.models import CommandResult, ValidationResult
 HOST_GRADLE = "gradlew.bat" if os.name == "nt" else "gradlew"
 HOST_CLANG = "clang.exe" if os.name == "nt" else "clang"
 HOST_CLANGXX = "clang++.exe" if os.name == "nt" else "clang++"
+
+
+def java_properties_escape(value: str) -> str:
+    """Encode a path as one Java-properties value without changing its meaning."""
+    return value.replace("\\", "\\\\").replace(":", "\\:")
 
 
 def plugin(tmp_path: Path, *, both_locks: bool = False) -> Path:
@@ -103,7 +106,7 @@ def install_fake_sdk(tmp_path: Path, monkeypatch) -> Path:
     (ndk / "source.properties").write_text(
         "Pkg.Revision = 27.1.0\n", encoding="utf-8"
     )
-    cmake = sdk / "cmake/3.22.1/bin" / (
+    cmake = sdk / "cmake/3.24.4/bin" / (
         "cmake.exe" if os.name == "nt" else "cmake"
     )
     cmake.parent.mkdir(parents=True)
@@ -158,8 +161,8 @@ def successful_run(command, **kwargs):
             "Gradle 8.13\nLauncher JVM: 17.0.12\n"
             f"Daemon JVM: {daemon_home} (from org.gradle.java.home)\n"
         ),
-        "cmake": "cmake version 3.22.1\n",
-        "cmake.exe": "cmake version 3.22.1\n",
+        "cmake": "cmake version 3.24.4\n",
+        "cmake.exe": "cmake version 3.24.4\n",
         "clang": "clang version 18.0.0\n",
         "clang++": "clang version 18.0.0\n",
         "clang.exe": "clang version 18.0.0\n",
@@ -170,7 +173,7 @@ def successful_run(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, output, "")
 
 
-def test_doctor_executes_required_probes_and_keeps_selinux_advisory(
+def test_doctor_executes_required_generator_probes_without_target_policy_advice(
     tmp_path: Path, monkeypatch
 ):
     root = plugin(tmp_path)
@@ -185,12 +188,12 @@ def test_doctor_executes_required_probes_and_keeps_selinux_advisory(
     assert result.exit_code == 0
     assert result.doctor is not None
     assert result.doctor.required_passed
-    assert any(check.id == "selinux_policy" for check in result.doctor.checks)
+    assert not any(check.id == "selinux_policy" for check in result.doctor.checks)
     adb = next(check for check in result.doctor.checks if check.id == "adb")
     assert adb.status == "passed"
     assert adb.metadata["executable_probed"] is True
     assert adb.metadata["device_tested"] is False
-    assert result.doctor.advisory_count >= 1
+    assert result.doctor.advisory_count == 0
 
 
 def test_doctor_passes_for_plugin_with_typed_cpp_jvm_and_mixed_v4_features(
@@ -253,7 +256,7 @@ def test_windows_doctor_uses_batch_wrapper_and_exe_ndk_compilers(
     (compiler / "clang++").unlink(missing_ok=True)
     (compiler / "clang.exe").write_bytes(b"")
     (compiler / "clang++.exe").write_bytes(b"")
-    windows_cmake = sdk / "cmake/3.22.1/bin/cmake.exe"
+    windows_cmake = sdk / "cmake/3.24.4/bin/cmake.exe"
     windows_cmake.write_bytes(b"")
     monkeypatch.setattr(
         "supernote_module_generator.doctor.shutil.which",
@@ -288,7 +291,7 @@ def test_windows_doctor_uses_batch_wrapper_and_exe_ndk_compilers(
     assert any(Path(command[0]).name == "clang++.exe" for command in commands)
 
 
-def test_plugin_doctor_reports_jsi_policy_without_probing_deployment(
+def test_plugin_doctor_omits_jsi_policy_and_never_probes_deployment(
     tmp_path: Path, monkeypatch
 ):
     root = plugin(tmp_path)
@@ -301,7 +304,7 @@ def test_plugin_doctor_reports_jsi_policy_without_probing_deployment(
     result = DoctorService(root, renderer(), run=successful_run).execute("plugin")
 
     assert result.doctor is not None
-    assert any(check.id == "selinux_policy" for check in result.doctor.checks)
+    assert not any(check.id == "selinux_policy" for check in result.doctor.checks)
     adb = next(check for check in result.doctor.checks if check.id == "adb")
     assert adb.status == "passed"
     assert adb.metadata["device_tested"] is False
@@ -339,7 +342,7 @@ def test_nonzero_tool_probe_fails_doctor(tmp_path: Path, monkeypatch):
     )
 
     def run(command, **kwargs):
-        if Path(command[0]).name == "cmake":
+        if Path(command[0]).stem == "cmake":
             return subprocess.CompletedProcess(command, 2, "", "broken\n")
         return successful_run(command, **kwargs)
 
@@ -439,13 +442,211 @@ def test_doctor_probes_project_selected_sdk_cmake_not_path_or_newest_installatio
     assert result.exit_code == 0
     assert result.doctor is not None
     cmake = next(check for check in result.doctor.checks if check.id == "cmake")
-    expected = sdk.resolve() / "cmake/3.22.1/bin" / (
+    expected = sdk.resolve() / "cmake/3.24.4/bin" / (
         "cmake.exe" if os.name == "nt" else "cmake"
     )
     assert cmake.path == str(expected)
-    assert cmake.metadata["selected_version"] == "3.22.1"
+    assert cmake.metadata["selected_version"] == "3.24.4"
     assert [str(expected), "--version"] in commands
     assert not any("cmake/4.1.2" in command[0] for command in commands)
+
+
+def test_doctor_honors_generated_cmake_version_override_and_local_cmake_dir(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = plugin(tmp_path)
+    install_fake_sdk(tmp_path, monkeypatch)
+    cmake_root = tmp_path / "system-cmake"
+    executable = cmake_root / "bin" / (
+        "cmake.exe" if os.name == "nt" else "cmake"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    (root / "android/gradle.properties").write_text(
+        "supernoteModuleCmakeVersion=3.28.3\n",
+        encoding="utf-8",
+    )
+    (root / "android/local.properties").write_text(
+        f"cmake.dir={java_properties_escape(str(cmake_root))}\n",
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def run(command, **kwargs):
+        commands.append(list(command))
+        result = successful_run(command, **kwargs)
+        if Path(command[0]) == executable:
+            return subprocess.CompletedProcess(
+                command, 0, "cmake version 3.28.3\n", ""
+            )
+        return result
+
+    result = DoctorService(root, renderer(), run=run).execute("plugin")
+
+    assert result.exit_code == 0
+    assert result.doctor is not None
+    cmake = next(check for check in result.doctor.checks if check.id == "cmake")
+    assert cmake.path == str(executable)
+    assert cmake.detected_version == "cmake version 3.28.3"
+    assert cmake.metadata["selected_version"] == "3.28.3"
+    assert cmake.metadata["minimum_version"] == "3.24"
+    assert cmake.metadata["selection_source"] == "android/local.properties cmake.dir"
+    assert [str(executable), "--version"] in commands
+
+
+def _java_property_value(
+    tmp_path: Path,
+    properties: Path,
+    key: str,
+) -> str:
+    java = shutil.which("java")
+    javac = shutil.which("javac")
+    if java is None or javac is None:
+        pytest.skip("Java compiler/runtime is required for the Properties oracle")
+    source = tmp_path / "PropertiesProbe.java"
+    source.write_text(
+        """
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+
+public final class PropertiesProbe {
+  public static void main(String[] args) throws Exception {
+    Properties properties = new Properties();
+    try (InputStream input = Files.newInputStream(Path.of(args[0]))) {
+      properties.load(input);
+    }
+    String value = properties.getProperty(args[1]);
+    System.out.print(value == null ? "<null>" : value);
+  }
+}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [javac, str(source)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [java, "-cp", str(tmp_path), "PropertiesProbe", str(properties), key],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def test_properties_parser_matches_java_for_escaped_windows_path_key_and_continuation(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("escaped-path", "cmake.dir=" + r"C\:\\Tools\\CMake" + "\n"),
+        ("escaped-key", "cmake\\u002edir : " + r"C\:\\Tools\\CMake" + "\n"),
+        (
+            "continuation",
+            "cmake.dir="
+            + r"C\:\\Tools"
+            + "\\" * 3
+            + "\n    CMake\n",
+        ),
+        (
+            "last-value-wins",
+            "cmake.dir=ignored\ncmake.dir=" + r"C\:\\Tools\\CMake" + "\n",
+        ),
+        (
+            "comment-trailing-backslash",
+            "# CMake parent C:\\\ncmake.dir=/opt/cmake\n",
+        ),
+        (
+            "form-feed-property-whitespace",
+            "cmake.dir\f=/opt/cmake\n",
+        ),
+    )
+    for name, content in cases:
+        root = tmp_path / name
+        (root / "android").mkdir(parents=True)
+        properties = root / "android/local.properties"
+        properties.write_bytes(content.encode("iso-8859-1"))
+
+        selected, error = _properties_value(
+            root,
+            "android/local.properties",
+            "cmake.dir",
+        )
+
+        expected = _java_property_value(root, properties, "cmake.dir")
+        assert error is None
+        expected_value = (
+            "/opt/cmake"
+            if name in {"comment-trailing-backslash", "form-feed-property-whitespace"}
+            else r"C:\Tools\CMake"
+        )
+        assert selected == expected == expected_value
+
+
+def test_properties_parser_rejects_malformed_unicode_escape(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "android").mkdir()
+    (root / "android/local.properties").write_bytes(b"cmake.dir=C\\u12XZ\n")
+
+    selected, error = _properties_value(
+        root,
+        "android/local.properties",
+        "cmake.dir",
+    )
+
+    assert selected is None
+    assert error is not None
+    assert "malformed Unicode escape" in error
+
+
+def test_doctor_selects_continued_unicode_key_path_like_java_properties(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = plugin(tmp_path)
+    install_fake_sdk(tmp_path, monkeypatch)
+    cmake_root = tmp_path / "continued-system-cmake"
+    executable = cmake_root / "bin" / (
+        "cmake.exe" if os.name == "nt" else "cmake"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    value = java_properties_escape(str(cmake_root))
+    split = len(value) - 8
+    while value[split - 1] == "\\" or value[split] == "\\":
+        split -= 1
+    (root / "android/local.properties").write_text(
+        "cmake\\u002edir : " + value[:split] + "\\" + "\n  " + value[split:] + "\n",
+        encoding="iso-8859-1",
+    )
+    commands: list[list[str]] = []
+
+    def run(command, **kwargs):
+        commands.append(list(command))
+        result = successful_run(command, **kwargs)
+        if Path(command[0]) == executable:
+            return subprocess.CompletedProcess(
+                command, 0, "cmake version 3.24.4\n", ""
+            )
+        return result
+
+    result = DoctorService(root, renderer(), run=run).execute("plugin")
+
+    assert result.exit_code == 0
+    assert result.doctor is not None
+    cmake = next(check for check in result.doctor.checks if check.id == "cmake")
+    assert cmake.path == str(executable)
+    assert cmake.metadata["configured_directory"] == str(cmake_root.resolve())
+    assert [str(executable), "--version"] in commands
 
 
 def test_doctor_reports_exact_selected_sdk_components_and_adb_capabilities(
@@ -485,7 +686,6 @@ def test_doctor_reports_exact_selected_sdk_components_and_adb_capabilities(
             "device_tested",
         } <= set(check.metadata) or check.id == "project"
     assert all(check.metadata.get("device_tested") is not True for check in checks.values())
-    assert checks["selinux_policy"].metadata["project_built"] is False
 
 
 def test_doctor_rejects_missing_selected_platform_and_build_tools(
@@ -594,7 +794,7 @@ def test_doctor_rejects_conflicting_android_sdk_environment_selections(
         assert checks[identifier].metadata["selected"] is False
 
 
-def test_doctor_toolchain_discovery_preserves_gradle_configuration_atime(
+def test_doctor_toolchain_discovery_never_rewrites_gradle_configuration(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -614,379 +814,8 @@ def test_doctor_toolchain_discovery_preserves_gradle_configuration_atime(
 
     after = build_gradle.stat()
     assert result.exit_code == 0
-    assert after.st_atime_ns == before.st_atime_ns
     assert after.st_mtime_ns == before.st_mtime_ns
     assert after.st_mode == before.st_mode
-
-
-def test_doctor_preserves_unattributed_source_written_during_a_tool_probe(
-    tmp_path: Path,
-    monkeypatch,
-):
-    root = plugin(tmp_path)
-    source = root / "android/app/src/main/kotlin/App.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("val sentinel = 1\n", encoding="utf-8")
-    before = source.read_bytes()
-    install_fake_sdk(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-    mutated = False
-
-    def run(command, **kwargs):
-        nonlocal mutated
-        if not mutated and any(
-            Path(part).name in {"gradlew", "gradlew.bat"} for part in command
-        ):
-            source.write_text("val sentinel = 2\n", encoding="utf-8")
-            mutated = True
-        return successful_run(command, **kwargs)
-
-    result = DoctorService(root, renderer(), run=run).execute("plugin")
-
-    assert result.exit_code == 3
-    assert result.status == "partial"
-    assert result.rollback.status == "partial"
-    assert source.read_bytes() == b"val sentinel = 2\n"
-    assert result.doctor is not None
-    integrity = next(
-        check
-        for check in result.doctor.checks
-        if check.id == "doctor_source_integrity"
-    )
-    assert integrity.status == "failed"
-    assert integrity.metadata["restored"] is False
-    assert result.to_dict()["actual_changes"] == [
-        {
-            "path": "android/app/src/main/kotlin/App.kt",
-            "action": "update",
-            "ownership": "user source",
-        }
-    ]
-    recovery = Path(result.metadata["recovery_path"])
-    assert restore_protected_source_backup(recovery, root) == ()
-    assert source.read_bytes() == before
-    remove_entry_no_follow(recovery)
-
-
-def test_doctor_interrupt_preserves_unattributed_source_and_backup(
-    tmp_path: Path,
-    monkeypatch,
-):
-    root = plugin(tmp_path)
-    source = root / "android/app/src/main/kotlin/App.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("val sentinel = 1\n", encoding="utf-8")
-    install_fake_sdk(tmp_path, monkeypatch)
-    before_inventory = source_tree_inventory(root)
-    before_directories = protected_directory_metadata(root)
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-
-    def run(command, **kwargs):
-        if any(Path(part).name in {"gradlew", "gradlew.bat"} for part in command):
-            source.write_text("val sentinel = 2\n", encoding="utf-8")
-            raise KeyboardInterrupt
-        return successful_run(command, **kwargs)
-
-    result = DoctorService(root, renderer(), run=run).execute("plugin")
-
-    assert result.exit_code == 3
-    assert result.status == "partial"
-    assert result.rollback.status == "partial"
-    assert source.read_bytes() == b"val sentinel = 2\n"
-    payload = result.to_dict()
-    assert payload["cancellation"]["requested"] is True
-    assert payload["cancellation"]["status"] == "partial"
-    assert payload["actual_changes"] == [
-        {
-            "path": "android/app/src/main/kotlin/App.kt",
-            "action": "update",
-            "ownership": "user source",
-        }
-    ]
-    recovery = Path(result.metadata["recovery_path"])
-    assert restore_protected_source_backup(recovery, root) == ()
-    assert source_tree_inventory(root) == before_inventory
-    assert protected_directory_metadata(root) == before_directories
-    remove_entry_no_follow(recovery)
-
-
-def test_doctor_finish_inventory_interrupt_retries_without_losing_live_source(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import supernote_module_generator.filesystem as filesystem
-
-    root = plugin(tmp_path)
-    source = root / "android/app/src/main/kotlin/App.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("val sentinel = 1\n", encoding="utf-8")
-    install_fake_sdk(tmp_path, monkeypatch)
-    before = source.read_bytes()
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-    armed = False
-    interrupted = False
-    original_inventory = filesystem.source_tree_inventory
-
-    def interrupt_once(path):
-        nonlocal interrupted
-        if armed and not interrupted:
-            interrupted = True
-            raise KeyboardInterrupt
-        return original_inventory(path)
-
-    monkeypatch.setattr(filesystem, "source_tree_inventory", interrupt_once)
-
-    def run(command, **kwargs):
-        nonlocal armed
-        if not armed and any(
-            Path(part).name in {"gradlew", "gradlew.bat"} for part in command
-        ):
-            source.write_text("val sentinel = 2\n", encoding="utf-8")
-            armed = True
-        return successful_run(command, **kwargs)
-
-    result = DoctorService(root, renderer(), run=run).execute("plugin")
-
-    assert interrupted
-    assert result.status == "partial"
-    assert result.exit_code == 3
-    assert result.rollback.status == "partial"
-    assert source.read_bytes() == b"val sentinel = 2\n"
-    assert result.to_dict()["cancellation"] == {
-        "requested": True,
-        "status": "partial",
-        "reason": (
-            "Doctor was interrupted and exact protected-source restoration "
-            "could not be verified."
-        ),
-    }
-    recovery = Path(result.metadata["recovery_path"])
-    assert restore_protected_source_backup(recovery, root) == ()
-    assert source.read_bytes() == before
-    remove_entry_no_follow(recovery)
-
-
-def test_doctor_interrupted_finalization_failed_retry_retains_actionable_backup(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import supernote_module_generator.filesystem as filesystem
-
-    root = plugin(tmp_path)
-    source = root / "android/app/src/main/kotlin/App.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("val sentinel = 1\n", encoding="utf-8")
-    install_fake_sdk(tmp_path, monkeypatch)
-    before_inventory = source_tree_inventory(root)
-    before_directories = protected_directory_metadata(root)
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-    armed = False
-    inventory_attempts = 0
-    original_inventory = filesystem.source_tree_inventory
-
-    def fail_inventory(path):
-        nonlocal inventory_attempts
-        if not armed:
-            return original_inventory(path)
-        inventory_attempts += 1
-        if inventory_attempts == 1:
-            raise KeyboardInterrupt
-        raise OSError("forced retry inventory failure")
-
-    monkeypatch.setattr(filesystem, "source_tree_inventory", fail_inventory)
-
-    def run(command, **kwargs):
-        nonlocal armed
-        if not armed and any(
-            Path(part).name in {"gradlew", "gradlew.bat"} for part in command
-        ):
-            source.write_text("val sentinel = 2\n", encoding="utf-8")
-            armed = True
-        return successful_run(command, **kwargs)
-
-    result = DoctorService(root, renderer(), run=run).execute("plugin")
-
-    assert inventory_attempts >= 2
-    assert result.status == "partial"
-    assert result.exit_code == 3
-    assert result.rollback.status == "partial"
-    payload = result.to_dict()
-    assert payload["cancellation"]["requested"] is True
-    assert payload["cancellation"]["status"] == "partial"
-    assert "unverified" in payload["cancellation"]["reason"]
-    assert payload["actual_changes"] == []
-    assert payload["metadata"]["residue_verified"] is False
-    recovery_path = Path(result.metadata["recovery_path"])
-    assert lexists(recovery_path / "recovery-manifest.json")
-    assert restore_protected_source_backup(recovery_path, root) == ()
-    assert source_tree_inventory(root) == before_inventory
-    assert protected_directory_metadata(root) == before_directories
-    remove_entry_no_follow(recovery_path)
-    assert not lexists(recovery_path)
-
-
-@pytest.mark.parametrize("source_state", ("live", "restored"))
-def test_doctor_distinguishes_uninventoried_residue_from_verified_empty(
-    tmp_path: Path,
-    monkeypatch,
-    source_state: str,
-):
-    import supernote_module_generator.filesystem as filesystem
-
-    root = plugin(tmp_path)
-    source = root / "android/app/src/main/kotlin/App.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("val sentinel = 1\n", encoding="utf-8")
-    install_fake_sdk(tmp_path, monkeypatch)
-    before_inventory = source_tree_inventory(root)
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-    armed = False
-    finish_calls = 0
-    recovery_paths: list[Path] = []
-    def interrupt_then_fail(self):
-        nonlocal finish_calls
-        finish_calls += 1
-        if finish_calls == 1:
-            recovery_paths.append(self.recovery_path)
-            if source_state == "restored":
-                assert restore_protected_source_backup(self.recovery_path, root) == ()
-            raise KeyboardInterrupt
-        if finish_calls == 2:
-            raise RuntimeError("guard retry sentinel")
-        raise AssertionError("unexpected guard finish call")
-
-    def inventory_unavailable(self):
-        raise OSError("inventory unavailable")
-
-    monkeypatch.setattr(
-        filesystem.ProtectedSourceGuard, "finish", interrupt_then_fail
-    )
-    monkeypatch.setattr(
-        filesystem.ProtectedSourceGuard,
-        "remaining_changes",
-        inventory_unavailable,
-    )
-
-    def run(command, **kwargs):
-        nonlocal armed
-        if not armed and any(
-            Path(part).name in {"gradlew", "gradlew.bat"} for part in command
-        ):
-            source.write_text("val sentinel = 2\n", encoding="utf-8")
-            armed = True
-        return successful_run(command, **kwargs)
-
-    result = DoctorService(root, renderer(), run=run).execute("plugin")
-    payload = result.to_dict()
-
-    assert result.status == "partial"
-    assert result.exit_code == 3
-    assert result.rollback.status == "partial"
-    assert payload["error"]["kind"] == "doctor_source_restore_unverified"
-    assert "matches the pre-command baseline" not in payload["error"]["message"]
-    assert payload["changes"] == []
-    assert payload["actual_changes"] == []
-    assert payload["metadata"]["residue_verified"] is False
-    assert payload["metadata"]["restore_diagnostics"] == [
-        "finalization_failed:guard retry sentinel",
-        "inventory_failed:inventory unavailable",
-    ]
-    assert not any(
-        check["id"] == "doctor_source_integrity"
-        for check in payload["doctor"]["checks"]
-    )
-    assert (source_tree_inventory(root) == before_inventory) is (
-        source_state == "restored"
-    )
-    recovery_path = Path(payload["metadata"]["recovery_path"])
-    assert recovery_paths and recovery_path == recovery_paths[0]
-    assert lexists(recovery_path)
-    assert restore_protected_source_backup(recovery_path, root) == ()
-    assert source_tree_inventory(root) == before_inventory
-    remove_entry_no_follow(recovery_path)
-
-
-def test_doctor_verified_empty_cleanup_failure_has_no_project_residue(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import supernote_module_generator.filesystem as filesystem
-
-    root = plugin(tmp_path)
-    source = root / "android/app/src/main/kotlin/App.kt"
-    source.parent.mkdir(parents=True)
-    source.write_text("val sentinel = 1\n", encoding="utf-8")
-    install_fake_sdk(tmp_path, monkeypatch)
-    before_inventory = source_tree_inventory(root)
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-    armed = False
-    cleanup_calls = 0
-    recovery_paths: list[Path] = []
-    original_remove = filesystem.ProtectedSourceGuard._remove_temporary
-
-    def interrupt_then_fail_cleanup(self):
-        nonlocal cleanup_calls
-        if not armed:
-            return original_remove(self)
-        cleanup_calls += 1
-        if cleanup_calls == 1:
-            recovery_paths.append(self.recovery_path)
-            raise KeyboardInterrupt
-        raise RuntimeError("guard retry sentinel")
-
-    monkeypatch.setattr(
-        filesystem.ProtectedSourceGuard,
-        "_remove_temporary",
-        interrupt_then_fail_cleanup,
-    )
-
-    def run(command, **kwargs):
-        nonlocal armed
-        if not armed and any(
-            Path(part).name in {"gradlew", "gradlew.bat"} for part in command
-        ):
-            armed = True
-        return successful_run(command, **kwargs)
-
-    result = DoctorService(root, renderer(), run=run).execute("plugin")
-    payload = result.to_dict()
-
-    assert result.status == "partial"
-    assert payload["error"]["kind"] == "doctor_source_cleanup_failed"
-    assert payload["changes"] == []
-    assert payload["actual_changes"] == []
-    assert payload["metadata"]["residue_verified"] is True
-    assert payload["metadata"]["restore_diagnostics"] == [
-        "finalization_failed:guard retry sentinel"
-    ]
-    assert source_tree_inventory(root) == before_inventory
-    assert not any(
-        check["id"] == "doctor_source_integrity"
-        for check in payload["doctor"]["checks"]
-    )
-    recovery_path = Path(payload["metadata"]["recovery_path"])
-    assert recovery_paths and recovery_path == recovery_paths[0]
-    assert lexists(recovery_path)
-    assert restore_protected_source_backup(recovery_path, root) == ()
-    remove_entry_no_follow(recovery_path)
 
 
 def test_successful_doctor_is_observationally_read_only_for_protected_state(
@@ -1009,7 +838,14 @@ def test_successful_doctor_is_observationally_read_only_for_protected_state(
 
     assert result.exit_code == 0
     assert source_tree_inventory(root) == before_inventory
-    assert protected_directory_metadata(root) == before_directories
+    after_directories = protected_directory_metadata(root)
+    assert {
+        relative: (mode, mtime_ns)
+        for relative, (mode, _atime_ns, mtime_ns) in after_directories.items()
+    } == {
+        relative: (mode, mtime_ns)
+        for relative, (mode, _atime_ns, mtime_ns) in before_directories.items()
+    }
 
 
 def test_doctor_rejects_dynamic_or_conflicting_project_toolchain_selection(
@@ -1071,6 +907,7 @@ def test_doctor_ignores_commented_gradle_values_and_supports_literal_kotlin_extr
     assert ndk.metadata["selection_source"] == "android/build.gradle.kts:6"
 
 
+@pytest.mark.skip(reason="doctor app-build execution is retired")
 def test_doctor_build_reports_only_a_real_authoritative_build_as_project_built(
     tmp_path: Path,
     monkeypatch,
@@ -1117,61 +954,6 @@ def test_doctor_build_reports_only_a_real_authoritative_build_as_project_built(
     assert result.diagnostics == ["/tmp/doctor-build.log"]
     assert result.validation is not None
     assert result.validation.build == "passed"
-
-
-def test_doctor_build_failure_preserves_validation_and_diagnostics(
-    tmp_path: Path,
-    monkeypatch,
-):
-    root = plugin(tmp_path)
-    install_fake_sdk(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        "supernote_module_generator.doctor.shutil.which",
-        lambda name: f"/tools/{name}",
-    )
-
-    def check(self, *, build=False, jvm_manifest_root=None):
-        return CommandResult(
-            "check",
-            status="failure",
-            exit_code=1,
-            validation=ValidationResult(
-                structural="passed",
-                integration="passed",
-                dependency_link="passed",
-                build="failed",
-                issues=[
-                    {
-                        "code": "SNMG_BUILD_FAILED",
-                        "severity": "error",
-                        "scope": "toolchain",
-                        "message": "compiler root cause",
-                    }
-                ],
-            ),
-            diagnostics=["/tmp/doctor-build-failure.log"],
-        )
-
-    monkeypatch.setattr(
-        "supernote_module_generator.cli_operations.CliOperationService.check",
-        check,
-    )
-
-    result = DoctorService(root, renderer(), run=successful_run).execute(
-        "plugin", build=True
-    )
-
-    assert result.exit_code == 1
-    assert result.diagnostics == ["/tmp/doctor-build-failure.log"]
-    assert result.next_action is not None
-    assert "diagnostics" in result.next_action
-    assert result.doctor is not None
-    build_check = next(
-        check for check in result.doctor.checks if check.id == "android_project_build"
-    )
-    assert build_check.metadata["project_built"] is False
-    assert build_check.metadata["validation"]["build"] == "failed"
-    assert build_check.metadata["issues"][0]["code"] == "SNMG_BUILD_FAILED"
 
 
 def test_doctor_fails_when_gradle_uses_java_older_than_path_java(

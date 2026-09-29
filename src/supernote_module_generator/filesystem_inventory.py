@@ -93,16 +93,6 @@ def _read_symlink(
             after, live
         ):
             raise _changed("symbolic link", path)
-        if after.st_atime_ns != opened.st_atime_ns:
-            _restore_symlink_atime(
-                authority,
-                parent_descriptor,
-                name,
-                path,
-                opened,
-                after,
-                operations,
-            )
         return target
     finally:
         operations.close_symlink_authority(authority)
@@ -134,26 +124,6 @@ def _open_symlink_authority(
     raise FilesystemError(f"Cannot retain symbolic-link inventory authority: {path}")
 
 
-def _restore_symlink_atime(
-    authority: SymlinkAuthority,
-    parent_descriptor: int,
-    name: str,
-    path: Path,
-    opened: os.stat_result,
-    after: os.stat_result,
-    operations: InventoryOperations,
-) -> None:
-    applied_atime_ns = operations.apply_symlink_atime(authority, opened)
-    restored = os.fstat(authority[1])
-    restored_live = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    if (
-        not operations.same_entry(after, restored)
-        or not operations.same_entry(restored, restored_live)
-        or restored.st_atime_ns != applied_atime_ns
-    ):
-        raise _changed("symbolic link", path)
-
-
 def _live_directory_metadata(
     path: Path,
     parent_descriptor: int | None,
@@ -180,19 +150,6 @@ def _verify_directory(
         after, live
     ):
         raise _changed("directory", path)
-    if after.st_atime_ns == before.st_atime_ns:
-        return
-    applied_atime_ns = operations.apply_descriptor_atime_only(
-        descriptor, before.st_atime_ns
-    )
-    restored = os.fstat(descriptor)
-    restored_live = _live_directory_metadata(path, parent_descriptor, name)
-    if (
-        not operations.same_entry(after, restored)
-        or not operations.same_entry(restored, restored_live)
-        or restored.st_atime_ns != applied_atime_ns
-    ):
-        raise _changed("directory", path)
 
 
 def _hash_regular(
@@ -217,41 +174,9 @@ def _hash_regular(
             after, live
         ):
             raise _changed("file", path)
-        if after.st_atime_ns != opened.st_atime_ns:
-            _restore_file_atime(
-                descriptor,
-                parent_descriptor,
-                name,
-                path,
-                opened,
-                after,
-                operations,
-            )
         return digest.hexdigest()
     finally:
         os.close(descriptor)
-
-
-def _restore_file_atime(
-    descriptor: int,
-    parent_descriptor: int,
-    name: str,
-    path: Path,
-    opened: os.stat_result,
-    after: os.stat_result,
-    operations: InventoryOperations,
-) -> None:
-    applied_atime_ns = operations.apply_descriptor_atime_only(
-        descriptor, opened.st_atime_ns
-    )
-    restored = os.fstat(descriptor)
-    restored_live = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    if (
-        not operations.same_entry(after, restored)
-        or not operations.same_entry(restored, restored_live)
-        or restored.st_atime_ns != applied_atime_ns
-    ):
-        raise _changed("file", path)
 
 
 def _walk(

@@ -1,0 +1,334 @@
+package supernote.generated.runtime
+
+import android.util.Log
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.uimanager.ViewManager
+import com.facebook.soloader.DirectorySoSource
+import com.facebook.soloader.SoLoader
+import dalvik.system.BaseDexClassLoader
+import java.io.File
+import java.security.MessageDigest
+
+class SupernoteModule(
+    private val context: ReactApplicationContext,
+) : ReactContextBaseJavaModule(context) {
+  private val lifecycleLock = Any()
+  private var lifecycleState = LifecycleState.NEW
+  private var sessionId: Long = 0L
+
+  override fun getName(): String = "SupernoteModuleRuntime"
+
+  override fun initialize() {
+    super.initialize()
+    val shouldInitialize = synchronized(lifecycleLock) {
+      if (lifecycleState != LifecycleState.NEW) {
+        false
+      } else {
+        lifecycleState = LifecycleState.INSTALL_PENDING
+        true
+      }
+    }
+    if (!shouldInitialize) return
+    if (!loadNativeLibrary()) {
+      synchronized(lifecycleLock) {
+        if (lifecycleState == LifecycleState.INSTALL_PENDING) {
+          lifecycleState = LifecycleState.NEW
+        }
+      }
+      return
+    }
+    context.runOnJSQueueThread {
+      val runtimePointer = context.javaScriptContextHolder?.get() ?: 0L
+      if (runtimePointer == 0L) {
+        Log.e(TAG, "JSI runtime pointer is unavailable")
+        abandonPendingInstall()
+        return@runOnJSQueueThread
+      }
+      val loader = SupernoteModule::class.java.classLoader
+      if (loader == null) {
+        Log.e(TAG, "plugin ClassLoader is unavailable")
+        abandonPendingInstall()
+        return@runOnJSQueueThread
+      }
+      val callInvoker = context.jsCallInvokerHolder
+      if (callInvoker == null) {
+        Log.e(TAG, "React Native JS CallInvoker is unavailable")
+        abandonPendingInstall()
+        return@runOnJSQueueThread
+      }
+      val installed = synchronized(lifecycleLock) {
+        if (lifecycleState != LifecycleState.INSTALL_PENDING) {
+          null
+        } else {
+          nativeInstall(runtimePointer, loader, context, callInvoker).also { installed ->
+            if (installed == 0L) {
+              lifecycleState = LifecycleState.NEW
+            } else {
+              sessionId = installed
+              lifecycleState = LifecycleState.ACTIVE
+            }
+          }
+        }
+      } ?: return@runOnJSQueueThread
+      if (installed == 0L) {
+        Log.e(TAG, "Generated runtime installation failed")
+      }
+    }
+  }
+
+  override fun invalidate() {
+    val invalidated = synchronized(lifecycleLock) {
+      lifecycleState = LifecycleState.INVALIDATED
+      sessionId.also { sessionId = 0L }
+    }
+    if (invalidated != 0L) nativeInvalidate(invalidated)
+    super.invalidate()
+  }
+
+  private fun abandonPendingInstall() {
+    synchronized(lifecycleLock) {
+      if (lifecycleState == LifecycleState.INSTALL_PENDING) {
+        lifecycleState = LifecycleState.NEW
+      }
+    }
+  }
+
+  private fun loadNativeLibrary(): Boolean = try {
+    val pluginClassLoader = SupernoteModule::class.java.classLoader
+    val libraryPath =
+        (pluginClassLoader as? BaseDexClassLoader)
+            ?.findLibrary("sn_supernote_runtime_8e5aabfdb931")
+            ?: error("Cannot find libsn_supernote_runtime_8e5aabfdb931.so")
+    val registrationLibraryPath =
+        pluginClassLoader.findLibrary("sn_supernote_runtime_8e5aabfdb931_registration")
+            ?: error("Cannot find libsn_supernote_runtime_8e5aabfdb931_registration.so")
+    val thread = Thread.currentThread()
+    val previous = thread.contextClassLoader
+    val runtimeDirectory =
+        File(libraryPath).parentFile
+            ?: error("Generated runtime native-library directory is unavailable")
+    if (!runtimeDirectory.isDirectory) {
+      error("Generated runtime native-library directory does not exist")
+    }
+    val runtimeLoadName =
+        "sn_supernote_runtime_8e5aabfdb931_" +
+            Integer.toHexString(System.identityHashCode(pluginClassLoader)) +
+            "_" + java.lang.Long.toHexString(System.nanoTime())
+    val runtimeCopy = File(runtimeDirectory, "lib$runtimeLoadName.so")
+    val binaryHash = sha256(File(libraryPath))
+    val binaryRegistryKey = "supernote.module.binary.sn_supernote_runtime_8e5aabfdb931.v1.$binaryHash"
+    try {
+      thread.contextClassLoader = pluginClassLoader
+      SoLoader.loadLibrary("jsi")
+      File(libraryPath).copyTo(runtimeCopy, overwrite = true)
+      synchronized(System.getProperties()) {
+        val sourcePath = runtimeDirectory.canonicalPath
+        val registeredSource = System.getProperty("supernote.module.source.sn_supernote_runtime_8e5aabfdb931.v1")
+        if (registeredSource != sourcePath) {
+          SoLoader.prependSoSource(
+              DirectorySoSource(
+                  runtimeDirectory,
+                  DirectorySoSource.RESOLVE_DEPENDENCIES,
+              ),
+          )
+          System.setProperty("supernote.module.source.sn_supernote_runtime_8e5aabfdb931.v1", sourcePath)
+        }
+        val cachedPublication = System.getProperty(binaryRegistryKey)
+        if (cachedPublication != null) {
+          val separator = cachedPublication.indexOf(':')
+          if (separator <= 0 || separator == cachedPublication.lastIndex) {
+            error("SNMG_GENERATION_STATE_CORRUPT: cached registrar is malformed")
+          }
+          val cachedGeneration = cachedPublication.substring(0, separator)
+          val cachedAddress = cachedPublication.substring(separator + 1).toLongOrNull()
+              ?: error("SNMG_GENERATION_STATE_CORRUPT: cached registrar address is invalid")
+          if (cachedAddress == 0L ||
+              !SupernoteModuleNativeRegistrationBridge.register(
+                  File(registrationLibraryPath),
+                  cachedAddress,
+                  cachedGeneration,
+                  pluginClassLoader,
+              )) {
+            error("Cannot reuse unchanged generated runtime natives")
+          }
+          Log.i(TAG, "Reused native generation $cachedGeneration for sha256=$binaryHash")
+        } else {
+        val retainedRaw = System.getProperty("supernote.module.generations.sn_supernote_runtime_8e5aabfdb931.v1")
+        val retainedGenerations =
+            if (retainedRaw == null) {
+              0
+            } else {
+              retainedRaw.toIntOrNull()
+                  ?: error(
+                      "SNMG_GENERATION_STATE_CORRUPT: native generation count " +
+                          "is not an integer: $retainedRaw",
+                  )
+            }
+        val retainedIds =
+            System.getProperty("supernote.module.generation-ids.sn_supernote_runtime_8e5aabfdb931.v1")
+                ?.takeIf { it.isNotEmpty() }
+                ?.split(',')
+                ?: emptyList()
+        if (retainedIds.size != retainedGenerations) {
+          error(
+              "SNMG_GENERATION_STATE_CORRUPT: native generation count " +
+                  "$retainedGenerations disagrees with loaded IDs " +
+                  retainedIds.joinToString(","),
+          )
+        }
+        if (retainedGenerations !in 0 until MAX_RETAINED_GENERATIONS) {
+          error(
+              "SNMG_RESTART_REQUIRED: native generation limit reached " +
+                  "(count=$retainedGenerations, limit=$MAX_RETAINED_GENERATIONS, " +
+                  "loaded=${retainedIds.joinToString(",")}); restart PluginHost",
+          )
+        }
+        // Reserve monotonically before loading. A loader failure may still
+        // leave the DSO process-resident, so this slot is never decremented.
+        System.setProperty(
+            "supernote.module.generations.sn_supernote_runtime_8e5aabfdb931.v1",
+            (retainedGenerations + 1).toString(),
+        )
+        System.setProperty(
+            "supernote.module.generation-ids.sn_supernote_runtime_8e5aabfdb931.v1",
+            (retainedIds + runtimeLoadName).joinToString(","),
+        )
+        System.setProperty("supernote.module.load-request.sn_supernote_runtime_8e5aabfdb931.v1", runtimeLoadName)
+        System.clearProperty("supernote.module.registrar.sn_supernote_runtime_8e5aabfdb931.v1")
+        try {
+          // The parent-loaded SoLoader resolves PluginHost's JSI/React Native
+          // dependencies. The source is registered once and each generation
+          // gets a unique logical name. The hard cap bounds process-retained
+          // native generations while supporting the 25-cycle stress gate.
+          SoLoader.loadLibrary(runtimeLoadName)
+          val publication =
+              System.getProperty("supernote.module.registrar.sn_supernote_runtime_8e5aabfdb931.v1")
+                  ?: error("Generated runtime registrar is unavailable")
+          val separator = publication.indexOf(':')
+          if (separator <= 0 || separator == publication.lastIndex) {
+            error("Generated runtime registrar publication is malformed")
+          }
+          val publishedGeneration = publication.substring(0, separator)
+          if (publishedGeneration != runtimeLoadName) {
+            error(
+                "Generated runtime generation mismatch: expected " +
+                    "$runtimeLoadName but loaded $publishedGeneration",
+            )
+          }
+          val registrarAddress = publication.substring(separator + 1).toLongOrNull()
+              ?: error("Generated runtime registrar address is invalid")
+          if (registrarAddress == 0L ||
+              !SupernoteModuleNativeRegistrationBridge.register(
+                  File(registrationLibraryPath),
+                  registrarAddress,
+                  runtimeLoadName,
+                  pluginClassLoader,
+              )) {
+            error("Cannot register generated runtime natives")
+          }
+          System.setProperty(binaryRegistryKey, publication)
+        } finally {
+          if (System.getProperty("supernote.module.load-request.sn_supernote_runtime_8e5aabfdb931.v1") == runtimeLoadName) {
+            System.clearProperty("supernote.module.load-request.sn_supernote_runtime_8e5aabfdb931.v1")
+          }
+        }
+        }
+      }
+    } finally {
+      thread.contextClassLoader = previous
+      if (runtimeCopy.exists() && !runtimeCopy.delete()) {
+        Log.w(TAG, "Cannot delete isolated generated runtime $runtimeCopy")
+      }
+    }
+    true
+  } catch (failure: Throwable) {
+    Log.e(TAG, "Cannot load the generated runtime", failure)
+    false
+  }
+
+  private external fun nativeInstall(
+      runtimePointer: Long,
+      classLoader: ClassLoader,
+      platformContext: ReactApplicationContext,
+      callInvoker: com.facebook.react.turbomodule.core.interfaces.CallInvokerHolder,
+  ): Long
+  private external fun nativeInvalidate(sessionId: Long)
+
+  private companion object {
+    const val TAG = "SupernoteModuleRuntime"
+    const val MAX_RETAINED_GENERATIONS = 32
+
+    fun sha256(file: File): String {
+      val digest = MessageDigest.getInstance("SHA-256")
+      file.inputStream().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+          val count = input.read(buffer)
+          if (count < 0) break
+          digest.update(buffer, 0, count)
+        }
+      }
+      return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+    }
+  }
+
+  private enum class LifecycleState {
+    NEW,
+    INSTALL_PENDING,
+    ACTIVE,
+    INVALIDATED,
+  }
+}
+
+private object SupernoteModuleNativeRegistrationBridge {
+  fun register(
+      sourceLibrary: File,
+      registrarAddress: Long,
+      generationIdentity: String,
+      classLoader: ClassLoader,
+  ): Boolean {
+    if (registrarAddress == 0L) {
+      error("Generated runtime registrar address is invalid")
+    }
+    val directory =
+        sourceLibrary.parentFile
+            ?: error("Generated registration native-library directory is unavailable")
+    if (!directory.isDirectory) {
+      error("Generated registration native-library directory does not exist")
+    }
+    val bridge =
+        File.createTempFile("sn_supernote_runtime_8e5aabfdb931_registration-", ".so", directory)
+    return try {
+      sourceLibrary.copyTo(bridge, overwrite = true)
+      // System.load is deliberately invoked from this child-loaded class. The
+      // bridge has no JSI/React Native dependency and contains no runtime state.
+      System.load(bridge.absolutePath)
+      nativeRegister(registrarAddress, generationIdentity, classLoader)
+    } finally {
+      if (bridge.exists() && !bridge.delete()) {
+        Log.w(TAG, "Cannot delete temporary native-registration bridge $bridge")
+      }
+    }
+  }
+
+  private external fun nativeRegister(
+      registrarAddress: Long,
+      generationIdentity: String,
+      classLoader: ClassLoader,
+  ): Boolean
+
+  private const val TAG = "SupernoteModuleRuntime"
+}
+
+class SupernoteModulePackage : ReactPackage {
+  override fun createNativeModules(
+      reactContext: ReactApplicationContext,
+  ): List<NativeModule> = listOf(SupernoteModule(reactContext))
+
+  override fun createViewManagers(
+      reactContext: ReactApplicationContext,
+  ): List<ViewManager<*, *>> = emptyList()
+}

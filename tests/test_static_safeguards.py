@@ -41,9 +41,6 @@ TYPED_V4_BOUNDARIES = {
     "src/supernote_module_generator/jsi_binding_decisions.py",
     "src/supernote_module_generator/models.py",
     "src/supernote_module_generator/semantic_types.py",
-    "src/supernote_module_generator/template_contract.py",
-    "src/supernote_module_generator/transaction.py",
-    "src/supernote_module_generator/transaction_registry.py",
 }
 
 LOW_LEVEL_CONTRACT_MODULES = {
@@ -69,9 +66,6 @@ LOW_LEVEL_CONTRACT_MODULES = {
     "jsi_binding_decisions.py",
     "models.py",
     "semantic_types.py",
-    "template_contract.py",
-    "transaction.py",
-    "transaction_registry.py",
 }
 
 FORBIDDEN_HIGH_LEVEL_IMPORTS = {
@@ -150,7 +144,6 @@ def test_static_correctness_and_gradual_typing_baselines_are_checked_in():
         "cpp_global_functions.py",
         "cpp_source_routing.py",
         "jsi_binding_decisions.py",
-        "template_contract.py",
         "binding_codegen.py",
         "cpp_type_syntax.py",
     ):
@@ -164,12 +157,13 @@ def test_static_correctness_and_gradual_typing_baselines_are_checked_in():
     assert '"_windows_open_no_follow_handle"' not in filesystem_ratchet
     assert '"_windows_list_directory_entries"' not in filesystem_ratchet
     assert '("filesystem_inventory.py", ())' in filesystem_ratchet
-    transaction_ratchet = (ROOT / "ci/check_transaction_complexity.py").read_text(
+    generation_ratchet = (ROOT / "ci/check_transaction_complexity.py").read_text(
         encoding="utf-8"
     )
-    assert '("transaction_registry.py", ())' in transaction_ratchet
-    assert '("generation_service.py", ())' in transaction_ratchet
-    assert '("generation_execution.py", ())' in transaction_ratchet
+    assert "transaction.py" not in generation_ratchet
+    assert "transaction_registry.py" not in generation_ratchet
+    assert '("generation_service.py", ())' in generation_ratchet
+    assert '("generation_execution.py", ())' in generation_ratchet
 
 
 def test_complexity_ratchet_rejects_a_missing_target(tmp_path: Path) -> None:

@@ -13,8 +13,40 @@ from . import __version__
 from .filesystem import copy_tree_contents_no_follow, entry_kind
 from .feature_identity import FeatureIdentity
 from .feature_model import FeatureManifest, StarterFamily
-from .readme_codegen import render_feature_readme
+from .readme_codegen import (
+    feature_unavailable_message,
+    render_feature_readme,
+    runtime_unavailable_message,
+)
 from .semantic import SemanticApi
+
+GENERATED_ROOT = ".supernote-generated"
+FEATURE_STAGE_PREFIX = ".sn-module-gen-feature-stage-"
+GENERATED_PAYLOAD_FILES = (
+    f"{GENERATED_ROOT}/index.d.ts",
+    f"{GENERATED_ROOT}/index.js",
+    f"{GENERATED_ROOT}/README.md",
+)
+GENERATED_REQUIRED_FILES = (
+    *GENERATED_PAYLOAD_FILES,
+    f"{GENERATED_ROOT}/android/conversion.json",
+    f"{GENERATED_ROOT}/android/CMakeLists.txt",
+    f"{GENERATED_ROOT}/android/feature.cpp",
+    f"{GENERATED_ROOT}/android/internal.cpp",
+    f"{GENERATED_ROOT}/android/internal.hpp",
+    f"{GENERATED_ROOT}/android/jvm/JvmRegistration.java",
+    f"{GENERATED_ROOT}/android/package_registration.cpp",
+    f"{GENERATED_ROOT}/android/package_registration.hpp",
+    f"{GENERATED_ROOT}/android/registration.json",
+    f"{GENERATED_ROOT}/android/semantic.json",
+    f"{GENERATED_ROOT}/package-manifest.json",
+    f"{GENERATED_ROOT}/ownership.json",
+)
+GENERATED_OPTIONAL_FILES = (
+    f"{GENERATED_ROOT}/android/jvm_feature.cpp",
+    f"{GENERATED_ROOT}/android/jvm/KspAdapters.kt",
+)
+GENERATED_FILES = (*GENERATED_REQUIRED_FILES, *GENERATED_OPTIONAL_FILES)
 
 
 def _javascript_string(value: str) -> str:
@@ -46,20 +78,48 @@ class FeatureConfig:
             raise ValueError("starter families cannot be duplicated")
 
 
+def feature_scaffold_paths(config: FeatureConfig) -> tuple[str, ...]:
+    """Return the exact regular files authored by a fresh ``add`` scaffold."""
+
+    paths: list[str] = []
+    if StarterFamily.NATIVE in config.starters:
+        paths.extend(("android/src/main/cpp/feature.cpp", "CMakeLists.txt"))
+    if StarterFamily.JVM in config.starters:
+        namespace = config.android_namespace.replace(".", "/")
+        paths.append(f"android/src/main/java/{namespace}/FeatureApi.kt")
+    paths.extend(
+        (
+            "package.json",
+            f"{GENERATED_ROOT}/index.js",
+            f"{GENERATED_ROOT}/index.d.ts",
+            f"{GENERATED_ROOT}/README.md",
+            ".supernote-module.json",
+        )
+    )
+    return tuple(paths)
+
+
 def stage_feature(
     config: FeatureConfig,
     *,
     preserve_sources_from: Path | None = None,
+    staging_parent: Path | None = None,
 ) -> Path:
-    destination = config.output.resolve()
+    destination = config.output.absolute()
     parent = destination.parent
-    staging_parent = parent
-    while not staging_parent.exists() and staging_parent != staging_parent.parent:
-        staging_parent = staging_parent.parent
-    if not staging_parent.is_dir():
+    selected_staging_parent = staging_parent or parent
+    while (
+        not selected_staging_parent.exists()
+        and selected_staging_parent != selected_staging_parent.parent
+    ):
+        selected_staging_parent = selected_staging_parent.parent
+    if not selected_staging_parent.is_dir():
         raise ValueError(f"output parent does not exist: {parent}")
     temporary = Path(
-        tempfile.mkdtemp(prefix=".sn-module-gen-feature-stage-", dir=staging_parent)
+        tempfile.mkdtemp(
+            prefix=FEATURE_STAGE_PREFIX,
+            dir=selected_staging_parent,
+        )
     )
     try:
         starter_files = []
@@ -118,9 +178,20 @@ def stage_feature(
         package = {
             "name": config.npm_name,
             "version": config.package_version,
-            "main": "index.js",
-            "types": "index.d.ts",
-            "files": ["android/src/main", "index.js", "index.d.ts", "README.md"],
+            "main": f"{GENERATED_ROOT}/index.js",
+            "types": f"{GENERATED_ROOT}/index.d.ts",
+            "files": [
+                "android/src/main",
+                GENERATED_ROOT,
+                ".supernote-module.json",
+                "CMakeLists.txt",
+            ],
+            "supernoteNativeModule": {
+                "kind": "supernote_module_distribution",
+                "manifest": f"{GENERATED_ROOT}/package-manifest.json",
+                "protocol": "2.0",
+                "schemaVersion": "2.0",
+            },
         }
         if config.description:
             package["description"] = config.description
@@ -129,10 +200,24 @@ def stage_feature(
             "package.json",
             json.dumps(package, indent=2, ensure_ascii=False) + "\n",
         )
+        if StarterFamily.NATIVE in config.starters:
+            _write(
+                temporary,
+                "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.24)\n"
+                "cmake_policy(SET CMP0131 NEW)\n"
+                "if(NOT DEFINED SUPERNOTE_MODULE_TARGET OR\n"
+                "   NOT TARGET \"${SUPERNOTE_MODULE_TARGET}\")\n"
+                "  message(FATAL_ERROR\n"
+                "    \"SUPERNOTE_MODULE_TARGET must name the generated feature target\")\n"
+                "endif()\n\n"
+                "target_sources(${SUPERNOTE_MODULE_TARGET} PRIVATE\n"
+                "  android/src/main/cpp/feature.cpp)\n",
+            )
         global_name = "__supernoteModule"
         _write(
             temporary,
-            "index.js",
+            f"{GENERATED_ROOT}/index.js",
             "/* global globalThis */\n"
             "export class SupernoteError extends Error {\n"
             "  constructor(code, message) {\n"
@@ -144,7 +229,8 @@ def stage_feature(
             "const ERROR_CONSTRUCTOR_PROPERTY = '__supernoteErrorConstructor';\n"
             "const CPP_OBJECT_INFO_PROPERTY = '__supernoteCppObjectInfo';\n"
             "const JVM_OBJECT_INFO_PROPERTY = '__supernoteJvmObjectInfo';\n"
-            f"const INSTALL_ERROR = {_javascript_string(config.public_name + ' is not installed in the Supernote generated runtime')};\n\n"
+            f"const RUNTIME_UNAVAILABLE_ERROR = {_javascript_string(runtime_unavailable_message(config.npm_name))};\n"
+            f"const FEATURE_UNAVAILABLE_ERROR = {_javascript_string(feature_unavailable_message(config.npm_name))};\n\n"
             "const VALIDATION_REASONS = new Set([\n"
             "  'ARITY_MISMATCH',\n"
             "  'TYPE_MISMATCH',\n"
@@ -210,16 +296,14 @@ def stage_feature(
             "  return value instanceof RangeError && hasValidationDetails(value);\n"
             "}\n\n"
             "function requireFeature() {\n"
-            "  const runtime = globalThis."
-            + global_name
-            + ";\n"
-            "  if (!runtime || typeof runtime.feature !== 'function') {\n"
-            "    throw new Error(INSTALL_ERROR);\n"
+            "  const current = currentFeature();\n"
+            "  if (current.status === 'runtime-unavailable') {\n"
+            "    throw new Error(RUNTIME_UNAVAILABLE_ERROR);\n"
             "  }\n"
-            f"  const value = runtime.feature({_javascript_string(feature.feature_id)});\n"
-            "  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {\n"
-            "    throw new Error(INSTALL_ERROR);\n"
+            "  if (current.status === 'feature-unavailable') {\n"
+            "    throw new Error(FEATURE_UNAVAILABLE_ERROR);\n"
             "  }\n"
+            "  const value = current.value;\n"
             "  if (value[ERROR_CONSTRUCTOR_PROPERTY] !== SupernoteError) {\n"
             "    Object.defineProperty(value, ERROR_CONSTRUCTOR_PROPERTY, {\n"
             "      configurable: true,\n"
@@ -274,7 +358,7 @@ def stage_feature(
         )
         _write(
             temporary,
-            "index.d.ts",
+            f"{GENERATED_ROOT}/index.d.ts",
             "/* Generated by supernote_module_generator. Do not edit. */\n"
             "export type SupernoteFeatureStatus = 'available' | 'runtime-unavailable' | 'feature-unavailable';\n"
             "export function isFeatureAvailable(): boolean;\n"
@@ -287,9 +371,9 @@ def stage_feature(
             "export default feature;\n",
         )
         if preserve_sources_from is not None:
-            previous_types = preserve_sources_from / "index.d.ts"
+            previous_types = preserve_sources_from / GENERATED_ROOT / "index.d.ts"
             if previous_types.is_file():
-                shutil.copy2(previous_types, temporary / "index.d.ts")
+                shutil.copy2(previous_types, temporary / GENERATED_ROOT / "index.d.ts")
         implementation_roots = []
         if (temporary / "android/src/main/cpp").is_dir():
             implementation_roots.append(("C/C++", "android/src/main/cpp/"))
@@ -297,7 +381,7 @@ def stage_feature(
             implementation_roots.append(("Kotlin/Java", "android/src/main/java/"))
         _write(
             temporary,
-            "README.md",
+            f"{GENERATED_ROOT}/README.md",
             render_feature_readme(
                 npm_name=config.npm_name,
                 public_name=config.public_name,
@@ -311,14 +395,6 @@ def stage_feature(
             **feature.manifest(),
             "package_version": config.package_version,
             "description": config.description,
-            "generator_version": __version__,
-            "generated_files": [
-                ".supernote-module.json",
-                "index.d.ts",
-                "index.js",
-                "package.json",
-                "README.md",
-            ],
         }
         _write(
             temporary,

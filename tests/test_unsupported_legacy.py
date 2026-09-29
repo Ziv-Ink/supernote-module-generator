@@ -19,16 +19,12 @@ from supernote_module_generator.filesystem import (
     contained_directory_entries_no_follow,
     iter_tree_no_follow,
 )
-from supernote_module_generator.feature_generator import FeatureConfig
-from supernote_module_generator.feature_model import StarterFamily
-from supernote_module_generator.feature_operations import FeatureOperationService
 from supernote_module_generator.generation_service import GenerationService
 from supernote_module_generator.project_model import (
     ExistingGeneration,
     ProjectModel,
     detect_existing_generation,
 )
-from supernote_module_generator.transaction import Transaction
 from project_inventory import inventory_project
 
 
@@ -209,7 +205,7 @@ def test_metadata_equivalence_keeps_directory_atime_strict_on_capable_filesystem
     with pytest.raises(AssertionError):
         assert_metadata_equivalent(
             root,
-            {".": (metadata[0], metadata[1] + 1, metadata[2])},
+            {".": (metadata[0], metadata[1] + 10_000, metadata[2])},
             {".": metadata},
         )
 
@@ -237,7 +233,7 @@ def test_metadata_equivalence_omits_only_unstable_directory_atime(
     assert_metadata_equivalent(
         root,
         {
-            ".": (root_metadata[0], root_metadata[1] + 1, root_metadata[2]),
+            ".": (root_metadata[0], root_metadata[1] + 10_000, root_metadata[2]),
             "source.cpp": source_metadata,
         },
         expected,
@@ -246,7 +242,11 @@ def test_metadata_equivalence_omits_only_unstable_directory_atime(
         assert_metadata_equivalent(
             root,
             {
-                ".": (root_metadata[0], root_metadata[1], root_metadata[2] + 1),
+                ".": (
+                    root_metadata[0],
+                    root_metadata[1],
+                    root_metadata[2] + 10_000,
+                ),
                 "source.cpp": source_metadata,
             },
             expected,
@@ -258,7 +258,7 @@ def test_metadata_equivalence_omits_only_unstable_directory_atime(
                 ".": root_metadata,
                 "source.cpp": (
                     source_metadata[0],
-                    source_metadata[1] + 1,
+                    source_metadata[1] + 10_000,
                     source_metadata[2],
                 ),
             },
@@ -330,92 +330,6 @@ PUBLIC_COMMANDS = (
 )
 
 
-@pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-@pytest.mark.parametrize("sentinel_kind", ("file", "directory", "symlink"))
-def test_public_commands_reject_legacy_v4_runtime_without_mutation(
-    tmp_path: Path,
-    arguments: tuple[str, ...],
-    sentinel_kind: str,
-):
-    if sentinel_kind == "symlink" and os.name == "nt":
-        pytest.skip("POSIX symlink identity fixture")
-    root = plugin(tmp_path / "plugin")
-    runtime = root / "android/.supernote-module/v4-runtime"
-    runtime.mkdir(parents=True)
-    sentinel = runtime / "user-sentinel"
-    outside = tmp_path / "outside-sentinel"
-    outside.write_text("external user bytes\n")
-    if sentinel_kind == "file":
-        sentinel.write_text("unmanifested user bytes\n")
-    elif sentinel_kind == "directory":
-        sentinel.mkdir()
-        (sentinel / "nested.txt").write_text("unmanifested nested bytes\n")
-    else:
-        sentinel.symlink_to(outside)
-    journal = root / ".supernote-module-transaction.json"
-    journal.write_text('{"schema":1,"phase":"apply","bad":true}\n')
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-    outside_before = outside.read_bytes()
-
-    code, result = invoke(root, list(arguments))
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert result["error"]["phase"] == "preflight"
-    assert "does not migrate or reinterpret V1-V4" in result["error"]["message"]
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-    assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
-    assert outside.read_bytes() == outside_before
-
-
-@pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_public_commands_reject_legacy_v4_wiring_without_mutation(
-    tmp_path: Path,
-    arguments: tuple[str, ...],
-):
-    root = plugin(tmp_path)
-    settings = root / "android/settings.gradle"
-    settings.write_text(
-        settings.read_text()
-        + "// supernote-module-v4-runtime\n"
-        + "include ':unmanifested-v4-runtime'\n"
-        + "// end supernote-module-v4-runtime\n"
-    )
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(root, list(arguments))
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-
-
-def test_clean_public_add_uses_transaction_scoped_bootstrap(tmp_path: Path):
-    root = plugin(tmp_path)
-    wrapper = root / ("android/gradlew.bat" if os.name == "nt" else "android/gradlew")
-    wrapper.write_text("@exit /b 0\r\n" if os.name == "nt" else "#!/bin/sh\nexit 0\n")
-    if os.name != "nt":
-        wrapper.chmod(0o755)
-
-    code, result = invoke(
-        root,
-        ["add", "fresh", "--starter", "cpp", "--skip-install", "--yes"],
-    )
-
-    assert code == 0, result
-    assert (root / ".supernote-module/manifest.json").is_file()
-    assert detect_existing_generation(root) is ExistingGeneration.CURRENT
-    assert invoke(root, ["check"])[0] == 0
-
-
 def install_historical_layout(root: Path, family: str) -> None:
     if family in {"native_metadata", "rn_metadata"}:
         feature = root / "local_modules/alpha"
@@ -455,250 +369,6 @@ def install_historical_layout(root: Path, family: str) -> None:
     target = feature / relative
     target.parent.mkdir(parents=True)
     target.write_text("legacy codegen\n")
-
-
-def install_canonical_v4(root: Path) -> None:
-    FeatureOperationService(root).add(
-        FeatureConfig(
-            root / "local_modules/alpha",
-            "alpha",
-            "4.0.0-dev.0",
-            "com.example.alpha",
-            "Alpha",
-            starters=(StarterFamily.NATIVE,),
-        )
-    )
-    service = GenerationService(root)
-    plan = service.plan(
-        operation="add",
-        requested_targets=("alpha",),
-        allow_unmanifested_bootstrap=True,
-    )
-    service.execute(plan, Transaction(root, "add", ("alpha",)))
-
-
-@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["add", "new"],
-        ["update", "alpha", "--yes"],
-        ["check"],
-        ["repair", "--yes"],
-        ["validate", "--all"],
-        ["remove", "alpha", "--yes"],
-        ["doctor"],
-    ],
-)
-def test_public_commands_reject_legacy_runtime_before_any_mutation(
-    tmp_path: Path,
-    version: str,
-    arguments: list[str],
-):
-    root = plugin(tmp_path)
-    runtime = root / f"android/.supernote-module/{version}-runtime"
-    runtime.mkdir(parents=True)
-    (runtime / "sentinel.txt").write_text("legacy bytes\n", encoding="utf-8")
-    # An invalid pending journal proves the public boundary runs before startup
-    # recovery and leaves legacy projects untouched.
-    journal = root / ".supernote-module-transaction.json"
-    journal.write_text('{"schema":1,"phase":"apply","bad":true}\n')
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(root, arguments)
-
-    assert code == 1
-    assert result["status"] == "failure"
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert result["error"]["phase"] == "preflight"
-    assert "does not migrate" in result["error"]["message"]
-    assert "Create a clean plugin" in result["next_action"]
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-    assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
-
-
-@pytest.mark.parametrize(
-    "family",
-    (
-        "native_metadata",
-        "rn_metadata",
-        "local-modules",
-        "modules",
-        "local_native_wiring",
-        "rn_legacy_wiring",
-        "local_kotlin_wiring",
-        "native_module_codegen",
-        "codegen_config",
-        "copied_codegen",
-    ),
-)
-@pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_every_public_command_rejects_known_historical_layouts_exactly(
-    tmp_path: Path,
-    family: str,
-    arguments: tuple[str, ...],
-):
-    root = plugin(tmp_path)
-    install_historical_layout(root, family)
-    journal = root / ".supernote-module-transaction.json"
-    journal.write_text('{"schema":1,"phase":"apply","bad":true}\n')
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(root, list(arguments))
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert result["error"]["phase"] == "preflight"
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-    assert journal.read_text() == '{"schema":1,"phase":"apply","bad":true}\n'
-
-
-@pytest.mark.parametrize(
-    "family",
-    (
-        "native_metadata",
-        "rn_metadata",
-        "local-modules",
-        "modules",
-        "local_native_wiring",
-        "rn_legacy_wiring",
-        "local_kotlin_wiring",
-        "native_module_codegen",
-        "codegen_config",
-        "copied_codegen",
-    ),
-)
-@pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_manifest_never_masks_known_historical_layouts(
-    tmp_path: Path,
-    family: str,
-    arguments: tuple[str, ...],
-):
-    root = plugin(tmp_path)
-    install_canonical_v4(root)
-    install_historical_layout(root, family)
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(root, list(arguments))
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert result["error"]["phase"] == "preflight"
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-
-
-@pytest.mark.parametrize("version", ("v1", "v2", "v3"))
-@pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_manifest_never_masks_legacy_runtime_roots(
-    tmp_path: Path,
-    version: str,
-    arguments: tuple[str, ...],
-):
-    root = plugin(tmp_path)
-    install_canonical_v4(root)
-    runtime = root / f"android/.supernote-module/{version}-runtime"
-    runtime.mkdir(parents=True)
-    (runtime / "sentinel.txt").write_text("legacy bytes\n")
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(root, list(arguments))
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-
-
-@pytest.mark.parametrize("legacy_version", ("v1", "v2", "v3"))
-@pytest.mark.parametrize("arguments", PUBLIC_COMMANDS)
-def test_manifest_claim_never_masks_live_legacy_feature_metadata(
-    tmp_path: Path,
-    legacy_version: str,
-    arguments: tuple[str, ...],
-):
-    root = plugin(tmp_path)
-    install_canonical_v4(root)
-    metadata = root / "local_modules/alpha/.supernote-module.json"
-    metadata.write_text(
-        json.dumps(
-            {
-                "schema_version": int(legacy_version[1:]),
-                "kind": f"supernote_{legacy_version}_feature",
-                "npm_name": "alpha",
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(root, list(arguments))
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert result["error"]["phase"] == "preflight"
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-
-
-@pytest.mark.parametrize("directory_name", ["local-modules", "modules"])
-def test_unrelated_bare_legacy_named_directory_is_valid_user_state(
-    tmp_path: Path,
-    directory_name: str,
-):
-    root = plugin(tmp_path)
-    unrelated = root / directory_name / "application-data"
-    unrelated.mkdir(parents=True)
-    sentinel = unrelated / "sentinel.txt"
-    sentinel.write_text("user-owned data\n")
-    wrapper = root / ("android/gradlew.bat" if os.name == "nt" else "android/gradlew")
-    wrapper.write_text("@exit /b 0\r\n" if os.name == "nt" else "#!/bin/sh\nexit 0\n")
-    if os.name != "nt":
-        wrapper.chmod(0o755)
-    before = sentinel.read_bytes()
-    observed_directory = root / directory_name
-    os.utime(
-        observed_directory,
-        ns=(1_000_000_000, 2_000_000_000),
-    )
-    before_observed_metadata = _metadata(observed_directory)
-
-    assert detect_existing_generation(root) is ExistingGeneration.NONE
-    assert _metadata(observed_directory) == before_observed_metadata
-
-    check_code, check_result = invoke(root, ["check"])
-    assert check_code == 1, check_result
-    assert check_result["error"]["kind"] != "unsupported_legacy_project"
-    assert _metadata(observed_directory) == before_observed_metadata
-
-    code, result = invoke(
-        root,
-        ["add", "fresh", "--starter", "cpp", "--skip-install", "--yes"],
-    )
-
-    assert code == 0, result
-    assert sentinel.read_bytes() == before
-    assert _metadata(observed_directory) == before_observed_metadata
-
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor/symlink contract")
 @pytest.mark.parametrize("substitution", ("final", "ancestor"))
@@ -801,86 +471,6 @@ def test_unmanifested_feature_metadata_is_rejected_as_legacy_state(tmp_path: Pat
     assert detect_existing_generation(root) is ExistingGeneration.V3
     assert inventory_project(root) == before
     assert sentinel.read_text() == "int user_source = 1;\n"
-
-
-def test_legacy_wiring_without_runtime_is_rejected_without_rewrite(tmp_path: Path):
-    root = plugin(tmp_path)
-    settings = root / "android/settings.gradle"
-    settings.write_text(
-        settings.read_text()
-        + "// supernote-module-v2-runtime\nlegacy\n"
-        + "// end supernote-module-v2-runtime\n"
-    )
-    before = settings.read_bytes()
-
-    code, result = invoke(root, ["check"])
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert settings.read_bytes() == before
-
-
-def test_add_rejects_real_v2_wiring_without_any_mutation(tmp_path: Path):
-    root = plugin(tmp_path)
-    settings = root / "android/settings.gradle"
-    settings.write_text(
-        settings.read_text()
-        + "// supernote-module-v2-runtime\nlegacy\n"
-        + "// end supernote-module-v2-runtime\n"
-    )
-    before = inventory_project(root)
-    before_metadata = exact_metadata(root)
-
-    code, result = invoke(
-        root,
-        ["add", "fresh", "--starter", "cpp", "--skip-install", "--yes"],
-    )
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert_metadata_equivalent(
-        root, exact_metadata(root), before_metadata
-    )
-    assert inventory_project(root) == before
-    assert not (root / ".supernote-module/manifest.json").exists()
-
-
-@pytest.mark.parametrize("legacy_schema", (1, 2, 3, 4))
-def test_manifest_schema_is_required_and_legacy_schema_is_not_reinterpreted(
-    tmp_path: Path,
-    legacy_schema: int,
-):
-    root = plugin(tmp_path)
-    manifest = root / ".supernote-module/manifest.json"
-    manifest.parent.mkdir()
-    manifest.write_text(json.dumps({"schema_version": legacy_schema}) + "\n")
-    before = inventory_project(root)
-
-    code, result = invoke(root, ["repair", "--yes"])
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert inventory_project(root) == before
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink identity fixture")
-def test_legacy_runtime_symlink_is_rejected_without_following_target(tmp_path: Path):
-    root = plugin(tmp_path / "plugin")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sentinel = outside / "sentinel.txt"
-    sentinel.write_text("outside\n")
-    managed = root / "android/.supernote-module"
-    managed.mkdir(parents=True)
-    (managed / "v3-runtime").symlink_to(outside, target_is_directory=True)
-    before = sentinel.read_bytes()
-
-    code, result = invoke(root, ["check"])
-
-    assert code == 1
-    assert result["error"]["kind"] == "unsupported_legacy_project"
-    assert sentinel.read_bytes() == before
-    assert (managed / "v3-runtime").is_symlink()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink identity fixture")

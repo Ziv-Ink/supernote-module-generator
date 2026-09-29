@@ -107,34 +107,38 @@ def test_update_preserves_added_and_deleted_user_starter_files(tmp_path: Path):
 def test_update_preserves_last_generated_types_until_common_codegen_runs(tmp_path: Path):
     feature = generate_feature(config(tmp_path, StarterFamily.JVM))
     generated_types = "export interface DocumentFeature { pageCount(): number; }\n"
-    (feature / "index.d.ts").write_text(generated_types, encoding="utf-8")
+    (feature / ".supernote-generated/index.d.ts").write_text(
+        generated_types, encoding="utf-8"
+    )
 
     staged = stage_feature(
         config(tmp_path, StarterFamily.JVM), preserve_sources_from=feature
     )
 
-    assert (staged / "index.d.ts").read_text(encoding="utf-8") == generated_types
+    assert (
+        staged / ".supernote-generated/index.d.ts"
+    ).read_text(encoding="utf-8") == generated_types
 
 
 def test_initial_feature_readme_explains_import_generation_and_source_ownership(
     tmp_path: Path,
 ):
     feature = generate_feature(config(tmp_path))
-    readme = (feature / "README.md").read_text(encoding="utf-8")
+    readme = (feature / ".supernote-generated/README.md").read_text(encoding="utf-8")
     package = json.loads((feature / "package.json").read_text())
 
     assert "import Document from '@local/document';" in readme
     assert "No JavaScript-public declarations are currently generated" in readme
     assert "C/C++: `android/src/main/cpp/`" in readme
-    assert "sn-module-gen update @local/document" in readme
-    assert "replace this README and `index.d.ts`" in readme
-    assert "preserve the C++, Kotlin, and Java implementation source" in readme
-    assert "README.md" in package["files"]
+    assert "sn-module-gen update" in readme
+    assert "replace" in readme and "README" in readme and "index.d.ts" in readme
+    assert "preserves the C++, Kotlin, and Java implementation source" in readme
+    assert ".supernote-generated" in package["files"]
 
 
 def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_path: Path):
     feature = generate_feature(config(tmp_path))
-    index = (feature / "index.js").read_text()
+    index = (feature / ".supernote-generated/index.js").read_text()
     package = json.loads((feature / "package.json").read_text())
 
     assert "globalThis.__supernoteModule" in index
@@ -155,8 +159,14 @@ def test_feature_package_uses_shared_runtime_proxy_and_no_native_package(tmp_pat
     assert "__supernoteCppObjectInfo" in index
     assert "__supernoteJvmObjectInfo" in index
     assert "new Proxy(" in index
-    assert package["main"] == "index.js"
+    assert package["main"] == ".supernote-generated/index.js"
     assert "react-native" not in package
+    declarations = (feature / ".supernote-generated/index.d.ts").read_text()
+    assert (
+        "export type SupernoteFeatureStatus = 'available' | "
+        "'runtime-unavailable' | 'feature-unavailable';"
+    ) in declarations
+    assert "getFeatureStatus(): SupernoteFeatureStatus" in declarations
 
 
 def test_feature_package_imports_before_runtime_install_and_resolves_lazily(
@@ -167,7 +177,7 @@ def test_feature_package_imports_before_runtime_install_and_resolves_lazily(
         pytest.skip("Node.js is required to execute the generated ES module")
 
     feature = generate_feature(config(tmp_path))
-    index = (feature / "index.js").read_text(encoding="utf-8")
+    index = (feature / ".supernote-generated/index.js").read_text(encoding="utf-8")
     encoded = base64.b64encode(index.encode("utf-8")).decode("ascii")
     feature_id = json.loads(
         (feature / ".supernote-module.json").read_text(encoding="utf-8")
@@ -190,8 +200,26 @@ try {{
   earlyError = error;
 }}
 if (!earlyError || earlyError.message !==
-    'Document is not installed in the Supernote generated runtime') {{
+    'runtime-unavailable: @supernote/runtime is not loaded for @local/document. ' +
+    'Add @supernote/runtime as a direct dependency and rebuild the plugin.') {{
   throw new Error(`unexpected early-access result: ${{earlyError}}`);
+}}
+
+globalThis.__supernoteModule = {{feature: () => undefined}};
+if (generated.getFeatureStatus() !== 'feature-unavailable' ||
+    generated.isFeatureAvailable()) {{
+  throw new Error('missing feature availability was reported incorrectly');
+}}
+let featureError;
+try {{
+  generated.default.greet;
+}} catch (error) {{
+  featureError = error;
+}}
+if (!featureError || featureError.message !==
+    'feature-unavailable: @local/document is not loaded in the Supernote runtime. ' +
+    'Add @local/document as a direct dependency and rebuild the plugin.') {{
+  throw new Error(`unexpected missing-feature result: ${{featureError}}`);
 }}
 
 const nativeValue = {{native: true}};

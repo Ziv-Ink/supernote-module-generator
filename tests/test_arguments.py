@@ -41,16 +41,16 @@ def test_duplicate_starter_values_are_rejected():
 
 def test_repeated_identical_single_value_option_is_idempotent():
     parsed = parse_arguments(
-        ["update", "local-math", "--package-manager=npm", "--package-manager", "npm"]
+        ["add", "local-math", "--description=same", "--description", "same"]
     )
 
-    assert parsed.value("package_manager") == "npm"
+    assert parsed.value("description") == "same"
 
 
 def test_conflicting_single_value_option_is_rejected():
     with pytest.raises(ConfigurationError, match="conflicting values"):
         parse_arguments(
-            ["update", "local-math", "--package-manager=npm", "--package-manager=yarn"]
+            ["add", "local-math", "--description=one", "--description=two"]
         )
 
 
@@ -63,13 +63,10 @@ def test_conflicting_single_value_option_is_rejected():
             "--description requires a value",
         ),
         (["add", "local-math", "--starter=rust"], 'invalid starter family "rust"'),
-        (
-            ["update", "local-math", "--package-manager=pnpm"],
-            'invalid package manager "pnpm"',
-        ),
+        (["update", "--package-manager=pnpm"], "--package-manager was removed"),
         (["help", "unknown"], 'unknown command "unknown"'),
-        (["check", "local-math"], "check does not accept a module name"),
-        (["repair", "local-math"], "repair does not accept a module name"),
+        (["check", "local-math"], "check was removed"),
+        (["repair", "local-math"], "repair was removed"),
     ],
 )
 def test_parser_phase_policy_errors_remain_exact(arguments: list[str], message: str):
@@ -105,7 +102,7 @@ def test_double_dash_can_precede_the_command():
 
 
 def test_options_after_double_dash_are_not_applied():
-    parsed = parse_arguments(["validate", "--", "--all"])
+    parsed = parse_arguments(["add", "--", "--all"])
 
     assert parsed.positional == "--all"
     assert not parsed.has("all")
@@ -125,7 +122,7 @@ def test_double_dash_positional_still_passes_normal_package_validation(tmp_path:
     )
 
     code, _, stderr = invoke(
-        ["add", "--yes", "--skip-install", "--", "--help"], tmp_path
+        ["add", "--yes", "--", "--help"], tmp_path
     )
 
     assert code == 2
@@ -133,19 +130,15 @@ def test_double_dash_positional_still_passes_normal_package_validation(tmp_path:
     assert not (tmp_path / "local_modules").exists()
 
 
-def test_all_and_module_are_mutually_exclusive():
-    with pytest.raises(ConfigurationError, match="--all cannot"):
+def test_selective_validate_syntax_is_retired():
+    with pytest.raises(ConfigurationError, match="--all was removed"):
         parse_arguments(["validate", "local-math", "--all"])
 
 
-def test_remove_build_cleanup_requires_its_explicit_option():
-    default = parse_arguments(["remove", "local-math", "--yes"])
-    cleanup = parse_arguments(
-        ["remove", "local-math", "--delete-build-files", "--yes"]
-    )
-
-    assert not default.has("delete_build_files")
-    assert cleanup.has("delete_build_files")
+@pytest.mark.parametrize("command", ["check", "repair", "remove", "template"])
+def test_retired_commands_name_the_replacement_workflow(command: str):
+    with pytest.raises(ConfigurationError, match=f"{command}.*removed"):
+        parse_arguments([command])
 
 
 def test_output_modes_are_mutually_exclusive():
@@ -153,15 +146,24 @@ def test_output_modes_are_mutually_exclusive():
         parse_arguments(["doctor", "--quiet", "--json"])
 
 
-@pytest.mark.parametrize("option", ["--yes", "-y", "--dry-run"])
-def test_template_status_rejects_mutation_options(option: str):
-    with pytest.raises(ConfigurationError, match="template status does not accept"):
-        parse_arguments(["template", "status", option])
-
-
-def test_template_sync_modes_are_mutually_exclusive():
-    with pytest.raises(ConfigurationError, match="--dry-run and --yes"):
-        parse_arguments(["template", "sync", "--dry-run", "--yes"])
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--all",
+        "--build",
+        "--delete-build-files",
+        "--diff",
+        "--dry-run",
+        "--package-manager",
+        "--skip-install",
+    ],
+)
+def test_retired_options_are_precise(option: str):
+    arguments = ["update", option]
+    if option == "--package-manager":
+        arguments.append("npm")
+    with pytest.raises(ConfigurationError, match=f"{option} was removed"):
+        parse_arguments(arguments)
 
 
 def test_plain_and_no_color_are_valid_json_noops():
@@ -178,7 +180,7 @@ def test_root_help_is_exact_and_works_outside_plugin(tmp_path: Path):
     assert stderr == ""
 
 
-@pytest.mark.parametrize("command", ["add", "update", "validate", "remove", "doctor"])
+@pytest.mark.parametrize("command", ["add", "update", "validate", "doctor"])
 def test_two_command_help_routes_are_byte_identical(tmp_path: Path, command: str):
     first = invoke([command, "--help"], tmp_path)
     second = invoke(["help", command], tmp_path)
@@ -190,8 +192,7 @@ def test_add_help_preserves_multiline_example(tmp_path: Path):
     assert (
         "  sn-module-gen add @acme/stylus --starter kotlin \\\n"
         "    --javascript-name Stylus \\\n"
-        "    --android-namespace com.acme.stylus \\\n"
-        "    --package-manager yarn --yes\n"
+        "    --android-namespace com.acme.stylus --yes\n"
     ) in stdout
 
 
@@ -200,11 +201,11 @@ def test_help_describes_defaults_as_overridable_and_versions_as_separate():
     normalized = " ".join(add.split())
 
     assert "omitted choices use documented" in normalized
-    assert "unless --skip-install is present" in normalized
-    assert "Explicit options still override those defaults" in normalized
+    assert "Add does not invoke npm, Yarn, an app build" in normalized
+    assert "bounded standalone Gradle/KSP analysis" in normalized
+    assert "Authored source, metadata, package.json, and CMakeLists.txt" in normalized
     assert "Local feature package version" in normalized
-    assert "versionCode or versionName" in normalized
-    assert "With --yes, the C/C++ starter is selected" not in normalized
+    assert "omitted choices use documented defaults" in normalized
 
 
 def test_help_explains_devconfig_and_generated_documentation_refresh():
@@ -212,37 +213,25 @@ def test_help_explains_devconfig_and_generated_documentation_refresh():
     add = " ".join(COMMAND_HELP["add"].split())
     doctor = " ".join(COMMAND_HELP["doctor"].split())
 
-    assert "javaHome, androidSdk, and adb" in root
-    assert "plugin root's devconfig.json" in root
-    assert "generated Gradle semantics task" in add
-    assert "index.d.ts and the feature README" in add
-    assert "devconfig.json take priority" in add
-    assert "configured devconfig.json paths take priority" in doctor
+    assert "Authors own source, package.json, lockfiles, dependencies, and builds" in root
+    assert "bounded compiler/KSP analysis" in root
+    assert "Generated files live in dedicated generated locations" in add
+    assert "CMake 3.24 or newer" in doctor
 
 
-def test_help_matches_update_remove_and_doctor_behavior():
+def test_help_matches_update_and_doctor_behavior():
     update = " ".join(COMMAND_HELP["update"].split())
-    remove = " ".join(COMMAND_HELP["remove"].split())
     doctor = " ".join(COMMAND_HELP["doctor"].split())
 
-    assert "Update without asking for confirmation" in update
-    assert "parent dependency entry or installed local link" in update
-    assert "Accept the displayed update plan" not in update
-    assert "Without --yes, interactive removal requires" in remove
-    assert "--yes bypasses that prompt only when the target is" in remove
-    assert "Java 17 through 23" in doctor
-    assert "Java 17 is" in doctor and "recommended" in doctor
-    assert "NDK Clang with C23/C++23" in doctor
-    assert "--build" in doctor
-    assert "project-built" in doctor
+    assert "writes all generator-owned output even when bytes are unchanged" in update
+    assert "never installs dependencies" in update
+    assert "never installs tools, runs an app build" in doctor
+    assert "PluginHost/SELinux" in doctor
 
 
-def test_doctor_accepts_explicit_full_build_probe():
-    parsed = parse_arguments(["doctor", "--build", "--json"])
-
-    assert parsed.command == "doctor"
-    assert parsed.has("build")
-    assert parsed.output_mode == "json"
+def test_doctor_rejects_retired_build_probe():
+    with pytest.raises(ConfigurationError, match="--build was removed"):
+        parse_arguments(["doctor", "--build", "--json"])
 
 
 def test_version_is_exact_and_works_outside_plugin(tmp_path: Path):

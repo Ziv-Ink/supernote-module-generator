@@ -51,7 +51,7 @@ def _invoke(root: Path, arguments: list[str]) -> tuple[int, str, str]:
 def _feature(root: Path) -> Path:
     code, _, stderr = _invoke(
         root,
-        ["add", "safe", "--starter", "cpp", "--skip-install", "--yes"],
+        ["add", "safe", "--starter", "cpp", "--yes"],
     )
     assert code == 0, stderr
     return root / "local_modules/safe"
@@ -81,7 +81,7 @@ def test_invalid_feature_metadata_names_file_and_reports_preflight_error(
         value.update(replacement)
         metadata.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
-    code, _, stderr = _invoke(root, ["validate", "--all"])
+    code, _, stderr = _invoke(root, ["validate"])
 
     assert code == 1
     assert str(metadata) in stderr
@@ -99,7 +99,7 @@ def test_wrong_kind_json_result_is_not_silently_treated_as_no_features(tmp_path:
     stdout = io.StringIO()
 
     code = main(
-        ["--json", "validate", "--all"],
+        ["--json", "validate"],
         stdin=io.StringIO(),
         stdout=stdout,
         stderr=io.StringIO(),
@@ -126,7 +126,7 @@ def test_escaping_managed_feature_symlink_is_rejected_without_following_it(
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("outside stays untouched\n", encoding="utf-8")
 
-    code, _, stderr = _invoke(root, ["update", "safe", "--skip-install", "--yes"])
+    code, _, stderr = _invoke(root, ["update"])
 
     assert code == 2
     assert "target resolves outside the Supernote plugin" in stderr
@@ -147,7 +147,7 @@ def test_marked_cpp_boundary_error_has_source_preflight_classification(tmp_path:
     stdout = io.StringIO()
 
     code = main(
-        ["--json", "update", "safe", "--skip-install", "--yes"],
+        ["--json", "update"],
         stdin=io.StringIO(),
         stdout=stdout,
         stderr=io.StringIO(),
@@ -166,9 +166,8 @@ def test_marked_cpp_boundary_error_has_source_preflight_classification(tmp_path:
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["update", "safe", "--skip-install", "--yes"],
-        ["validate", "safe"],
-        ["remove", "safe", "--skip-install", "--yes"],
+        ["update"],
+        ["validate"],
     ],
 )
 @pytest.mark.parametrize(
@@ -180,7 +179,7 @@ def test_marked_cpp_boundary_error_has_source_preflight_classification(tmp_path:
         ({"npm_name": "../escaped"}, "invalid package name"),
     ],
 )
-def test_every_command_rejects_invalid_identity_metadata_before_mutation(
+def test_every_supported_project_command_rejects_invalid_identity_metadata_before_mutation(
     tmp_path: Path,
     arguments: list[str],
     change: dict[str, str],
@@ -230,7 +229,7 @@ def test_manifest_directory_must_match_its_canonical_package_path(tmp_path: Path
     value["feature_id"] = canonical_feature_id("other")
     metadata.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
-    code, _, stderr = _invoke(root, ["validate", "safe"])
+    code, _, stderr = _invoke(root, ["validate"])
 
     assert code != 0
     assert "noncanonical directory" in stderr

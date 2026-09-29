@@ -28,6 +28,24 @@ _RUNTIME_EXPORTS = (
 )
 
 
+def runtime_unavailable_message(npm_name: str) -> str:
+    """Return the actionable missing-runtime message for one module package."""
+
+    return (
+        f"runtime-unavailable: @supernote/runtime is not loaded for {npm_name}. "
+        "Add @supernote/runtime as a direct dependency and rebuild the plugin."
+    )
+
+
+def feature_unavailable_message(npm_name: str) -> str:
+    """Return the actionable missing-feature message for one module package."""
+
+    return (
+        f"feature-unavailable: {npm_name} is not loaded in the Supernote runtime. "
+        f"Add {npm_name} as a direct dependency and rebuild the plugin."
+    )
+
+
 def render_feature_readme(
     *,
     npm_name: str,
@@ -48,6 +66,27 @@ def render_feature_readme(
         (
             "This package exposes one Supernote feature to JavaScript. The examples and",
             "API below are generated from its marked C++, Kotlin, and Java declarations.",
+            "",
+            "## Install and build",
+            "",
+            "Declare the shared runtime and this module as direct dependencies:",
+            "",
+            "```sh",
+            f"npm install @supernote/runtime {npm_name}",
+            "# or: yarn add @supernote/runtime " + npm_name,
+            "```",
+            "",
+            "Yarn classic works directly. For modern Yarn, configure",
+            "`nodeLinker: node-modules` in `.yarnrc.yml`. Yarn Plug'n'Play is not",
+            "supported. Then run the plugin template's normal packaging command once:",
+            "",
+            "```sh",
+            "./buildPlugin.sh",
+            "# Windows: .\\buildPlugin.ps1",
+            "```",
+            "",
+            "The normal build discovers and compiles declared modules. Do not apply the",
+            "runtime Gradle helper manually, and do not run `sn-module-gen` in the consumer.",
             "",
             "## Import",
             "",
@@ -85,11 +124,12 @@ def render_feature_readme(
                 "## Public API",
                 "",
                 "No JavaScript-public declarations are currently generated for this feature.",
-                "After marking an API, run Update to regenerate this README and `index.d.ts`.",
+                "After marking an API, run plain `sn-module-gen update` to regenerate "
+                "this README and `index.d.ts`.",
             )
         )
     else:
-        examples = _quick_examples(public_name, public)
+        examples = _quick_examples(public_name, public, names)
         if examples:
             lines.extend(("", "## Quick use", "", "```ts", *examples, "```"))
         lines.extend(("", "## Public API", ""))
@@ -107,7 +147,22 @@ def render_feature_readme(
         _append_call_behavior(lines, public_name, public)
         _append_value_behavior(lines, public)
 
-    lines.extend(("", "## Implementation", ""))
+    lines.extend(
+        (
+            "",
+            "## Availability diagnostics",
+            "",
+            "`getFeatureStatus()` returns `available`, `runtime-unavailable`, or",
+            "`feature-unavailable`. Accessing the feature while unavailable throws the",
+            "matching actionable message:",
+            "",
+            f"- `{runtime_unavailable_message(npm_name)}`",
+            f"- `{feature_unavailable_message(npm_name)}`",
+            "",
+            "## Implementation",
+            "",
+        )
+    )
     for label, path in implementation_roots:
         lines.append(f"- {label}: `{path}`")
     lines.extend(
@@ -117,11 +172,11 @@ def render_feature_readme(
             "marked declarations, run:",
             "",
             "```sh",
-            f"sn-module-gen update {npm_name}",
+            "sn-module-gen update",
             "```",
             "",
-            "Add, Update, and Android generation replace this README and `index.d.ts`.",
-            "They preserve the C++, Kotlin, and Java implementation source.",
+            "Plain update replaces this generated README and `index.d.ts`.",
+            "It preserves the C++, Kotlin, and Java implementation source.",
             "",
             "Generator guides:",
             "",
@@ -252,12 +307,22 @@ def _append_value_behavior(lines: list[str], public: PublicApi) -> None:
         )
 
 
-def _quick_examples(public_name: str, public: PublicApi) -> list[str]:
+def _quick_examples(
+    public_name: str,
+    public: PublicApi,
+    names: dict[str, str],
+) -> list[str]:
     examples: list[str] = []
     if public.functions:
         binding = public.functions[0]
-        invocation = _invocation(f"{public_name}.", binding)
-        examples.append(_statement(invocation, binding))
+        examples.extend(
+            _example_binding_function(
+                public_name,
+                f"{public_name}.",
+                binding,
+                names,
+            )
+        )
     constructor = next(
         (
             item
@@ -268,12 +333,27 @@ def _quick_examples(public_name: str, public: PublicApi) -> list[str]:
         None,
     )
     if constructor is not None:
-        arguments = ", ".join(
-            parameter.name for parameter in constructor.constructor.parameters
+        parameters = constructor.constructor.parameters
+        local_name = _example_identifier(
+            _variable(constructor.name),
+            {public_name},
         )
-        examples.append(
-            f"const {_variable(constructor.name)} = "
-            f"{public_name}.{constructor.name}.create({arguments});"
+        aliases = _example_parameter_aliases(
+            parameters,
+            {public_name, local_name},
+        )
+        arguments = ", ".join(aliases)
+        if examples:
+            examples.append("")
+        examples.extend(
+            _example_function(
+                _example_identifier("exampleCreate", {public_name}),
+                parameters,
+                aliases,
+                f"const {local_name} = "
+                f"{public_name}.{constructor.name}.create({arguments});",
+                names,
+            )
         )
     if not examples:
         static = next(
@@ -289,12 +369,109 @@ def _quick_examples(public_name: str, public: PublicApi) -> list[str]:
         )
         if static is not None:
             item, binding = static
-            invocation = _invocation(f"{public_name}.{item.name}.", binding)
-            examples.append(_statement(invocation, binding))
-    return examples[:3]
+            examples.extend(
+                _example_binding_function(
+                    public_name,
+                    f"{public_name}.{item.name}.",
+                    binding,
+                    names,
+                )
+            )
+    return examples
 
 
-def _statement(invocation: str, binding: SemanticBinding) -> str:
+def _example_binding_function(
+    public_name: str,
+    invocation_prefix: str,
+    binding: SemanticBinding,
+    declaration_names: dict[str, str],
+) -> list[str]:
+    result_name = (
+        None
+        if binding.result.kind is SemanticTypeKind.VOID
+        else _example_identifier("result", {public_name})
+    )
+    aliases = _example_parameter_aliases(
+        binding.parameters,
+        {public_name, *(() if result_name is None else (result_name,))},
+    )
+    invocation = _invocation(invocation_prefix, binding, aliases)
+    return _example_function(
+        _example_identifier("exampleCall", {public_name}),
+        binding.parameters,
+        aliases,
+        _statement(invocation, binding, result_name=result_name),
+        declaration_names,
+        asynchronous=binding.execution is ExecutionMode.ASYNC,
+    )
+
+
+def _example_function(
+    name: str,
+    parameters: tuple[SemanticParameter, ...],
+    parameter_names: tuple[str, ...],
+    statement: str,
+    declaration_names: dict[str, str],
+    *,
+    asynchronous: bool = False,
+) -> list[str]:
+    prefix = "async " if asynchronous else ""
+    return [
+        f"{prefix}function {name}("
+        f"{_example_parameters(parameters, parameter_names, declaration_names)}) {{",
+        f"  {statement}",
+        "}",
+    ]
+
+
+def _example_parameter_aliases(
+    parameters: tuple[SemanticParameter, ...],
+    reserved: set[str],
+) -> tuple[str, ...]:
+    original_names = {item.name for item in parameters}
+    unavailable = set(reserved)
+    aliases: list[str] = []
+    for parameter in parameters:
+        alias = parameter.name
+        if alias in unavailable:
+            alias = _example_identifier(
+                parameter.name + "Value",
+                unavailable | original_names,
+            )
+        aliases.append(alias)
+        unavailable.add(alias)
+    return tuple(aliases)
+
+
+def _example_identifier(preferred: str, unavailable: set[str]) -> str:
+    if preferred not in unavailable:
+        return preferred
+    base = preferred + "Value"
+    candidate = base
+    suffix = 2
+    while candidate in unavailable:
+        candidate = f"{base}{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _example_parameters(
+    parameters: tuple[SemanticParameter, ...],
+    names: tuple[str, ...],
+    declaration_names: dict[str, str],
+) -> str:
+    return ", ".join(
+        f"{name}: {render_semantic_type(parameter.type, declaration_names)}"
+        for parameter, name in zip(parameters, names)
+    )
+
+
+def _statement(
+    invocation: str,
+    binding: SemanticBinding,
+    *,
+    result_name: str | None = None,
+) -> str:
     awaited = (
         f"await {invocation}"
         if binding.execution is ExecutionMode.ASYNC
@@ -302,12 +479,22 @@ def _statement(invocation: str, binding: SemanticBinding) -> str:
     )
     if binding.result.kind is SemanticTypeKind.VOID:
         return awaited + ";"
-    return f"const result = {awaited};"
+    assert result_name is not None
+    return f"const {result_name} = {awaited};"
 
 
-def _invocation(prefix: str, binding: SemanticBinding) -> str:
-    arguments = ", ".join(parameter.name for parameter in binding.parameters)
-    return f"{prefix}{binding.name}({arguments})"
+def _invocation(
+    prefix: str,
+    binding: SemanticBinding,
+    arguments: tuple[str, ...] | None = None,
+) -> str:
+    selected = (
+        tuple(parameter.name for parameter in binding.parameters)
+        if arguments is None
+        else arguments
+    )
+    arguments_text = ", ".join(selected)
+    return f"{prefix}{binding.name}({arguments_text})"
 
 
 def _binding_signature(

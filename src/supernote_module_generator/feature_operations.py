@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 from dataclasses import dataclass
 
-from . import __version__, binding_codegen
 from .errors import ConfigurationError, FilesystemError, GeneratorError
-from .feature_generator import FeatureConfig, stage_feature
+from .feature_generator import (
+    FEATURE_STAGE_PREFIX,
+    FeatureConfig,
+    feature_scaffold_paths,
+    stage_feature,
+)
 from .feature_identity import FeatureIdentity
 from .filesystem import (
+    FEATURE_ADD_INCOMPLETE_MARKER,
+    activate_contained_directory_no_replace,
     contained_directory_entries_no_follow,
     contained_entry_kind_no_follow,
     lexists,
@@ -19,23 +26,9 @@ from .feature_model import (
     FEATURE_MANIFEST_KIND,
     FeatureModelError,
     FeatureManifest,
-    FeatureRegistryEntry,
     ImplementationRoots,
-    PluginRuntimeRegistry,
 )
-from .plugin_runtime_codegen import (
-    RUNTIME_RELATIVE_ROOT,
-    generated_runtime_files,
-    stage_plugin_runtime,
-)
-from .plugin_build_integration import (
-    integration_mutation_files,
-    set_runtime_wiring,
-    verify_runtime_wiring,
-)
-from .semantic import SemanticApi
 from .models import ModuleInfo
-from .transaction import Transaction
 
 
 class FeatureOperationError(ConfigurationError):
@@ -95,66 +88,59 @@ class FeatureOperationService:
     def add(
         self,
         config: FeatureConfig,
-        *,
-        transaction: Transaction | None = None,
     ) -> Path:
-        had_features = bool(self.feature_paths())
-        runtime_root = self.root / RUNTIME_RELATIVE_ROOT
-        if (
-            not had_features
-            and contained_entry_kind_no_follow(self.root, runtime_root) is not None
-        ):
-            raise FeatureOperationError(
-                "shared generated runtime exists without feature or integrity-manifest "
-                f"ownership authority: {runtime_root}"
-            )
-        verify_runtime_wiring(
-            self.root,
-            enabled=had_features,
-            allow_missing_package=True,
-        )
-        destination = config.output.resolve()
-        if lexists(config.output) or destination.exists():
-            raise FeatureOperationError(f"feature already exists: {config.npm_name}")
-        journal, owns_journal = self._journal(
-            transaction, "add", (config.npm_name,)
-        )
+        self._reject_incomplete_staging()
+        destination = config.output.absolute()
         try:
-            staged_feature = stage_feature(config)
-            journal.track_created(staged_feature)
-            future = self._entries(extra=(staged_feature,), excluding=())
-            journal.track_created_directory(
-                (self.root / RUNTIME_RELATIVE_ROOT).parent
-            )
-            staged_runtime = stage_plugin_runtime(self.root, self._registry(future))
-            journal.track_created(staged_runtime)
-            journal.checkpoint("after_staging")
-            journal.activate(staged_feature, destination)
-            journal.checkpoint("after_first_file_replacement")
-            journal.activate(staged_runtime, runtime_root)
-            set_runtime_wiring(self.root, enabled=True)
-            journal.record_snapshot_results(integration_mutation_files(self.root))
-            journal.checkpoint("after_wiring")
-            verify_runtime_wiring(self.root, enabled=True)
-            if owns_journal:
-                journal.commit()
+            destination.relative_to(self.root)
+        except ValueError as exc:
+            raise FeatureOperationError(
+                f"feature destination is outside the plugin root: {destination}"
+            ) from exc
+        if lexists(destination) and not self.resumable_incomplete_activation(
+            destination
+        ):
+            self._reject_incomplete_activation(destination)
+            raise FeatureOperationError(f"feature already exists: {config.npm_name}")
+        staged_feature = stage_feature(config, staging_parent=self.root)
+        try:
+            try:
+                activate_contained_directory_no_replace(
+                    self.root,
+                    staged_feature,
+                    destination,
+                    linux_fallback_files=feature_scaffold_paths(config),
+                )
+            except FileExistsError as exc:
+                raise FeatureOperationError(
+                    f"feature already exists: {config.npm_name}"
+                ) from exc
+            if lexists(staged_feature):
+                shutil.rmtree(staged_feature)
             return destination
         except BaseException:
-            if owns_journal:
-                journal.rollback()
+            if lexists(staged_feature):
+                shutil.rmtree(staged_feature, ignore_errors=True)
             raise
 
-    def _journal(
-        self,
-        transaction: Transaction | None,
-        command: str,
-        modules: tuple[str, ...],
-    ) -> tuple[Transaction, bool]:
-        if transaction is not None:
-            return transaction, False
-        journal = Transaction(self.root, command, modules)
-        journal.snapshot(integration_mutation_files(self.root))
-        return journal, True
+    def _reject_incomplete_staging(self) -> None:
+        residues = tuple(
+            self.root / name
+            for name, _kind in contained_directory_entries_no_follow(
+                self.root, self.root
+            )
+            if name.startswith(FEATURE_STAGE_PREFIX)
+        )
+        if not residues:
+            return
+        paths = "\n".join(str(path) for path in residues)
+        raise FeatureMetadataError(
+            "incomplete authored feature staging was found:\n\n"
+            f"{paths}\n\n"
+            "Inspect these run-owned staging paths. Remove only the listed "
+            "staging paths, then rerun sn-module-gen add. Existing contents "
+            "will not be overwritten automatically."
+        )
 
     def find(self, npm_name: str) -> Path:
         for path in self.feature_paths():
@@ -162,7 +148,13 @@ class FeatureOperationService:
                 return path
         raise FeatureOperationError(f"feature not found: {npm_name}")
 
-    def feature_paths(self) -> list[Path]:
+    def feature_paths(
+        self,
+        *,
+        allowed_incomplete: Path | None = None,
+        allow_all_incomplete: bool = False,
+    ) -> list[Path]:
+        self._reject_incomplete_staging()
         root_kind = contained_entry_kind_no_follow(self.root, self.features_root)
         if root_kind == "symlink":
             self._reject_escaping_feature_links()
@@ -170,14 +162,22 @@ class FeatureOperationService:
             return []
         self._reject_escaping_feature_links()
         result: list[Path] = []
-        for metadata in self._canonical_metadata_candidates():
+        for metadata in self._canonical_metadata_candidates(
+            allowed_incomplete=allowed_incomplete,
+            allow_all_incomplete=allow_all_incomplete,
+        ):
             self._reject_escaping_managed_path(metadata)
             record = read_feature_record(metadata.parent)
             record.identity.validate_directory(self.root, metadata.parent)
             result.append(metadata.parent)
         return result
 
-    def _canonical_metadata_candidates(self) -> list[Path]:
+    def _canonical_metadata_candidates(
+        self,
+        *,
+        allowed_incomplete: Path | None,
+        allow_all_incomplete: bool,
+    ) -> list[Path]:
         candidates: list[Path] = []
         try:
             children = contained_directory_entries_no_follow(
@@ -210,6 +210,12 @@ class FeatureOperationService:
                         or package_kind != "directory"
                     ):
                         continue
+                    if self._skip_incomplete_activation(
+                        package,
+                        allowed_incomplete=allowed_incomplete,
+                        allow_all_incomplete=allow_all_incomplete,
+                    ):
+                        continue
                     metadata = package / ".supernote-module.json"
                     if (
                         contained_entry_kind_no_follow(self.root, metadata)
@@ -218,11 +224,50 @@ class FeatureOperationService:
                         candidates.append(metadata)
                 continue
             metadata = child / ".supernote-module.json"
-            if kind == "directory" and (
-                contained_entry_kind_no_follow(self.root, metadata) == "file"
-            ):
-                candidates.append(metadata)
+            if kind == "directory":
+                if self._skip_incomplete_activation(
+                    child,
+                    allowed_incomplete=allowed_incomplete,
+                    allow_all_incomplete=allow_all_incomplete,
+                ):
+                    continue
+                if contained_entry_kind_no_follow(self.root, metadata) == "file":
+                    candidates.append(metadata)
         return candidates
+
+    def _reject_incomplete_activation(self, feature: Path) -> None:
+        marker = feature / FEATURE_ADD_INCOMPLETE_MARKER
+        if contained_entry_kind_no_follow(self.root, marker) is None:
+            return
+        raise FeatureMetadataError(
+            "incomplete authored feature activation was found:\n\n"
+            f"{marker}\n\n"
+            "Rerun the same sn-module-gen add command to finish the scaffold. "
+            "If its recorded contents were modified, inspect and remove only "
+            "this incomplete scaffold before retrying. Update and validate will "
+            "not ignore it."
+        )
+
+    def _skip_incomplete_activation(
+        self,
+        feature: Path,
+        *,
+        allowed_incomplete: Path | None,
+        allow_all_incomplete: bool,
+    ) -> bool:
+        marker = feature / FEATURE_ADD_INCOMPLETE_MARKER
+        if contained_entry_kind_no_follow(self.root, marker) is None:
+            return False
+        if allow_all_incomplete or feature == allowed_incomplete:
+            return True
+        self._reject_incomplete_activation(feature)
+        raise AssertionError("incomplete activation rejection must raise")
+
+    def resumable_incomplete_activation(self, feature: Path) -> bool:
+        if contained_entry_kind_no_follow(self.root, feature) != "directory":
+            return False
+        marker = feature / FEATURE_ADD_INCOMPLETE_MARKER
+        return contained_entry_kind_no_follow(self.root, marker) == "file"
 
     def _reject_escaping_feature_links(self) -> None:
         """Reject managed package-root links without policing user source links."""
@@ -283,91 +328,23 @@ class FeatureOperationService:
                 f"resolves to {canonical}"
             ) from exc
 
-    def records(self) -> list[FeatureRecord]:
-        return [read_feature_record(path) for path in self.feature_paths()]
+    def records(
+        self,
+        *,
+        allowed_incomplete: Path | None = None,
+        allow_all_incomplete: bool = False,
+    ) -> list[FeatureRecord]:
+        return [
+            read_feature_record(path)
+            for path in self.feature_paths(
+                allowed_incomplete=allowed_incomplete,
+                allow_all_incomplete=allow_all_incomplete,
+            )
+        ]
 
     def find_record(self, npm_name: str) -> FeatureRecord:
         path = self.find(npm_name)
         return read_feature_record(path)
-
-    def expected_registry(self) -> PluginRuntimeRegistry:
-        return self._registry(self._entries(extra=(), excluding=()))
-
-    def verify_generated_state(self) -> list[str]:
-        """Return deterministic structural issues without mutating the plugin."""
-
-        records = self.records()
-        issues: list[str] = []
-        try:
-            verify_runtime_wiring(self.root, enabled=bool(records))
-        except Exception as exc:
-            issues.append(str(exc))
-        runtime = self.root / RUNTIME_RELATIVE_ROOT
-        if not records:
-            if runtime.exists():
-                issues.append("shared generated runtime exists without any features")
-            return issues
-        try:
-            expected = generated_runtime_files(self.expected_registry())
-        except Exception as exc:
-            issues.append(str(exc))
-            return issues
-        for relative, content in expected.items():
-            path = runtime / relative
-            if not path.is_file():
-                issues.append(f"missing generated runtime file: {path}")
-            elif path.read_text(encoding="utf-8") != content:
-                issues.append(f"stale generated runtime file: {path}")
-        for record in records:
-            for relative in (
-                ".supernote-module.json",
-                "package.json",
-                "index.js",
-                "index.d.ts",
-                "README.md",
-            ):
-                if not (record.path / relative).is_file():
-                    issues.append(f"missing generated feature file: {record.path / relative}")
-        return issues
-
-    def _entries(
-        self,
-        *,
-        extra: tuple[Path, ...],
-        excluding: tuple[Path, ...],
-    ) -> tuple[FeatureRegistryEntry, ...]:
-        excluded = {path.resolve() for path in excluding}
-        paths = [
-            path for path in self.feature_paths() if path.resolve() not in excluded
-        ]
-        paths.extend(extra)
-        entries = []
-        for path in paths:
-            manifest = read_feature_manifest(path)
-            native_root = path / manifest.roots.native
-            try:
-                semantic = (
-                    binding_codegen.scan_cpp_semantic_model(
-                        path, module_name=manifest.public_name
-                    )
-                    if native_root.is_dir()
-                    else SemanticApi()
-                )
-            except binding_codegen.CodegenError as exc:
-                raise FeatureSourceError(str(exc)) from exc
-            entries.append(FeatureRegistryEntry.create(manifest, semantic))
-        return tuple(entries)
-
-    def _registry(
-        self, entries: tuple[FeatureRegistryEntry, ...]
-    ) -> PluginRuntimeRegistry:
-        package = json.loads((self.root / "package.json").read_text(encoding="utf-8"))
-        plugin_id = str(package.get("name") or self.root.name)
-        return PluginRuntimeRegistry.create(
-            plugin_id=plugin_id,
-            generator_version=__version__,
-            features=entries,
-        )
 
 def read_feature_manifest(path: Path) -> FeatureManifest:
     metadata = path / ".supernote-module.json"

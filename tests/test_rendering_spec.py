@@ -8,10 +8,14 @@ import pytest
 from supernote_module_generator.models import (
     Change,
     CommandResult,
+    DependencyResult,
     DoctorCheckResult,
     DoctorResult,
     ErrorInfo,
+    ModuleInfo,
+    RecoveryAction,
     RollbackResult,
+    SubprocessError,
     ValidationResult,
     WarningInfo,
 )
@@ -315,3 +319,210 @@ def test_unicode_unsafe_fallback_guards_dynamic_text_and_navigation_symbols():
 
     assert stderr.getvalue() == "[!] Caf\\xe9 - ^/v \\U0001f642\n"
     assert stderr.getvalue().isascii()
+
+
+def _module(name: str = "alpha", *, validation: ValidationResult | None = None) -> ModuleInfo:
+    return ModuleInfo(
+        name,
+        "Alpha",
+        "feature",
+        "Feature",
+        f"/plugin/local_modules/{name}",
+        f"/plugin/local_modules/{name}/src",
+        f"com.example.{name}",
+        "0.1.0",
+        validation,
+    )
+
+
+def test_json_warning_and_cancelled_rendering_keep_stream_contracts():
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    renderer = Renderer("json", capabilities(), stdout=stdout, stderr=stderr)
+    renderer.warning(WarningInfo("config", "hidden", "preflight", "fix it"))
+    renderer.render(CommandResult("update", status="cancelled", exit_code=130))
+    assert '"status": "cancelled"' in stdout.getvalue()
+    assert stderr.getvalue() == ""
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    renderer = Renderer("human", capabilities(), stdout=stdout, stderr=stderr)
+    renderer.progress_emitted = True
+    renderer.render(
+        CommandResult(
+            "update",
+            status="cancelled",
+            exit_code=130,
+            warnings=[WarningInfo("config", "warning", "preflight", "fix it")],
+            metadata={"cancellation_message": "Stopped safely."},
+        )
+    )
+    assert stdout.getvalue() == "Stopped safely.\n"
+    assert "warning" in stderr.getvalue() and "fix it" in stderr.getvalue()
+    assert not renderer.progress_emitted
+
+
+def test_success_rendering_covers_module_project_plan_dependency_and_next_action():
+    stdout = io.StringIO()
+    renderer = Renderer("human", capabilities(), stdout=stdout)
+    result = CommandResult(
+        "add",
+        module=_module(),
+        changes=[Change("generated/a", "created", "generated")],
+        dependency=DependencyResult(True, "npm", "installed", True, ["npm", "install"], 1),
+        metadata={
+            "built": True,
+            "plan": {},
+            "requested_targets": ["alpha"],
+            "affected_targets": ["alpha", "beta"],
+            "diff": "-old\n+new",
+            "next_action": "Commit reviewed output.",
+        },
+    )
+    renderer.render(result)
+    output = stdout.getvalue()
+    assert "Requested:" in output and "Also affected:" in output
+    assert "created generated/a" in output and "Diff:" in output
+    assert 'Added and built feature "alpha"' in output
+    assert "Dependency: installed with npm" in output
+    assert "Commit reviewed output" in output
+
+    quiet = io.StringIO()
+    Renderer("quiet", capabilities(), stdout=quiet).render(
+        CommandResult("update", module=_module())
+    )
+    assert quiet.getvalue() == 'Updated feature "alpha"\n'
+
+
+@pytest.mark.parametrize(
+    ("modules", "built", "expected"),
+    [
+        ([_module()], False, "1 feature is valid"),
+        ([_module(), _module("beta")], False, "All 2 features are valid"),
+        ([_module(), _module("beta")], True, "All 2 features are valid and build successfully"),
+    ],
+)
+def test_validation_success_summarizes_complete_project(
+    modules: list[ModuleInfo], built: bool, expected: str
+) -> None:
+    stdout = io.StringIO()
+    Renderer("human", capabilities(), stdout=stdout).render(
+        CommandResult("validate", modules=modules, metadata={"built": built})
+    )
+    assert expected in stdout.getvalue()
+
+
+def test_empty_generation_plan_and_generic_success_are_explicit():
+    stdout = io.StringIO()
+    Renderer("human", capabilities(), stdout=stdout).render(
+        CommandResult(
+            "custom",
+            metadata={"plan": {}, "success_message": "Custom complete"},
+        )
+    )
+    output = stdout.getvalue()
+    assert "project state check" in output
+    assert output.count("(none)") == 2
+    assert "Custom complete" in output
+
+
+def test_usage_missing_error_and_generic_failure_recovery_are_distinct():
+    stderr = io.StringIO()
+    renderer = Renderer("human", capabilities(), stderr=stderr)
+    renderer.render(CommandResult("update", status="failure", exit_code=1))
+    renderer.render(
+        CommandResult(
+            "add",
+            status="failure",
+            exit_code=2,
+            error=ErrorInfo("usage", "parse", "bad option"),
+            metadata={"recovery_text": "Run add --help."},
+        )
+    )
+    renderer.render(
+        CommandResult(
+            "update",
+            status="failure",
+            exit_code=1,
+            error=ErrorInfo(
+                "subprocess_failed",
+                "generate",
+                "compiler failed",
+                SubprocessError(["compiler"], 7, [f"line {index}" for index in range(10)]),
+            ),
+            rollback=RollbackResult(True, "partial", ["a"]),
+            recovery=RecoveryAction("Retry", ["sn-module-gen", "update"]),
+            diagnostics=["/tmp/build.log"],
+            metadata={"phase_label": "Generating feature"},
+        )
+    )
+    output = stderr.getvalue()
+    assert "Internal error" in output
+    assert "Run add --help" in output
+    assert "Additional output omitted" in output
+    assert "sn-module-gen update" in output
+    assert "Diagnostics: /tmp/build.log" in output
+
+
+def test_authoritative_validation_failure_renders_codes_paths_and_evidence():
+    stderr = io.StringIO()
+    Renderer("human", capabilities(), stderr=stderr, debug=True).render(
+        CommandResult(
+            "validate",
+            status="failure",
+            exit_code=1,
+            validation=ValidationResult(
+                structural="failed",
+                issues=[
+                    {
+                        "code": "SNMG_MISSING",
+                        "scope": "feature",
+                        "feature_id": "feature-alpha",
+                        "message": "Generated file is missing.",
+                        "path": "generated/a",
+                    }
+                ],
+            ),
+            error=ErrorInfo(
+                "validation_failed",
+                "validate",
+                "invalid",
+                SubprocessError(["check"], 1, ["compiler detail"]),
+                {"transaction_id": "q6", "traceback": "trace"},
+            ),
+            diagnostics=["/tmp/validation.json"],
+            next_action="Run update.",
+        )
+    )
+    output = stderr.getvalue()
+    assert "SNMG_MISSING (feature-alpha)" in output
+    assert "Path: generated/a" in output
+    assert "compiler detail" in output
+    assert "Run update" in output and "/tmp/validation.json" in output
+    assert "Transaction: q6" in output and "Traceback:" in output
+
+
+def test_doctor_groups_render_pass_warning_failure_path_version_and_next_action():
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    checks = [
+        DoctorCheckResult("project", "Project", "required", "failed", "1.0", "/plugin", "bad project"),
+        DoctorCheckResult("node", "Node", "advisory", "warning", None, None, "node warning"),
+        DoctorCheckResult("cmake", "CMake", "required", "passed", "4.4", "/cmake", "ok"),
+    ]
+    Renderer("human", capabilities(), stdout=stdout, stderr=stderr).render(
+        CommandResult(
+            "doctor",
+            status="failure",
+            exit_code=1,
+            doctor=DoctorResult("custom", False, 1, 1, checks),
+            error=ErrorInfo("doctor_failed", "doctor", "one issue"),
+            next_action="Fix the project.",
+        )
+    )
+    output = stdout.getvalue() + stderr.getvalue()
+    assert "Doctor - custom" in output
+    assert "bad project" in output and "Path: /plugin" in output
+    assert "Detected: 1.0" in output
+    assert "node warning" in output and "CMake" in output
+    assert "Fix the project" in output

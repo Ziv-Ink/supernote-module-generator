@@ -13,9 +13,7 @@ permissions:
   contents: read
 
 env:
-  SUPERNOTE_TEMPLATE_COMMIT: af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f
-  SUPERNOTE_WIKI_COMMIT: 28cee5a54ea452c91a570dd48cbbadbbfadf30d0
-  EXPECTED_RELEASE_TAG: v0.1.2
+  EXPECTED_RELEASE_TAG: v0.1.3
   DISTRIBUTION_ARTIFACT: python-package-distributions-${{ github.sha }}
   PROVENANCE_ARTIFACT: python-package-provenance-${{ github.sha }}
 
@@ -26,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -60,14 +58,13 @@ jobs:
             src/supernote_module_generator/jsi_binding_decisions.py \
             src/supernote_module_generator/cpp_type_syntax.py \
             src/supernote_module_generator/binding_codegen.py \
-            src/supernote_module_generator/template_contract.py \
             src/supernote_module_generator/windows_authority.py \
             ci/release_asset_preflight.py \
             ci/release_provenance.py \
             --select C901
       - name: Ratchet filesystem safety-boundary complexity
         run: python ci/check_filesystem_complexity.py
-      - name: Ratchet transaction and generation orchestration complexity
+      - name: Ratchet generation orchestration complexity
         run: python ci/check_transaction_complexity.py
       - name: Run gradual public boundary typing checks
         run: python -m mypy
@@ -112,11 +109,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-      - uses: actions/checkout@v7
-        with:
-          repository: Ziv-Ink/supernote-plugin-template
-          ref: ${{ env.SUPERNOTE_TEMPLATE_COMMIT }}
-          path: official-template
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -142,68 +134,6 @@ jobs:
           name: coverage-platform-${{ runner.os }}
           path: .coverage.platform-${{ runner.os }}
           include-hidden-files: true
-      - name: Scaffold the official template launch contract
-        run: >-
-          python ci/scaffold_release_fixture.py
-          official-template/@supernote-plugin/sn-plugin-template/template
-          platform-plugin
-      - name: Apply the packaged template capability
-        run: >-
-          python ci/template_launch_contract.py sync platform-plugin
-      - name: Verify Bash and PowerShell launch-contract parity
-        run: >-
-          python ci/template_launch_contract.py verify platform-plugin
-      - name: Parse the Bash launch boundary
-        if: runner.os != 'Windows'
-        shell: bash
-        run: bash -n platform-plugin/scripts/runPlugin.sh
-      - name: Parse the PowerShell launch boundary
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $errorsFound = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'platform-plugin/scripts/runPlugin.ps1'),
-            [ref]$tokens,
-            [ref]$errorsFound
-          ) | Out-Null
-          if ($errorsFound.Count -ne 0) {
-            $errorsFound | ForEach-Object { Write-Error $_ }
-            exit 1
-          }
-      - name: Prepare fake ADB on Linux and macOS
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          adb_bin="$(python ci/template_launch_contract.py prepare \
-            "$RUNNER_TEMP/template-adb" platform-plugin)"
-          echo "ADB_BIN=$adb_bin" >> "$GITHUB_ENV"
-          echo "DEVICE_SERIAL=FAKE-SERIAL" >> "$GITHUB_ENV"
-          echo "UI_SETTLE_SECONDS=0" >> "$GITHUB_ENV"
-      - name: Prepare fake ADB on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $adbBin = python ci/template_launch_contract.py prepare `
-            "$env:RUNNER_TEMP/template-adb" platform-plugin
-          "ADB_BIN=$adbBin" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "DEVICE_SERIAL=FAKE-SERIAL" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "UI_SETTLE_SECONDS=0" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Exercise npm run run on Linux and macOS
-        if: runner.os != 'Windows'
-        working-directory: platform-plugin
-        shell: bash
-        run: npm run run 2>&1 | tee "$RUNNER_TEMP/template-run.log"
-      - name: Exercise npm run run on Windows
-        if: runner.os == 'Windows'
-        working-directory: platform-plugin
-        shell: pwsh
-        run: npm run run 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/template-run.log"
-      - name: Require the explicit unverified runtime outcome
-        run: >-
-          python ci/template_launch_contract.py output
-          "${{ runner.temp }}/template-run.log"
 
   coverage:
     name: Combined native-platform branch coverage
@@ -292,6 +222,22 @@ jobs:
             python -m supernote_module_generator.cli --version
           PYTHONPATH="$RUNNER_TEMP/sdist-smoke" \
             python -m supernote_module_generator.cli --help >/dev/null
+      - name: Rebuild the canonical wheel from the source distribution
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/sdist-source" "$RUNNER_TEMP/sdist-wheel"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist-source"
+          source_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          SOURCE_DATE_EPOCH="$source_epoch" python -m build \
+            --wheel --no-isolation \
+            --outdir "$RUNNER_TEMP/sdist-wheel" \
+            "$RUNNER_TEMP/sdist-source/sn_module_gen-0.1.3"
+          cmp dist/*.whl "$RUNNER_TEMP/sdist-wheel"/*.whl
+          python -m venv "$RUNNER_TEMP/sdist-wheel-smoke"
+          "$RUNNER_TEMP/sdist-wheel-smoke/bin/python" -m pip install \
+            --no-deps "$RUNNER_TEMP/sdist-wheel"/*.whl
+          "$RUNNER_TEMP/sdist-wheel-smoke/bin/sn-module-gen" --version
+          "$RUNNER_TEMP/sdist-wheel-smoke/bin/sn-module-gen" --help >/dev/null
       - name: Store exact-commit release distributions
         uses: actions/upload-artifact@v7
         with:
@@ -307,183 +253,45 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  android-fixture:
-    name: Generated Android plugin
+  package-minimum:
+    name: Minimum build tools and sdist-derived wheel
     needs: package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-          path: generator
-      - name: Verify exact generator source commit
-        working-directory: generator
-        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - uses: actions/checkout@v7
-        with:
-          repository: Ziv-Ink/supernote-plugin-template
-          ref: ${{ env.SUPERNOTE_TEMPLATE_COMMIT }}
-          path: official-template
-      - name: Verify pinned official template commit
-        working-directory: official-template
-        run: test "$(git rev-parse HEAD)" = "$SUPERNOTE_TEMPLATE_COMMIT"
-      - name: Clone the pinned self-contained Wiki candidate
-        run: >-
-          git clone generator/ci/fixtures/supernote-module-generator-wiki.bundle
-          official-wiki
-      - name: Verify pinned Wiki commit
-        working-directory: official-wiki
-        run: test "$(git rev-parse HEAD)" = "$SUPERNOTE_WIKI_COMMIT"
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: android-actions/setup-android@v3
-      - name: Install exact Android toolchain
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            'platforms;android-35' \
-            'build-tools;35.0.0' \
-            'ndk;27.1.12297006' \
-            'cmake;3.22.1'
+          python-version: "3.9"
       - uses: actions/download-artifact@v8
         with:
           name: ${{ env.DISTRIBUTION_ARTIFACT }}
-          path: generator/dist
-      - name: Install the exact release wheel
+          path: dist
+      - name: Build and install with the declared minimum backend
         run: |
-          python -m venv "$RUNNER_TEMP/generator-venv"
-          "$RUNNER_TEMP/generator-venv/bin/python" -m pip install --no-deps generator/dist/*.whl
-      - name: Scaffold the pinned official plugin
-        run: |
-          python generator/ci/scaffold_release_fixture.py \
-            official-template/@supernote-plugin/sn-plugin-template/template \
-            release-plugin
-      - name: Install official plugin dependencies
-        working-directory: release-plugin
-        run: npm install --ignore-scripts
-      - name: Generate C++ and Kotlin release examples
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          cd release-plugin
-          "$SUPERNOTE_MODULE_COMMAND" add readme-cpp \
-            --starter cpp --javascript-name ReadmeCpp \
-            --android-namespace com.example.readme_cpp --skip-install --yes
-          "$SUPERNOTE_MODULE_COMMAND" add readme-jvm \
-            --starter kotlin --javascript-name ReadmeJvm \
-            --android-namespace com.example.readme_jvm --skip-install --yes
-          cd ..
-          python generator/ci/materialize_readme_examples.py \
-            generator/README.md release-plugin
-          cd release-plugin
-          npm install --ignore-scripts
-          "$SUPERNOTE_MODULE_COMMAND" update --all --skip-install --yes
-          "$SUPERNOTE_MODULE_COMMAND" template sync --yes
-          "$SUPERNOTE_MODULE_COMMAND" template status
-      - name: Prove canonical no-op and generated JavaScript/TypeScript quality
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          cd release-plugin
-          "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
-            > "$RUNNER_TEMP/update-result.json"
-          npm run lint -- --max-warnings=0
-          npx tsc --noEmit
-          cd ..
-          python generator/ci/verify_command_result.py update-no-op \
-            "$RUNNER_TEMP/update-result.json"
-      - name: Compile Gradle KSP Kotlin CMake JNI and JSI read-only
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          cd release-plugin
-          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
-            > "$RUNNER_TEMP/check-result.json"
-          cd ..
-          python generator/ci/verify_command_result.py check-build \
-            "$RUNNER_TEMP/check-result.json"
-      - name: Build and verify the installable plugin package
-        working-directory: release-plugin
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          npm run build
-          npm run verify
-      - name: Scaffold the disposable Wiki acceptance project
-        run: |
-          python generator/ci/scaffold_release_fixture.py \
-            official-template/@supernote-plugin/sn-plugin-template/template \
-            wiki-plugin
-          cd wiki-plugin
-          npm install --ignore-scripts
-      - name: Audit pinned Wiki commands and run the public CLI scenario
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          "$RUNNER_TEMP/generator-venv/bin/python" \
-            generator/ci/run_wiki_acceptance.py \
-            official-wiki \
-            generator/README.md \
-            wiki-plugin \
-            "$SUPERNOTE_MODULE_COMMAND" \
-            "$RUNNER_TEMP/documented-commands.json"
-          cd wiki-plugin
-          git init
-          git config user.name 'Public release qualification'
-          git config user.email 'release-qualification@example.invalid'
-          git add -A
-          git commit -m 'Wiki acceptance baseline'
-      - name: Prove the Wiki project is canonical and source-read-only
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          cd wiki-plugin
-          "$SUPERNOTE_MODULE_COMMAND" --json update --all --skip-install --yes \
-            > "$RUNNER_TEMP/wiki-update-result.json"
-          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
-            > "$RUNNER_TEMP/wiki-check-result.json"
-          npm run lint -- --max-warnings=0
-          npx tsc --noEmit
-          test -z "$(git status --porcelain)"
-          cd ..
-          python generator/ci/verify_command_result.py update-no-op \
-            "$RUNNER_TEMP/wiki-update-result.json"
-          python generator/ci/verify_command_result.py check-build \
-            "$RUNNER_TEMP/wiki-check-result.json"
-      - name: Build and verify the Wiki acceptance package
-        working-directory: wiki-plugin
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          npm run build
-          npm run verify
+          python -m pip install setuptools==58.0.4 wheel==0.37.0
+          python -m pip wheel --no-deps --no-build-isolation \
+            --wheel-dir "$RUNNER_TEMP/minimum-wheel" dist/*.tar.gz
+          python -m venv "$RUNNER_TEMP/minimum-smoke"
+          "$RUNNER_TEMP/minimum-smoke/bin/python" -m pip install \
+            --no-deps "$RUNNER_TEMP/minimum-wheel"/*.whl
+          "$RUNNER_TEMP/minimum-smoke/bin/sn-module-gen" --version
+          "$RUNNER_TEMP/minimum-smoke/bin/sn-module-gen" --help >/dev/null
 
-  real-project:
-    name: Pinned file_reader_test acceptance
+  generator-qualification:
+    name: Installed generator (${{ matrix.os }}, CMake ${{ matrix.cmake }})
     needs: package
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        cmake: ["3.24.4", current]
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-          path: generator
-      - name: Clone the exact self-contained file_reader_test revision
-        run: >-
-          git clone generator/ci/fixtures/file_reader_test-9f626ed.bundle
-          file-reader-test
-      - name: Verify the pinned real-project revision
-        working-directory: file-reader-test
-        run: >-
-          test "$(git rev-parse HEAD)" =
-          9f626ed39be82b43ff74eb735d10b7de61f51508
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
@@ -494,130 +302,78 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
-      - name: Install exact Android toolchain
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            'platforms;android-35' \
-            'build-tools;35.0.0' \
-            'ndk;27.1.12297006' \
-            'cmake;3.22.1'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: "8.13"
       - uses: actions/download-artifact@v8
         with:
           name: ${{ env.DISTRIBUTION_ARTIFACT }}
-          path: generator/dist
-      - name: Install the exact qualified generator wheel
-        run: |
-          python -m venv "$RUNNER_TEMP/generator-venv"
-          "$RUNNER_TEMP/generator-venv/bin/python" -m pip install --no-deps generator/dist/*.whl
-      - name: Install the pinned real-project dependencies
-        working-directory: file-reader-test
-        run: npm install --ignore-scripts
-      - name: Exercise non-migration real-project scenarios 7.1-7.7 and retained 7.9-7.10
-        run: |
-          "$RUNNER_TEMP/generator-venv/bin/python" \
-            generator/ci/run_file_reader_acceptance.py \
-            file-reader-test \
-            "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" \
-            "$RUNNER_TEMP/file-reader-acceptance.json" \
-            generator/maintainers/device-evidence/v4-device-canary-2026-08-27.md \
-            generator/maintainers/device-evidence/v4-bounded-note-doc-2026-08-27
-      - name: Require current template capability in the real project
-        working-directory: file-reader-test
-        run: |
-          "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" template sync --yes
-          "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" template status
-      - name: Create disposable package metadata and freeze the generated baseline
-        working-directory: file-reader-test
+          path: dist
+      - name: Install source-test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Select the minimum CMake
+        if: matrix.cmake == '3.24.4'
+        run: python -m pip install cmake==3.24.4
+      - name: Select and verify the required native toolchain
+        shell: bash
+        run: >-
+          python ci/verify_command_result.py installed-select-toolchain
+          --github-env="$GITHUB_ENV"
+          --evidence="${{ runner.temp }}/generator-toolchain.json"
+      - name: Prepare exact installed-artifact identity
+        shell: bash
         run: |
           python - <<'PY'
-          import json
+          import hashlib
+          import os
           from pathlib import Path
-          Path("PluginConfig.json").write_text(
-              json.dumps(
-                  {
-                      "name": "file_reader_test",
-                      "pluginID": "file_reader_test",
-                      "versionCode": 1,
-                      "versionName": "1.0.0",
-                  },
-                  indent=2,
-              ) + "\n",
-              encoding="utf-8",
-          )
+          import shutil
+          import subprocess
+
+          root = Path.cwd()
+          wheel = next((root / "dist").glob("*.whl")).resolve()
+          sdist = next((root / "dist").glob("*.tar.gz")).resolve()
+          venv = Path(os.environ["RUNNER_TEMP"]) / "generator-wheel"
+          subprocess.run(("python", "-m", "venv", str(venv)), check=True)
+          scripts = venv / ("Scripts" if os.name == "nt" else "bin")
+          python = scripts / ("python.exe" if os.name == "nt" else "python")
+          command = scripts / ("sn-module-gen.exe" if os.name == "nt" else "sn-module-gen")
+          subprocess.run((str(python), "-m", "pip", "install", "--no-deps", str(wheel)), check=True)
+          values = {
+              "SUPERNOTE_MODULE_COMMAND": command,
+              "SUPERNOTE_Q5_MODULE_COMMAND": command,
+              "SUPERNOTE_Q5_PYTHON": python,
+              "SUPERNOTE_Q5_WHEEL": wheel,
+              "SUPERNOTE_Q5_WHEEL_SHA256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+              "SUPERNOTE_Q5_SDIST": sdist,
+              "SUPERNOTE_Q5_SDIST_SHA256": hashlib.sha256(sdist.read_bytes()).hexdigest(),
+              "SUPERNOTE_Q5_RUNTIME_ROOT": (root / "npm/supernote-runtime").resolve(),
+              "SUPERNOTE_GRADLE_COMMAND": shutil.which("gradle") or "gradle",
+              "SUPERNOTE_Q5_COMBINED_EVIDENCE": Path(os.environ["RUNNER_TEMP"]) / "generator-acceptance.json",
+              "SUPERNOTE_REQUIRE_INSTALLED_QUALIFICATION": "1",
+          }
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as stream:
+              for name, value in values.items():
+                  stream.write(f"{name}={value}\n")
           PY
-          git config user.name 'Public real-project qualification'
-          git config user.email 'release-qualification@example.invalid'
-          git add -A
-          git commit -m 'Disposable public acceptance baseline'
-      - name: Prove read-only build and generated-source quality
-        working-directory: file-reader-test
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
+      - name: Execute installed author and immutable-consumer acceptance
+        shell: bash
         run: |
-          "$SUPERNOTE_MODULE_COMMAND" --json check --build \
-            > "$RUNNER_TEMP/file-reader-check.json"
-          npm run lint -- --max-warnings=0
-          npx tsc --noEmit
-          test -z "$(git status --porcelain)"
-          python ../generator/ci/verify_command_result.py check-build \
-            "$RUNNER_TEMP/file-reader-check.json"
-      - name: Build and verify the real-project package
-        working-directory: file-reader-test
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          npm run build
-          npm run verify
-      - name: Clone dedicated bounded NOTE and DOC acceptance fixtures
-        run: |
-          git clone generator/ci/fixtures/file_reader_test-9f626ed.bundle bounded-note
-          git clone generator/ci/fixtures/file_reader_test-9f626ed.bundle bounded-doc
-          test "$(git -C bounded-note rev-parse HEAD)" = 9f626ed39be82b43ff74eb735d10b7de61f51508
-          test "$(git -C bounded-doc rev-parse HEAD)" = 9f626ed39be82b43ff74eb735d10b7de61f51508
-      - name: Install bounded fixture dependencies
-        run: |
-          npm --prefix bounded-note install --ignore-scripts
-          npm --prefix bounded-doc install --ignore-scripts
-      - name: Materialize the source-backed 15-check NOTE and DOC pack
-        run: |
-          python generator/ci/device_acceptance/materialize.py \
-            bounded-note \
-            "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" \
-            note \
-            --identity-suffix Release \
-            --output "$RUNNER_TEMP/bounded-note-identity.json"
-          python generator/ci/device_acceptance/materialize.py \
-            bounded-doc \
-            "$RUNNER_TEMP/generator-venv/bin/sn-module-gen" \
-            doc \
-            --identity-suffix Release \
-            --output "$RUNNER_TEMP/bounded-doc-identity.json"
-          npm --prefix bounded-note install --ignore-scripts
-          npm --prefix bounded-doc install --ignore-scripts
-      - name: Compile and package both bounded host contexts
-        env:
-          SUPERNOTE_MODULE_COMMAND: ${{ runner.temp }}/generator-venv/bin/sn-module-gen
-        run: |
-          for project in bounded-note bounded-doc; do
-            npm --prefix "$project" run lint -- --max-warnings=0
-            (cd "$project" && npx tsc --noEmit)
-            (cd "$project" && "$SUPERNOTE_MODULE_COMMAND" --json check --build \
-              > "$RUNNER_TEMP/${project}-check.json")
-            python generator/ci/verify_command_result.py check-build \
-              "$RUNNER_TEMP/${project}-check.json"
-            npm --prefix "$project" run build
-            npm --prefix "$project" run verify
-          done
-      - name: Retain bounded NOTE and DOC identities and packages
+          python -m pytest -q \
+            --junitxml="${{ runner.temp }}/generator-acceptance.xml" \
+            tests/test_q5_installed_qualification.py \
+            tests/test_q5_combined_installed_acceptance.py
+          python ci/verify_command_result.py installed-verify \
+            --junit="${{ runner.temp }}/generator-acceptance.xml" \
+            --evidence="${{ runner.temp }}/generator-acceptance.json"
+      - name: Retain generator-only success or failure evidence
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bounded-note-doc-${{ github.sha }}
+          name: generator-acceptance-${{ runner.os }}-cmake-${{ matrix.cmake }}-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/bounded-note-identity.json
-            ${{ runner.temp }}/bounded-doc-identity.json
-            bounded-note/build/outputs/*.snplg
-            bounded-doc/build/outputs/*.snplg
-          if-no-files-found: error
+            ${{ runner.temp }}/generator-acceptance.xml
+            ${{ runner.temp }}/generator-acceptance.json
+            ${{ runner.temp }}/generator-toolchain.json
+          if-no-files-found: warn
           retention-days: 7

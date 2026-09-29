@@ -8,7 +8,6 @@ import subprocess
 import pytest
 
 import supernote_module_generator.filesystem as filesystem_module
-import supernote_module_generator.transaction as transaction_module
 from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.errors import FilesystemError
@@ -20,8 +19,7 @@ from supernote_module_generator.filesystem import (
     iter_tree_no_follow,
 )
 from supernote_module_generator.generation_service import GenerationService
-from supernote_module_generator.transaction import Transaction
-from supernote_module_generator.cli_operations import CliOperationService
+from supernote_module_generator.validation import GeneratedProjectValidator
 
 
 def _plugin(root: Path) -> Path:
@@ -48,31 +46,24 @@ def _plugin(root: Path) -> Path:
         requested_targets=("alpha",),
         allow_unmanifested_bootstrap=True,
     )
-    service.execute(plan, Transaction(root, "bootstrap", ("alpha",)))
+    service.execute(plan)
     return root
 
 
-def _exercise_mutation_validation_and_rollback(root: Path) -> None:
+def _exercise_mutation_and_validation(root: Path) -> None:
     service = GenerationService(root)
     source = root / "local_modules/alpha/android/src/main/cpp/feature.cpp"
-    generated = root / "local_modules/alpha/index.d.ts"
+    generated = root / "local_modules/alpha/.supernote-generated/index.d.ts"
     baseline_generated = generated.read_bytes()
     source.write_text(
         source.read_text(encoding="utf-8").replace("greet(", "greetPath("),
         encoding="utf-8",
     )
     plan = service.plan(operation="update", requested_targets=("alpha",))
-    transaction = Transaction(root, "update", ("alpha",))
-    service.execute(plan, transaction, commit=False)
+    service.execute(plan)
     assert generated.read_bytes() != baseline_generated
-    rollback = transaction.rollback()
-    assert rollback.status == "completed"
-    assert generated.read_bytes() == baseline_generated
     assert "greetPath(" in source.read_text(encoding="utf-8")
-
-    committed = service.plan(operation="update", requested_targets=("alpha",))
-    service.execute(committed, Transaction(root, "update", ("alpha",)))
-    assert CliOperationService(root).check().status == "success"
+    assert GeneratedProjectValidator(root).validate().status == "success"
 
 
 @pytest.mark.parametrize("directory", ("project with spaces", "פרויקט-unicode-文档"))
@@ -81,10 +72,11 @@ def test_active_path_supports_spaces_and_unicode(
 ) -> None:
     root = _plugin(tmp_path / directory)
 
-    _exercise_mutation_validation_and_rollback(root)
+    _exercise_mutation_and_validation(root)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows long-path contract")
+@pytest.mark.skip(reason="retired whole-project rollback and V4 path contract")
 def test_windows_long_path_reaches_active_mutation_validation_and_rollback(
     tmp_path: Path,
 ) -> None:
@@ -95,20 +87,7 @@ def test_windows_long_path_reaches_active_mutation_validation_and_rollback(
     root = _plugin(root)
 
     assert len(str(root)) >= 285
-    _exercise_mutation_validation_and_rollback(root)
-
-
-@pytest.mark.skipif(os.name != "nt", reason="native Windows transaction paths")
-def test_windows_transaction_entry_accepts_native_absolute_path(tmp_path: Path) -> None:
-    destination = tmp_path / "project with spaces" / "package.json"
-    destination.parent.mkdir()
-    destination.write_bytes(b"{}\n")
-
-    assert transaction_module._validate_absolute_entry_path(
-        tmp_path,
-        str(destination),
-        allow_missing_ancestors=False,
-    ) == destination
+    _exercise_mutation_and_validation(root)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows reparse-point contract")
@@ -228,6 +207,7 @@ def test_windows_symlink_target_read_retains_identity_across_aba_attempt(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows retained-atime race")
+@pytest.mark.skip(reason="read-only observation no longer rewrites access time")
 def test_windows_atime_neutralization_preserves_concurrent_mtime(
     tmp_path: Path,
     monkeypatch,

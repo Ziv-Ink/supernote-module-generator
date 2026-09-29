@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import json
-import os
-import subprocess
 import sys
 import time
 import traceback
@@ -17,16 +14,10 @@ from .arguments import COMMANDS, ParsedArguments, parse_arguments
 from .devconfig import configured_developer_environment
 from .doctor import DoctorService
 from .feature_cli_operations import FeatureCliOperationService
-from .feature_workflows import FeatureDecisionCollector, FeatureValidateDecisions
+from .feature_workflows import FeatureDecisionCollector
 from .errors import ConfigurationError, GeneratorError, OperationCancelled, PartialFailure
-from .filesystem import (
-    _windows_host,
-    _windows_path_key,
-    contained_entry_kind_no_follow,
-    read_contained_regular_bytes_no_follow,
-)
+from .filesystem import contained_entry_kind_no_follow
 from .helptext import help_for
-from .integrity_manifest import IntegrityManifestError, load_integrity_manifest
 from .interaction import (
     BackRequested,
     CancelRequested,
@@ -39,7 +30,6 @@ from .models import (
     CommandResult,
     ErrorInfo,
     RecoveryAction,
-    RollbackResult,
     SubprocessError,
     WarningInfo,
 )
@@ -48,10 +38,8 @@ from .operation_lock import plugin_operation_lock
 from .project import resolve_plugin_root
 from .project_model import assert_public_project
 from .rendering import Renderer, TerminalCapabilities
-from .cli_operations import CliOperationService
-from .template_contract import TemplateContractService
-from .subprocesses import run_process
-from .transaction import JOURNAL_NAME, recover_pending
+
+JOURNAL_NAME = ".supernote-module-transaction.json"
 
 # Public starter choices describe source developers write, not backends.
 STARTER_CHOICES = [
@@ -67,9 +55,8 @@ STARTER_CHOICES = [
 STARTER_UI_CHOICES = STARTER_CHOICES
 MAIN_ACTION_CHOICES = [
     ("add", "Add feature"),
-    ("update", "Update feature"),
-    ("validate", "Validate feature"),
-    ("remove", "Remove feature"),
+    ("update", "Update project"),
+    ("validate", "Validate project"),
     ("doctor", "Doctor"),
     ("help", "Help"),
     ("exit", "Exit"),
@@ -154,21 +141,17 @@ def _usage_recovery(command: str, message: str) -> str:
         )
         return suggestion + "Run `sn-module-gen --help` for available commands."
     if message.startswith("unknown option"):
-        target = f" {command}" if command in {"add", "update", "validate", "remove", "doctor"} else ""
+        target = f" {command}" if command in {"add", "update", "validate", "doctor"} else ""
         return f"Run `sn-module-gen{target} --help` for valid options."
     if message == "--starter is required without --yes in non-interactive mode":
         return (
             "Provide --starter cpp, --starter kotlin, or both; or use --yes to accept\n"
             "the C/C++ starter."
         )
-    if message == "--all cannot be used with a module name":
-        return "Choose one target or use --all."
     if message == "--quiet, --verbose, and --json cannot be combined":
         return "Choose one output mode."
     if message.startswith("invalid starter family"):
         return "Choose cpp or kotlin. Repeat --starter to scaffold both."
-    if message.startswith("invalid package manager"):
-        return "Choose one of: npm, yarn."
     if message.startswith("invalid package name"):
         return (
             "Use a valid npm package name containing lowercase letters, numbers, hyphens,\n"
@@ -195,14 +178,6 @@ def _usage_recovery(command: str, message: str) -> str:
         return "Provide one with --android-namespace."
     if message == "package name is required":
         return "Provide it as `sn-module-gen add <PACKAGE>`."
-    if message == "package manager is ambiguous":
-        return "Both package-lock.json and yarn.lock were found.\nProvide --package-manager npm or --package-manager yarn."
-    if message in {"npm is not available", "yarn is not available"}:
-        manager = message.split(" ", 1)[0]
-        return (
-            f"Install {manager} or choose the other supported package manager with\n"
-            "--package-manager."
-        )
     if message == "node is not available":
         return "Install Node.js, then rerun the command."
     if message.startswith("not a Supernote plugin"):
@@ -212,17 +187,10 @@ def _usage_recovery(command: str, message: str) -> str:
         )
     if message.startswith("non-interactive Add is missing required decisions"):
         return ""
-    if "needs more information in non-interactive mode" in message:
-        return "next: provide the missing target, or run this command in a terminal"
     if "requires --yes" in message:
         return "Provide --yes for non-interactive confirmation, or run this command in a terminal."
-    if message == "--yes requires an explicit module or --all":
-        return "Provide a module name or --all before using --yes."
-    if message.startswith("module ") and message.endswith(" was not found"):
-        return "Run `sn-module-gen validate --all` to list and check managed features."
     if message.startswith("module ") and message.endswith(" already exists"):
-        module = message[len('module "') : -len('" already exists')]
-        return f"Use `sn-module-gen update {module}` to refresh it."
+        return "Choose another package name; update never rewrites authored scaffolding."
     if message.startswith('"') and "exists but is not managed" in message:
         return "Move it, choose another package name, or remove it manually after reviewing its contents."
     if message.startswith("JavaScript name ") and "already used" in message:
@@ -324,73 +292,19 @@ def _exception_result(command: str, exc: Exception, debug: bool) -> CommandResul
     )
 
 
-def _startup_reconcile(root: Path, command: List[str]) -> bool:
-    try:
-        result = run_process(command, cwd=root, timeout=600)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+def _guard_legacy_journal(root: Path) -> None:
+    """Fail closed on journals created by the retired rollback workflow."""
 
-
-def _recover(root: Path, command: str, renderer: Renderer) -> List[object]:
-    try:
-        outcome = recover_pending(
-            root,
-            reconcile=lambda invocation: _startup_reconcile(root, invocation),
-        )
-    except PartialFailure as exc:
-        result = _startup_failure(command, exc)
-        renderer.render(result)
-        raise SystemExit(3)
-    if outcome.rollback.status == "partial":
-        recovery_summary = (
-            outcome.recovery_summary
-            or "Automatic startup recovery is incomplete."
-        )
-        result = CommandResult(
-            command,
-            status="partial",
-            exit_code=3,
-            rollback=outcome.rollback,
-            recovery=RecoveryAction(
-                recovery_summary,
-                outcome.recovery_command or ["sn-module-gen", "doctor"],
-            ),
-            error=ErrorInfo(
-                "startup_recovery_failed",
-                "startup_recovery",
-                "The previous interrupted operation could not be fully recovered.",
-            ),
-            next_action=recovery_summary,
-            metadata={"phase_label": "Startup recovery"},
-        )
-        renderer.render(result)
-        raise SystemExit(3)
-    if outcome.warning is None:
-        return []
-    if renderer.mode == "json":
-        renderer.pending_warnings.append(outcome.warning)
-    else:
-        renderer.warning(outcome.warning)
-    return []
-
-
-def _startup_failure(command: str, exc: PartialFailure) -> CommandResult:
-    return CommandResult(
-        command,
-        status="partial",
-        exit_code=3,
-        rollback=RollbackResult(True, "failed", []),
-        recovery=RecoveryAction(
-            "Automatic startup recovery is incomplete.",
-            exc.recovery or ["sn-module-gen", "doctor"],
-        ),
-        error=ErrorInfo(
-            "startup_recovery_failed",
-            "startup_recovery",
-            exc.message,
-        ),
-        metadata={"phase_label": "Startup recovery"},
+    journal = root / JOURNAL_NAME
+    kind = contained_entry_kind_no_follow(root, journal)
+    if kind is None:
+        return
+    raise PartialFailure(
+        "A pending transaction from an older generator is present. Preserve the "
+        "project and journal, resolve it with the generator version that created "
+        "it, then rerun plain `sn-module-gen update`.",
+        kind="legacy_pending_transaction",
+        phase="startup_recovery",
     )
 
 
@@ -442,10 +356,7 @@ def _run_command(
                 interaction,
                 launched_from_menu=launched_from_menu,
             )
-            return DoctorService(cwd, renderer).execute(
-                collector.doctor_scope(),
-                build=parsed.has("build"),
-            )
+            return DoctorService(cwd, renderer).execute(collector.doctor_scope())
         with plugin_operation_lock(valid_root):
             assert_public_project(valid_root)
             with _developer_environment(
@@ -453,31 +364,28 @@ def _run_command(
                 renderer,
                 report_issues=not launched_from_menu,
             ):
-                startup_warnings = _recover(valid_root, command, renderer)
+                _guard_legacy_journal(valid_root)
                 collector = FeatureDecisionCollector(
                     valid_root,
                     parsed,
                     interaction,
                     launched_from_menu=launched_from_menu,
                 )
-                result = DoctorService(cwd, renderer).execute(
-                    collector.doctor_scope(),
-                    build=parsed.has("build"),
-                )
-                result.warnings.extend(
-                    warning for warning in startup_warnings if warning is not None
-                )
-                return result
+                return DoctorService(cwd, renderer).execute(collector.doctor_scope())
 
     root = resolve_plugin_root(cwd)
-    assert_public_project(root)
-    if _trusted_parent_build_hook(parsed, root):
-        manifest_root = parsed.value("jvm_manifest_root")
-        return CliOperationService(root).check(
-            jvm_manifest_root=(Path(manifest_root) if manifest_root else None),
-        )
+    assert_public_project(
+        root,
+        allow_incomplete_update=parsed.command == "update",
+        allow_incomplete_add=parsed.command == "add",
+    )
     with plugin_operation_lock(root):
-        assert_public_project(root)
+        assert_public_project(
+            root,
+            allow_incomplete_update=parsed.command == "update",
+            allow_incomplete_add=parsed.command == "add",
+        )
+        _guard_legacy_journal(root)
         with _developer_environment(
             root,
             renderer,
@@ -492,57 +400,6 @@ def _run_command(
                 launched_from_menu=launched_from_menu,
             )
 
-
-def _trusted_parent_build_hook(parsed: ParsedArguments, root: Path) -> bool:
-    """Allow only a matching read-only child hook to reuse its parent check."""
-
-    if parsed.command != "check" or not parsed.has("build_hook"):
-        return False
-    generation_id = os.environ.get("SUPERNOTE_MODULE_PARENT_GENERATION_ID")
-    if not generation_id:
-        return False
-    try:
-        manifest = load_integrity_manifest(root)
-    except (IntegrityManifestError, GeneratorError):
-        return False
-    generation_matches = manifest.generation_id == generation_id
-    if not generation_matches:
-        return False
-    journal_path = root / JOURNAL_NAME
-    transaction_id = os.environ.get("SUPERNOTE_MODULE_PARENT_TRANSACTION_ID")
-    try:
-        journal_kind = contained_entry_kind_no_follow(root, journal_path)
-    except GeneratorError:
-        return False
-    if journal_kind is None:
-        return transaction_id is None
-    if journal_kind != "file":
-        return False
-    if not transaction_id:
-        return False
-    try:
-        journal_bytes, _metadata = read_contained_regular_bytes_no_follow(
-            root, journal_path
-        )
-        journal = json.loads(journal_bytes.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError, GeneratorError):
-        return False
-    return bool(
-        isinstance(journal, dict)
-        and journal.get("schema") == 1
-        and journal.get("id") == transaction_id
-        and (
-            (
-                _windows_path_key(Path(str(journal.get("root"))))
-                == _windows_path_key(root)
-            )
-            if _windows_host()
-            else journal.get("root") == str(root)
-        )
-        and journal.get("phase") != "commit"
-    )
-
-
 def _run_feature_command(
     parsed: ParsedArguments,
     renderer: Renderer,
@@ -553,7 +410,6 @@ def _run_feature_command(
     launched_from_menu: bool,
 ) -> CommandResult:
     command = parsed.command or "unknown"
-    startup_warnings = _recover(root, command, renderer)
     collector = FeatureDecisionCollector(
         root,
         parsed,
@@ -561,121 +417,18 @@ def _run_feature_command(
         launched_from_menu=launched_from_menu,
     )
     service = FeatureCliOperationService(root, renderer)
-    if command == "check":
-        manifest_root = parsed.value("jvm_manifest_root")
-        result = CliOperationService(root).check(
-            build=parsed.has("build"),
-            jvm_manifest_root=(Path(manifest_root) if manifest_root else None),
-        )
-    elif command == "repair":
-        result = CliOperationService(root).update(
-            (record.manifest.npm_name for record in service.features.records()),
-            dry_run=parsed.has("dry_run") or not parsed.has("yes"),
-            include_diff=parsed.has("diff"),
-            command="repair",
-        )
-    elif command == "add":
+    if command == "add":
         decisions = collector.add()
         result = service.add(decisions)
     elif command == "update":
-        if parsed.has("all") or parsed.has("dry_run") or parsed.has("diff"):
-            records = service.features.records()
-            if parsed.has("all"):
-                requested = tuple(
-                    record.manifest.npm_name for record in records
-                )
-            elif parsed.positional is not None:
-                requested = (
-                    service.features.find_record(parsed.positional).manifest.npm_name,
-                )
-            else:
-                raise ConfigurationError(
-                    "update preview needs a feature or --all"
-                )
-            if not parsed.has("dry_run") and not parsed.has("yes"):
-                raise ConfigurationError(
-                    "non-interactive update execution requires --yes; use --dry-run to preview"
-                )
-            result = CliOperationService(root).update(
-                requested,
-                dry_run=parsed.has("dry_run"),
-                include_diff=parsed.has("diff"),
-            )
-            result.warnings = [
-                *(warning for warning in startup_warnings if warning is not None),
-                *collector.warnings,
-                *result.warnings,
-            ]
-            return result
         decisions = collector.update()
-        if decisions is None:
-            if renderer.mode == "json":
-                return CommandResult("update", metadata={"empty": True})
-            empty = "No features were found in this plugin.\nAdd one with `sn-module-gen add`."
-            if interaction is not None:
-                print(f"\n{empty}", file=renderer.stderr)
-            elif interaction is None:
-                print(empty, file=renderer.stdout)
-            return CommandResult("update", metadata={"empty": True, "already_rendered": True})
         result = service.update(decisions)
     elif command == "validate":
         decisions = collector.validate()
-        if decisions is None:
-            structural_issues = service.features.verify_generated_state()
-            if structural_issues:
-                decisions = FeatureValidateDecisions((), True, False)
-                result = service.validate(decisions)
-                result.warnings = [
-                    *(warning for warning in startup_warnings if warning is not None),
-                    *collector.warnings,
-                    *result.warnings,
-                ]
-                return result
-            if renderer.mode == "json":
-                return CommandResult("validate", metadata={"empty": True})
-            empty = "No features were found in this plugin."
-            if interaction is not None:
-                print(f"\n{empty}", file=renderer.stderr)
-            elif interaction is None:
-                print(empty, file=renderer.stdout)
-            return CommandResult("validate", metadata={"empty": True, "already_rendered": True})
-        result = CliOperationService(root).check(
-            build=decisions.build,
-            command="validate",
-            requested_targets=decisions.package_names,
-        )
-        records = [
-            service.features.find_record(name) for name in decisions.package_names
-        ]
-        infos = [record.info() for record in records]
-        if decisions.all:
-            result.modules = infos
-        elif infos:
-            result.module = infos[0]
-    elif command == "remove":
-        decisions = collector.remove()
-        if decisions is None:
-            if renderer.mode == "json":
-                return CommandResult("remove", metadata={"empty": True})
-            empty = "No features were found in this plugin."
-            if interaction is not None:
-                print(f"\n{empty}", file=renderer.stderr)
-            elif interaction is None:
-                print(empty, file=renderer.stdout)
-            return CommandResult("remove", metadata={"empty": True, "already_rendered": True})
-        result = service.remove(decisions)
-    elif command == "template":
-        template_service = TemplateContractService(root)
-        if parsed.positional == "status":
-            result = template_service.status()
-        else:
-            result = template_service.sync(
-                dry_run=parsed.has("dry_run") or not parsed.has("yes")
-            )
+        result = service.validate(decisions)
     else:
         raise ConfigurationError(f'unknown command "{command}"')
     result.warnings = [
-        *(warning for warning in startup_warnings if warning is not None),
         *collector.warnings,
         *result.warnings,
     ]
@@ -683,10 +436,9 @@ def _run_feature_command(
 
 
 MAIN_MENU_ITEMS = [
-    MenuItem("add", "Add feature", "Create and link a local feature."),
-    MenuItem("update", "Update feature", "Refresh generated parts of a feature."),
-    MenuItem("validate", "Validate feature", "Check feature structure and integration."),
-    MenuItem("remove", "Remove feature", "Permanently delete a local feature."),
+    MenuItem("add", "Add feature", "Scaffold one authored local feature."),
+    MenuItem("update", "Update project", "Regenerate every owned output."),
+    MenuItem("validate", "Validate project", "Check the complete generated project."),
     MenuItem("doctor", "Doctor", "Verify your development environment."),
     MenuItem("help", "Help", "Show commands and usage."),
     MenuItem("exit", "Exit", "Close the generator."),
@@ -742,41 +494,10 @@ def _interactive_loop(
 
     try:
         with plugin_operation_lock(root):
-            with _developer_environment(root, renderer):
-                startup = recover_pending(
-                    root,
-                    reconcile=lambda invocation: _startup_reconcile(
-                        root, invocation
-                    ),
-                )
-    except PartialFailure as exc:
-        renderer.render(_startup_failure("menu", exc))
-        return 3
+            _guard_legacy_journal(root)
     except GeneratorError as exc:
         renderer.render(_exception_result("menu", exc, renderer.debug))
         return exc.exit_code
-    if startup.rollback.status == "partial":
-        recovery_summary = (
-            startup.recovery_summary
-            or "Automatic startup recovery is incomplete."
-        )
-        result = CommandResult(
-            "menu",
-            status="partial",
-            exit_code=3,
-            rollback=startup.rollback,
-            recovery=RecoveryAction(
-                recovery_summary,
-                startup.recovery_command or ["sn-module-gen", "doctor"],
-            ),
-            error=ErrorInfo("startup_recovery_failed", "startup_recovery", "The interrupted operation could not be recovered."),
-            next_action=recovery_summary,
-            metadata={"phase_label": "Startup recovery"},
-        )
-        renderer.render(result)
-        return 3
-    if startup.warning:
-        renderer.warning(startup.warning)
     while True:
         ui.header()
         try:

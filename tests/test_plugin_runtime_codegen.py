@@ -16,7 +16,6 @@ from supernote_module_generator.feature_generator import FeatureConfig
 from supernote_module_generator.feature_model import StarterFamily
 from supernote_module_generator.feature_operations import FeatureOperationService
 from supernote_module_generator.generation_service import GenerationService
-from supernote_module_generator.transaction import Transaction
 from supernote_module_generator.jvm_manifest import (
     JvmSourceManifest,
     jvm_adapter_identity,
@@ -87,7 +86,7 @@ def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
             tmp_path / str(feature_count),
             registry(*(f"feature{index}" for index in range(feature_count))),
         )
-        gradle = (generated / "build.gradle").read_text()
+        gradle = (generated / "analysis/subject/build.gradle").read_text()
         root_options = [
             line.strip()
             for line in gradle.splitlines()
@@ -103,7 +102,8 @@ def test_ksp_feature_roots_use_one_compiler_option_per_feature(tmp_path: Path):
             assert "\\tlocal_modules/" in option
 
         cmake = (generated / "CMakeLists.txt").read_text()
-        assert '"${CMAKE_CURRENT_LIST_DIR}/../../../local_modules"' in cmake
+        assert "file(GLOB_RECURSE" not in cmake
+        assert cmake.count("/.supernote-generated/android\"") == feature_count
 
 
 def test_generated_runtime_does_not_vendor_the_python_compiler(
@@ -111,13 +111,15 @@ def test_generated_runtime_does_not_vendor_the_python_compiler(
 ):
     generated = generate_plugin_runtime(tmp_path, registry("jvm"))
     gradle = (generated / "build.gradle").read_text()
+    analysis_gradle = (generated / "analysis/subject/build.gradle").read_text()
 
     assert not (generated / "common_codegen.py").exists()
     assert not (generated / "common_support").exists()
-    assert "checkSupernote${buildVariant}State" in gradle
-    assert "workingDir supernotePluginRoot" in gradle
-    assert "'check'" in gradle
-    assert "'--build-hook'" in gradle
+    assert "com.google.devtools.ksp" not in gradle
+    assert "com.google.devtools.ksp" in analysis_gradle
+    assert "ksp project(':supernote-module-processor')" in analysis_gradle
+    assert "checkSupernote" not in gradle
+    assert "SUPERNOTE_MODULE_COMMAND" not in gradle
     assert "outputs.files" not in gradle
 
 
@@ -132,6 +134,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     public_header = (generated / "include/supernote/runtime.hpp").read_text()
     source = (generated / "src/feature_registry.cpp").read_text()
     gradle = (generated / "build.gradle").read_text()
+    analysis_gradle = (generated / "analysis/subject/build.gradle").read_text()
     consumer_rules = (generated / "consumer-rules.pro").read_text()
     processor = (
         generated
@@ -152,7 +155,7 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
 
     assert cmake.count(f"add_library({component} SHARED") == 1
     assert cmake.count(f"add_library({registration_component} SHARED") == 1
-    assert '"${SUPERNOTE_NATIVE_ROOT}/*.c"' in cmake
+    assert "file(GLOB_RECURSE" not in cmake
     assert "C_STANDARD 23" in cmake
     assert "C_STANDARD_REQUIRED YES" in cmake
     assert "target_compile_features" in cmake and "cxx_std_23" in cmake
@@ -165,9 +168,11 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "SUPERNOTE_MODULE_WEAK_OBJECT_PROBE=1" in cmake
     assert "runtime_services.cpp" in cmake
     assert "feature_registry.cpp" in cmake
-    assert "local_modules/@local/alpha/android/src/main/cpp" in cmake
-    assert "local_modules/@local/beta/android/src/main/cpp" in cmake
-    assert "SUPERNOTE_GENERATED_BINDINGS" in cmake
+    assert "local_modules/@local/alpha/.supernote-generated/android" in cmake
+    assert "local_modules/@local/beta/.supernote-generated/android" in cmake
+    assert "SUPERNOTE_RUNTIME_COMPILE_TARGET" in cmake
+    assert "LINK_ONLY:supernote_feature_" in cmake
+    assert "cmake_policy(SET CMP0131 NEW)" in cmake
     assert "ReactAndroid::jsi" in cmake
     assert "ReactAndroid::reactnative" in cmake
     assert "find_package(fbjni REQUIRED CONFIG)" in cmake
@@ -195,6 +200,9 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert '"Alpha"' in source
     assert '"Beta"' in source
     assert gradle.count("com.android.library") == 1
+    assert "supernoteModuleCmakeVersion" in gradle
+    assert ".orElse('3.24.4')" in gradle
+    assert "version supernoteCmakeVersion" in gradle
     assert "jniLibs.excludes" in gradle
     assert "org.jspecify:jspecify:1.0.0" in gradle
     assert "consumerProguardFiles 'consumer-rules.pro'" in gradle
@@ -218,13 +226,13 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "**/libreactnative.so" in gradle
     assert "local_modules/@local/alpha/android/src/main/java" in gradle
     assert "local_modules/@local/beta/android/src/main/java" in gradle
-    assert "supernoteFeatureRoots" not in gradle
-    assert "arg('supernoteFeatureRoot_00000000'" in gradle
-    assert "arg('supernoteFeatureRoot_00000001'" in gradle
-    assert "supernote:feature:" in gradle
-    assert "\\tlocal_modules/@local/alpha/android/src/main/java" in gradle
-    assert "\\tlocal_modules/@local/beta/android/src/main/java" in gradle
-    assert "supernoteNativeRoots.findAll { it.isDirectory() }" in gradle
+    assert "supernoteFeatureRoots" not in analysis_gradle
+    assert "arg('supernoteFeatureRoot_00000000'" in analysis_gradle
+    assert "arg('supernoteFeatureRoot_00000001'" in analysis_gradle
+    assert "supernote:feature:" in analysis_gradle
+    assert "\\tlocal_modules/@local/alpha/android/src/main/java" in analysis_gradle
+    assert "\\tlocal_modules/@local/beta/android/src/main/java" in analysis_gradle
+    assert ".supernote-generated/android/jvm" in gradle
     assert "gradleProperty('supernoteModuleWeakObjectProbe')" in gradle
     assert "-DSUPERNOTE_MODULE_WEAK_OBJECT_PROBE=" in gradle
     assert "def supernoteIsWindows" in gradle
@@ -232,15 +240,13 @@ def test_generates_one_compiled_runtime_component_for_all_features(tmp_path: Pat
     assert "layout.buildDirectory.set(new File(supernoteWindowsBuildRoot, 'gradle'))" in gradle
     assert "new File(supernoteWindowsBuildRoot, 'cxx')" in gradle
     assert 'file("${rootProject.projectDir}/.cxx/sn-module-gen")' in gradle
-    assert "checkSupernote${buildVariant}State" in gradle
-    assert "workingDir supernotePluginRoot" in gradle
-    assert "'--jvm-manifest-root'" in gradle
+    assert "checkSupernote" not in gradle
+    assert "SUPERNOTE_MODULE_COMMAND" not in gradle
     assert "outputs.files" not in gradle
     assert "common_codegen.py" not in gradle
-    assert "buildVariant == 'Release' ? 'RelWithDebInfo' : buildVariant" in gradle
-    assert '"configureCMake${cmakeBuildType}[arm64-v8a]"' in gradle
-    assert 'set(SUPERNOTE_GENERATED_ROOT "${CMAKE_CURRENT_LIST_DIR}/generated")' in cmake
-    assert '"${SUPERNOTE_GENERATED_ROOT}/jni/*.cpp"' in cmake
+    assert "com.google.devtools.ksp" not in gradle
+    assert 'set(_SUPERNOTE_PLUGIN_BINDINGS' in cmake
+    assert 'generated/jni/plugin_bindings.cpp' in cmake
     assert "supernotePythonCommand" not in gradle
     assert 'optionPrefix = "supernoteFeatureRoot_"' in processor
     assert "toSortedMap()" in processor
@@ -1263,10 +1269,12 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
         requested_targets=("@local/math",),
         allow_unmanifested_bootstrap=True,
     )
-    generator.execute(plan, Transaction(tmp_path, "update", ("@local/math",)))
+    generator.execute(plan)
     generated = tmp_path / RUNTIME_RELATIVE_ROOT
     jni = generated / "generated/jni"
-    source = next(jni.glob("feature_*.cpp")).read_text()
+    source = (
+        feature_root / ".supernote-generated/android/feature.cpp"
+    ).read_text()
     assert "createFromHostFunction" in source
     assert 'exports.setProperty(runtime, "add"' in source
     assert feature.feature_id in source
@@ -1275,7 +1283,9 @@ def test_common_codegen_emits_real_cpp_jsi_route(tmp_path: Path):
     assert "install_plugin_bindings" in bootstrap
     assert "__supernoteModuleFeatureRegistry_" in bootstrap
     assert '"__supernoteModule"' in bootstrap
-    readme = (feature_root / "README.md").read_text()
+    readme = (feature_root / ".supernote-generated/README.md").read_text(
+        encoding="utf-8"
+    )
     assert "import Math from '@local/math';" in readme
     assert "`Math.add(left: number, right: number): number` — sync" in readme
     assert "All listed calls are synchronous" in readme
@@ -1342,21 +1352,39 @@ def test_common_codegen_builds_readme_from_ksp_jvm_manifest(tmp_path: Path):
         operation="update",
         requested_targets=("@local/jvm-files",),
         jvm_manifests={feature.feature_id: source_manifest},
+        jvm_adapter_sources={
+            feature.feature_id: (
+                b"package supernote.generated.adapters\n\n"
+                b"object FixtureAdapter\n"
+            )
+        },
         allow_unmanifested_bootstrap=True,
     )
-    generator.execute(plan, Transaction(tmp_path, "update", ("@local/jvm-files",)))
-    readme = (feature_root / "README.md").read_text(encoding="utf-8")
+    generator.execute(plan)
+    readme = (feature_root / ".supernote-generated/README.md").read_text(
+        encoding="utf-8"
+    )
     assert "Read files on the JVM." in readme
     assert "import JvmFiles from '@local/jvm-files';" in readme
     assert "`JvmFiles.loadPage(page: number): Promise<Uint8Array>` — async" in readme
     assert "const result = await JvmFiles.loadPage(page);" in readme
     assert "Kotlin/Java: `android/src/main/java/`" in readme
-    suffix = feature.feature_id.removeprefix("supernote:feature:")
-    assert (
-        tmp_path
-        / RUNTIME_RELATIVE_ROOT
-        / f"generated/jni/jvm_feature_{suffix}.cpp"
-    ).is_file()
+    packaged_jvm = feature_root / ".supernote-generated/android/jvm_feature.cpp"
+    assert packaged_jvm.is_file()
+    registration = json.loads(
+        (feature_root / ".supernote-generated/android/registration.json").read_text()
+    )
+    assert registration["jvmSourceDirs"] == ["android/src/main/java"]
+    assert ".supernote-generated/android/jvm_feature.cpp" in registration[
+        "bindingSources"
+    ]
+    distribution = json.loads(
+        (feature_root / ".supernote-generated/package-manifest.json").read_text()
+    )
+    assert any(
+        item["path"] == ".supernote-generated/android/jvm_feature.cpp"
+        for item in distribution["payload"]
+    )
 
     kotlin = feature_root / feature.roots.jvm / "FeatureApi.kt"
     kotlin.write_text(
@@ -1369,23 +1397,51 @@ def test_common_codegen_builds_readme_from_ksp_jvm_manifest(tmp_path: Path):
         operation="update",
         requested_targets=("@local/jvm-files",),
         jvm_manifests={feature.feature_id: empty_manifest},
+        jvm_adapter_sources={
+            feature.feature_id: (
+                b"package supernote.generated.adapters\n\n"
+                b"object StaleAdapterFromEmptyKspManifest\n"
+            )
+        },
     )
-    generator.execute(
-        empty_plan,
-        Transaction(tmp_path, "update", ("@local/jvm-files",)),
-    )
+    generator.execute(empty_plan)
 
-    assert "loadPage" not in (feature_root / "index.d.ts").read_text(
+    assert "loadPage" not in (
+        feature_root / ".supernote-generated/index.d.ts"
+    ).read_text(
         encoding="utf-8"
     )
-    assert "loadPage" not in (feature_root / "README.md").read_text(
+    assert "loadPage" not in (
+        feature_root / ".supernote-generated/README.md"
+    ).read_text(
         encoding="utf-8"
     )
+    assert not packaged_jvm.exists()
+    assert not (
+        feature_root / ".supernote-generated/android/jvm/KspAdapters.kt"
+    ).exists()
+    registration = json.loads(
+        (
+            feature_root / ".supernote-generated/android/registration.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert registration["jvmRegistrationSources"] == [
+        ".supernote-generated/android/jvm/JvmRegistration.java"
+    ]
+    distribution = json.loads(
+        (
+            feature_root / ".supernote-generated/package-manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    payload_paths = {item["path"] for item in distribution["payload"]}
+    assert ".supernote-generated/android/jvm_feature.cpp" not in payload_paths
+    assert (
+        ".supernote-generated/android/jvm/KspAdapters.kt" not in payload_paths
+    )
+    suffix = feature.feature_id.removeprefix("supernote:feature:")
     semantic = json.loads(
         (
-            tmp_path
-            / RUNTIME_RELATIVE_ROOT
-            / f"generated/semantics/{suffix}.json"
+            feature_root / ".supernote-generated/android/semantic.json"
         ).read_text(encoding="utf-8")
     )
     assert semantic["functions"] == []
@@ -1453,16 +1509,14 @@ std::int32_t pageCount(std::int32_t page) { return page; }
         requested_targets=("@local/documents",),
         allow_unmanifested_bootstrap=True,
     )
-    generator.execute(plan, Transaction(tmp_path, "update", ("@local/documents",)))
-    generated = tmp_path / RUNTIME_RELATIVE_ROOT
-    suffix = feature.feature_id.removeprefix("supernote:feature:")
+    generator.execute(plan)
     header = (
-        generated / f"include/supernote/{suffix}/internal.hpp"
+        feature_root / ".supernote-generated/android/internal.hpp"
     ).read_text()
     source = (
-        generated / f"generated/jni/internal_{suffix}.cpp"
+        feature_root / ".supernote-generated/android/internal.cpp"
     ).read_text()
-    typescript = (feature_root / "index.d.ts").read_text()
+    typescript = (feature_root / ".supernote-generated/index.d.ts").read_text()
     assert "std::int32_t pageCount(std::int32_t page);" in header
     assert "struct IndexService final" in header
     assert "current_feature_session" in source

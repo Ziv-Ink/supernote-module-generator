@@ -6,8 +6,8 @@ import pytest
 
 from supernote_module_generator.filesystem import iter_tree_no_follow
 from supernote_module_generator.jvm_manifest import JvmSourceManifest
+from supernote_module_generator.jvm_frontend_service import JvmFrontendService
 from supernote_module_generator.project_model import ProjectModel
-from supernote_module_generator.cli_operations import CliOperationService
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def stub_ksp_frontend(monkeypatch):
     """Supply deterministic empty KSP IR to CLI tests with stub Gradle."""
 
     def manifests(
-        service: CliOperationService,
+        service,
         *,
         allow_unmanifested_bootstrap: bool = False,
     ):
@@ -50,8 +50,4 @@ def stub_ksp_frontend(monkeypatch):
             )
         }
 
-    monkeypatch.setattr(
-        CliOperationService,
-        "_jvm_frontend_manifests",
-        manifests,
-    )
+    monkeypatch.setattr(JvmFrontendService, "manifests", manifests)

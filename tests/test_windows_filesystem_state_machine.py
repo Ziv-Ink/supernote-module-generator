@@ -422,7 +422,7 @@ def test_windows_conditional_open_closes_registered_handle_on_transfer_failure(
     assert closed == [91]
 
 
-def test_windows_conditional_descriptor_read_restores_observed_atime(
+def test_windows_conditional_descriptor_read_does_not_rewrite_atime(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -458,14 +458,7 @@ def test_windows_conditional_descriptor_read_restores_observed_atime(
 
     assert content == b"content"
     assert metadata is before
-    assert applied == [
-        {
-            "mode": None,
-            "regular": True,
-            "atime_ns": 1_000,
-            "mtime_ns": None,
-        }
-    ]
+    assert applied == []
 
 
 @pytest.mark.parametrize(
@@ -2285,22 +2278,20 @@ def test_windows_directory_enumeration_decodes_retained_page(
     ) == ()
 
 
-def test_windows_observed_directory_uses_retained_handle_and_atime_only(
+def test_windows_observed_directory_uses_one_read_only_retained_handle(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     directory = tmp_path / "directory"
     directory.mkdir()
     before = directory.lstat()
-    restored: list[int] = []
     requested_metadata_access: list[bool] = []
     closed: list[int] = []
-    next_handle = iter((77, 78))
     monkeypatch.setattr(filesystem, "_windows_host", lambda: True)
 
     def open_read_only(*_args, **kwargs):
         requested_metadata_access.append(kwargs.get("write_metadata", False))
-        return next(next_handle)
+        return 77
 
     monkeypatch.setattr(
         filesystem,
@@ -2312,13 +2303,6 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
         os.utime(directory, ns=(before.st_atime_ns + 1_000_000_000, before.st_mtime_ns))
         return ()
 
-    def restore_atime(_handle, **metadata):
-        restored.append(metadata["atime_ns"])
-        os.utime(
-            directory,
-            ns=(metadata["atime_ns"], directory.lstat().st_mtime_ns),
-        )
-
     import os
 
     monkeypatch.setattr(
@@ -2329,7 +2313,9 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
     monkeypatch.setattr(
         filesystem,
         "_windows_apply_handle_metadata_values",
-        restore_atime,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("read-only directory observation must not write metadata")
+        ),
     )
     monkeypatch.setattr(filesystem, "_windows_close_handle", closed.append)
 
@@ -2337,9 +2323,8 @@ def test_windows_observed_directory_uses_retained_handle_and_atime_only(
 
     assert children == []
     assert observed.st_ino == before.st_ino
-    assert restored == [before.st_atime_ns]
-    assert requested_metadata_access == [False, True]
-    assert closed == [77, 78]
+    assert requested_metadata_access == [False]
+    assert closed == [77]
 
 
 def test_windows_observed_directory_rejects_same_handle_mtime_change(
@@ -2419,7 +2404,7 @@ def test_windows_path_normalization_handles_device_and_unc_spellings(
     assert filesystem._windows_api_path(Path("\\\\?\\C:\\root\\file")) == (
         "\\\\?\\C:\\root\\file"
     )
-    assert filesystem._windows_api_path(Path("\\\\server\\share")) == (
+    assert filesystem._windows_api_path(Path("\\\\server\\share")).rstrip("\\") == (
         "\\\\?\\UNC\\server\\share"
     )
     assert filesystem._windows_path_key(Path("\\\\?\\C:\\ROOT\\file")) == (
@@ -2432,8 +2417,8 @@ def test_windows_regular_observer_adapter_uses_transferred_handle(
     monkeypatch,
 ) -> None:
     source = tmp_path / "source.txt"
-    source.write_text("value\n", encoding="utf-8")
-    raw = os.open(source, os.O_RDONLY)
+    source.write_bytes(b"value\n")
+    raw = os.open(source, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     closed: list[int] = []
     requested_metadata_access: list[bool] = []
 
@@ -2470,7 +2455,7 @@ def test_windows_regular_observer_adapter_uses_transferred_handle(
         os.close(raw)
 
     assert closed == []
-    assert requested_metadata_access == [True]
+    assert requested_metadata_access == [False]
 
 
 def test_windows_regular_observer_rejects_redirect_and_wrong_handle(
@@ -2790,7 +2775,7 @@ def test_windows_protected_metadata_republishes_after_atime_only_observation(
     ]
 
 
-def test_windows_finish_observed_atime_updates_only_retained_atime(
+def test_windows_finish_observed_atime_does_not_write_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2809,22 +2794,20 @@ def test_windows_finish_observed_atime_updates_only_retained_atime(
     )
     handles: list[int] = []
 
-    def restore_atime(handle, **values):
+    def reject_metadata_write(handle, **_values):
         handles.append(handle)
-        current = source.lstat()
-        os.utime(source, ns=(values["atime_ns"], current.st_mtime_ns))
+        raise AssertionError("read-only observation must not write metadata")
 
     monkeypatch.setattr(
         filesystem,
         "_windows_apply_handle_metadata_values",
-        restore_atime,
+        reject_metadata_write,
     )
     try:
         assert filesystem._finish_observed_atime(source, descriptor, before)
     finally:
         os.close(descriptor)
-    assert handles == [descriptor]
-    assert source.lstat().st_atime_ns == before.st_atime_ns
+    assert handles == []
 
 
 def test_windows_directory_atime_restore_fails_before_unsafe_handle_use(
@@ -2912,8 +2895,14 @@ def test_windows_symlink_directory_classification_fails_closed_without_attribute
         link,
         SimpleNamespace(st_file_attributes=0),
     )
-    with pytest.raises(filesystem.SymlinkPreservationError, match="could not determine"):
-        filesystem._symlink_is_directory(link)
+    if os.name == "nt":
+        assert not filesystem._symlink_is_directory(link)
+    else:
+        with pytest.raises(
+            filesystem.SymlinkPreservationError,
+            match="could not determine",
+        ):
+            filesystem._symlink_is_directory(link)
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,7 @@ from typing import Dict, Iterable, Mapping, Tuple
 
 from .filesystem import (
     _windows_host,
+    contained_entry_kind_no_follow,
     entry_kind,
     hash_entry_no_follow,
     lexists,
@@ -192,6 +193,10 @@ class GenerationPlan:
     warnings: Tuple[str, ...] = ()
     preconditions: Tuple[PlanPrecondition, ...] = field(default=(), repr=False)
     discovery_frontier: Tuple[str, ...] = field(default=(), repr=False)
+    immutable_inputs: Tuple[str, ...] = field(default=(), repr=False)
+    author_input_inventory: Tuple[
+        Tuple[str, Tuple[str, int, int, str | None]], ...
+    ] = field(default=(), repr=False)
 
     @classmethod
     def compare(
@@ -217,6 +222,10 @@ class GenerationPlan:
             str, tuple[str | None, str | None]
         ] | None = None,
         discovery_frontier: Iterable[str] = (),
+        immutable_inputs: Iterable[str] = (),
+        author_input_inventory: Iterable[
+            tuple[str, tuple[str, int, int, str | None]]
+        ] = (),
     ) -> "GenerationPlan":
         root = root.resolve()
         ordered_artifacts, artifact_paths = _prepare_artifacts(
@@ -267,6 +276,13 @@ class GenerationPlan:
             ),
             precondition_baselines,
         )
+        immutable = tuple(sorted(set(immutable_inputs)))
+        for relative in immutable:
+            _validate_relative(relative)
+            if relative not in {item.path for item in preconditions}:
+                raise GenerationPlanError(
+                    f"immutable input lacks a captured precondition: {relative!r}"
+                )
         return cls(
             operation,
             tuple(requested_targets),
@@ -284,6 +300,8 @@ class GenerationPlan:
             tuple(warnings),
             tuple(preconditions),
             tuple(discovery_frontier),
+            immutable,
+            tuple(author_input_inventory),
         )
 
     @property
@@ -314,6 +332,10 @@ class GenerationPlan:
             "warnings": list(self.warnings),
             "discovery_frontier_sha256": hashlib.sha256(
                 "\n".join(self.discovery_frontier).encode("utf-8")
+            ).hexdigest(),
+            "immutable_inputs": list(self.immutable_inputs),
+            "author_input_inventory_sha256": hashlib.sha256(
+                repr(self.author_input_inventory).encode("utf-8")
             ).hexdigest(),
         }
 
@@ -555,17 +577,23 @@ def _compare_owned_artifact(
 ) -> ArtifactChange | None:
     _validate_managed_destination(root, artifact.path)
     destination = root.joinpath(*PurePosixPath(artifact.path).parts)
-    kind = entry_kind(destination)
-    previous = destination.read_bytes() if kind == "file" else None
+    kind = contained_entry_kind_no_follow(root, destination)
+    previous = None
+    metadata = None
+    if kind == "file":
+        previous, metadata = read_contained_regular_bytes_no_follow(
+            root, destination
+        )
     previous_hash = hash_entry_no_follow(destination)
     mode_mismatch = (
         artifact.expected_mode is not None
         and kind == "file"
+        and metadata is not None
         and (
-            (destination.stat().st_mode & stat.S_IWRITE)
+            (metadata.st_mode & stat.S_IWRITE)
             != (artifact.expected_mode & stat.S_IWRITE)
             if _windows_host()
-            else (destination.stat().st_mode & 0o7777) != artifact.expected_mode
+            else (metadata.st_mode & 0o7777) != artifact.expected_mode
         )
     )
     if kind is None:
@@ -592,17 +620,18 @@ def _compare_stale_artifact(root: Path, relative: str) -> ArtifactChange | None:
     destination = root.joinpath(*PurePosixPath(relative).parts)
     if not lexists(destination):
         return None
-    kind = entry_kind(destination)
+    kind = contained_entry_kind_no_follow(root, destination)
     if kind != "file":
         raise GenerationPlanError(
             f"stale owned artifact must be a regular file: {relative!r} "
             f"is {kind or 'missing'}"
         )
+    previous, _metadata = read_contained_regular_bytes_no_follow(root, destination)
     return ArtifactChange(
         ArtifactAction.DELETE,
         None,
         relative,
-        destination.read_bytes(),
+        previous,
         kind,
         hash_entry_no_follow(destination),
     )
@@ -621,18 +650,19 @@ def _capture_preconditions(
         _validate_managed_destination(root, relative)
         destination = root.joinpath(*PurePosixPath(relative).parts)
         baseline = baseline_by_path.get(relative)
-        live_kind = entry_kind(destination)
-        mode = (
-            stat.S_IMODE(destination.lstat().st_mode)
-            if live_kind is not None
-            else None
-        )
+        live_kind = contained_entry_kind_no_follow(root, destination)
+        metadata = None
         content_sha256 = None
         if live_kind == "file":
-            content, _metadata = read_contained_regular_bytes_no_follow(
+            content, metadata = read_contained_regular_bytes_no_follow(
                 root, destination
             )
             content_sha256 = hashlib.sha256(content).hexdigest()
+        mode = (
+            stat.S_IMODE(metadata.st_mode)
+            if metadata is not None
+            else None
+        )
         rows.append(
             PlanPrecondition(
                 relative,

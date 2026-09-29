@@ -38,6 +38,17 @@ def _detect_descriptor_relative_io_support() -> bool:
 
 
 _DESCRIPTOR_RELATIVE_IO_SUPPORTED = _detect_descriptor_relative_io_support()
+FEATURE_ADD_INCOMPLETE_MARKER = ".supernote-add-incomplete"
+_LINUX_ADD_INCOMPLETE_ROOT_MODE = 0o700
+
+
+def _fchmod(descriptor: int, mode: int) -> None:
+    """Apply descriptor mode where the host exposes the POSIX primitive."""
+
+    implementation = getattr(os, "fchmod", None)
+    if implementation is None:
+        raise OSError(errno.ENOSYS, "descriptor chmod is unavailable on this host")
+    implementation(descriptor, mode)
 
 
 def _open_read_descriptor(
@@ -46,7 +57,7 @@ def _open_read_descriptor(
     *,
     dir_fd: int | None = None,
 ) -> int:
-    """Open read authority without perturbing atime when Linux permits it."""
+    """Open read authority, using O_NOATIME when the filesystem permits it."""
 
     noatime = getattr(os, "O_NOATIME", 0) if sys.platform.startswith("linux") else 0
     options = {} if dir_fd is None else {"dir_fd": dir_fd}
@@ -54,8 +65,8 @@ def _open_read_descriptor(
         try:
             return os.open(path, flags | noatime, **options)
         except PermissionError:
-            # O_NOATIME requires ownership or CAP_FOWNER. Readable trees owned
-            # by another user must still work through the stable-restore path.
+            # O_NOATIME requires ownership or CAP_FOWNER. A normal read remains
+            # valid; access-time bookkeeping is not semantic input state.
             pass
     return os.open(path, flags, **options)
 
@@ -75,13 +86,6 @@ _WINDOWS_AUTHORITY = WindowsAuthorityRegistry(
 
 def _windows_host() -> bool:
     return os.name == "nt"
-
-
-def reconcile_retained_windows_authority() -> None:
-    """Finish delayed native-handle cleanup at a quiescent command boundary."""
-
-    if _windows_host():
-        _WINDOWS_AUTHORITY.reconcile()
 
 
 def _windows_kernel32() -> Any:
@@ -249,14 +253,22 @@ class ProtectedSourceRestoreError(FilesystemError):
 def lexists(path: Path) -> bool:
     """Return true for every directory entry, including a broken symlink."""
 
-    return os.path.lexists(path)
+    candidate = _windows_api_path(path) if os.name == "nt" else os.fspath(path)
+    return os.path.lexists(candidate)
+
+
+def _path_lstat(path: Path) -> os.stat_result:
+    """Stat one path without following it, including native Windows long paths."""
+
+    candidate = Path(_windows_api_path(path)) if os.name == "nt" else path
+    return candidate.lstat()
 
 
 def entry_kind(path: Path) -> Optional[str]:
     """Classify an entry without dereferencing it, or return ``None`` if absent."""
 
     try:
-        metadata = path.lstat()
+        metadata = _path_lstat(path)
     except FileNotFoundError:
         return None
     mode = metadata.st_mode
@@ -662,6 +674,23 @@ def _windows_rename_descriptor_relative(
 ) -> None:
     """Rename through a retained parent identity using the native NT API."""
 
+    _windows_rename_handle_relative(
+        _windows_descriptor_handle(descriptor),
+        filename_value,
+        root_directory,
+        replace_if_exists=replace_if_exists,
+    )
+
+
+def _windows_rename_handle_relative(
+    handle: int,
+    filename_value: str,
+    root_directory: int,
+    *,
+    replace_if_exists: bool,
+) -> None:
+    """Rename an exact retained Windows handle relative to a retained parent."""
+
     import ctypes
     from ctypes import wintypes
 
@@ -701,7 +730,6 @@ def _windows_rename_descriptor_relative(
         ctypes.c_int,
     )
     set_info.restype = ctypes.c_long
-    handle = _windows_descriptor_handle(descriptor)
     status = int(
         set_info(
             wintypes.HANDLE(handle),
@@ -771,7 +799,7 @@ def _windows_open_conditional_parent_handle(path: Path) -> int:
 def _read_windows_conditional_regular_descriptor(
     descriptor: int,
 ) -> tuple[bytes, os.stat_result]:
-    """Read and re-time an already retained Windows regular-file identity."""
+    """Read an already retained Windows regular-file identity coherently."""
 
     if not _windows_host():
         raise OSError("Windows handle operations are unavailable")
@@ -795,14 +823,6 @@ def _read_windows_conditional_regular_descriptor(
     ):
         raise ConcurrentSourceMutation(
             "Conditional capture changed while it was inspected"
-        )
-    if before.st_atime_ns // 100 != after.st_atime_ns // 100:
-        _windows_apply_handle_metadata_values(
-            _windows_descriptor_handle(descriptor),
-            mode=None,
-            regular=True,
-            atime_ns=before.st_atime_ns,
-            mtime_ns=None,
         )
     return b"".join(chunks), before
 
@@ -1218,7 +1238,7 @@ def _windows_open_observed_descriptor(path: Path) -> tuple[int, os.stat_result]:
     handle = _windows_open_no_follow_handle(
         path,
         directory=False,
-        write_metadata=True,
+        write_metadata=False,
     )
     try:
         if _windows_path_key(_windows_handle_final_path(handle)) != _windows_path_key(
@@ -1227,7 +1247,7 @@ def _windows_open_observed_descriptor(path: Path) -> tuple[int, os.stat_result]:
             raise ConcurrentSourceMutation(
                 f"Source entry changed while it was opened: {path}"
             )
-        before = path.lstat()
+        before = _path_lstat(path)
         if _metadata_is_redirecting_reparse_point(before):
             raise OSError(f"Source entry is a Windows reparse point: {path}")
         descriptor = _windows_handle_to_descriptor(
@@ -1247,7 +1267,7 @@ def _open_observed(path: Path, *, directory: bool = False) -> tuple[int, os.stat
             raise OSError(f"Source directory cannot be opened safely: {path}")
         descriptor, before = _windows_open_observed_descriptor(path)
         try:
-            live = path.lstat()
+            live = _path_lstat(path)
         except BaseException:
             _close_descriptor(descriptor)
             raise
@@ -1323,42 +1343,10 @@ def _observed_directory_entries(
             raise ConcurrentSourceMutation(
                 f"Source directory changed while it was inspected: {path}"
             )
-        # Retain an overlapping write-attributes identity, then close the
-        # enumeration handle before restoring atime. NTFS can defer the access
-        # update until that listing handle closes.
-        owns_handle = False
-        _finish_windows_directory_observation(handle, path, before)
         return children, before
     finally:
         if owns_handle:
             _windows_close_handle(handle)
-
-
-def _finish_windows_directory_observation(
-    enumeration_handle: int,
-    path: Path,
-    before: os.stat_result,
-) -> None:
-    """Close a listing handle before neutralizing its deferred atime update."""
-
-    try:
-        authority = _windows_open_no_follow_handle(
-            path,
-            directory=True,
-            write_metadata=True,
-            desired_access=0x100 | 0x80,
-        )
-    except BaseException:
-        _windows_close_handle(enumeration_handle)
-        raise
-    try:
-        _windows_close_handle(enumeration_handle)
-        if not _restore_windows_observed_atime(path, authority, before):
-            raise ConcurrentSourceMutation(
-                f"Source directory changed while it was inspected: {path}"
-            )
-    finally:
-        _windows_close_handle(authority)
 
 
 def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
@@ -1393,10 +1381,14 @@ def _finish_observed_atime_value(
     descriptor: int,
     before: os.stat_result,
 ) -> int | None:
-    """Restore only read-induced atime on the same otherwise-unchanged entry."""
+    """Verify a coherent read without rewriting access-time metadata."""
 
     if _windows_host():
-        return _finish_windows_observed_atime_value(path, descriptor, before)
+        try:
+            after = _path_lstat(path)
+        except OSError:
+            return None
+        return after.st_atime_ns if _same_observed_entry(before, after) else None
 
     after = os.fstat(descriptor)
     try:
@@ -1405,49 +1397,7 @@ def _finish_observed_atime_value(
         return None
     if not _same_observed_entry(before, after) or not _same_observed_entry(after, live):
         return None
-    if after.st_atime_ns != before.st_atime_ns:
-        applied_atime_ns = _apply_descriptor_atime_only(
-            descriptor, before.st_atime_ns
-        )
-        restored = os.fstat(descriptor)
-        try:
-            restored_live = path.lstat()
-        except OSError:
-            return None
-        if (
-            not _same_observed_entry(after, restored)
-            or not _same_observed_entry(restored, restored_live)
-            or restored.st_atime_ns != applied_atime_ns
-        ):
-            return None
-        return restored.st_atime_ns
     return after.st_atime_ns
-
-
-def _finish_windows_observed_atime_value(
-    path: Path,
-    descriptor: int,
-    before: os.stat_result,
-) -> int | None:
-    try:
-        after = path.lstat()
-    except OSError:
-        return None
-    if not _same_observed_entry(before, after):
-        return None
-    # Windows may defer access-time updates. Reapply the captured value
-    # unconditionally so this is also the boundary that detects a concurrent
-    # write arriving between observation and publication.
-    applied_atime_ns = _apply_descriptor_atime_only(descriptor, before.st_atime_ns)
-    try:
-        restored = path.lstat()
-    except OSError:
-        return None
-    if not _same_observed_entry(before, restored) or (
-        restored.st_atime_ns // 100 != applied_atime_ns // 100
-    ):
-        return None
-    return restored.st_atime_ns
 
 
 def _finish_observed_atime(
@@ -1464,7 +1414,7 @@ def _finish_contained_directory_atime(
     descriptor: int,
     before: os.stat_result,
 ) -> bool:
-    """Verify a contained directory by descriptors and neutralize read atime."""
+    """Verify a contained directory coherently without metadata writes."""
 
     after = os.fstat(descriptor)
     if not _same_observed_entry(before, after):
@@ -1479,15 +1429,6 @@ def _finish_contained_directory_atime(
         os.close(live_descriptor)
     if not _same_observed_entry(after, live):
         return False
-    if after.st_atime_ns != before.st_atime_ns:
-        applied_atime_ns = _apply_descriptor_atime_only(
-            descriptor, before.st_atime_ns
-        )
-        restored = os.fstat(descriptor)
-        return (
-            _same_observed_entry(after, restored)
-            and restored.st_atime_ns == applied_atime_ns
-        )
     return True
 
 
@@ -1633,7 +1574,7 @@ def _restore_windows_observed_atime(
 
 
 def read_regular_bytes_no_follow(path: Path) -> tuple[bytes, os.stat_result]:
-    """Read one stable regular entry without following links or changing atime."""
+    """Read one stable regular entry without following links."""
 
     try:
         descriptor, before = _open_observed(path)
@@ -1953,24 +1894,6 @@ def read_contained_regular_bytes_no_follow(
             raise ConcurrentSourceMutation(
                 f"Source entry changed while it was read: {path}"
             )
-        if after.st_atime_ns != before.st_atime_ns:
-            applied_atime_ns = _apply_descriptor_atime_only(
-                descriptor, before.st_atime_ns
-            )
-            restored = os.fstat(descriptor)
-            restored_live = os.stat(
-                leaf,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-            if (
-                not _same_observed_entry(after, restored)
-                or not _same_observed_entry(restored, restored_live)
-                or restored.st_atime_ns != applied_atime_ns
-            ):
-                raise ConcurrentSourceMutation(
-                    f"Source entry changed while it was read: {path}"
-                )
         return b"".join(chunks), before
     except OSError as exc:
         raise FilesystemError(f"Cannot read contained regular entry {path}: {exc}") from exc
@@ -2126,7 +2049,7 @@ def _apply_entry_stat(path: Path, metadata: os.stat_result) -> tuple[int, int]:
         try:
             current = os.fstat(descriptor)
             if stat.S_IMODE(current.st_mode) != desired_mode:
-                os.fchmod(descriptor, desired_mode)
+                _fchmod(descriptor, desired_mode)
             os.utime(
                 descriptor,
                 ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
@@ -2416,6 +2339,1063 @@ def remove_entry_no_follow(path: Path) -> None:
         path.unlink()
 
 
+def ensure_contained_parent_directories(root: Path, path: Path) -> None:
+    """Create missing parents while refusing redirected or non-directory ancestors."""
+
+    canonical_root = root.resolve(strict=True)
+    try:
+        relative_text = path.relative_to(canonical_root).as_posix()
+    except ValueError as exc:
+        raise FilesystemError(f"Project path is outside the plugin root: {path}") from exc
+    relative = validate_persisted_relative_path(relative_text)
+    parents = relative.parts[:-1]
+    if not parents:
+        return
+
+    if _windows_host():
+        _ensure_windows_contained_parent_directories(canonical_root, parents)
+        return
+
+    if not _descriptor_relative_io_supported():
+        raise FilesystemError(
+            "Safe descriptor-relative parent creation is unavailable on this host"
+        )
+
+    _ensure_posix_contained_parent_directories(canonical_root, parents)
+
+
+def _ensure_windows_contained_parent_directories(
+    canonical_root: Path,
+    parents: Tuple[str, ...],
+) -> None:
+    current = canonical_root
+    current_handle = _windows_open_no_follow_handle(
+        current,
+        directory=True,
+        share_mode=0x1 | 0x2,
+        ancestor_share_mode=0x1 | 0x2,
+    )
+    try:
+        for part in parents:
+            child_path = current / part
+            try:
+                child_path.mkdir()
+            except FileExistsError:
+                pass
+            child_handle = _windows_open_no_follow_handle(
+                child_path,
+                directory=True,
+                share_mode=0x1 | 0x2,
+                ancestor_share_mode=0x1 | 0x2,
+            )
+            _windows_close_handle(current_handle)
+            current_handle = child_handle
+            current = child_path
+    except BaseException:
+        _windows_close_handle(current_handle)
+        raise
+    _windows_close_handle(current_handle)
+
+
+def _ensure_posix_contained_parent_directories(
+    canonical_root: Path,
+    parents: Tuple[str, ...],
+) -> None:
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = _open_read_descriptor(canonical_root, flags)
+    current = canonical_root
+    try:
+        for part in parents:
+            try:
+                child = _open_read_descriptor(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = _open_read_descriptor(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise FilesystemError(
+                    f"Generated destination parent is not a directory: {current / part}"
+                ) from exc
+            try:
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise FilesystemError(
+                        f"Generated destination parent is not a directory: {current / part}"
+                    )
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+            current /= part
+    except BaseException:
+        os.close(descriptor)
+        raise
+    os.close(descriptor)
+
+
+def activate_contained_directory_no_replace(
+    root: Path,
+    staged: Path,
+    destination: Path,
+    *,
+    linux_fallback_files: Tuple[str, ...] = (),
+) -> None:
+    """Publish one staged directory through retained authority without replacement."""
+
+    canonical_root = root.resolve(strict=True)
+    for candidate in (staged, destination):
+        try:
+            relative = candidate.relative_to(canonical_root).as_posix()
+        except ValueError as exc:
+            raise FilesystemError(
+                f"Project path is outside the plugin root: {candidate}"
+            ) from exc
+        validate_persisted_relative_path(relative)
+
+    ensure_contained_parent_directories(canonical_root, destination)
+    if _windows_host():
+        _activate_windows_contained_directory_no_replace(staged, destination)
+        return
+
+    if not _descriptor_relative_io_supported():
+        raise FilesystemError(
+            "Safe descriptor-relative feature publication is unavailable on this host"
+        )
+
+    _activate_posix_contained_directory_no_replace(
+        canonical_root,
+        staged,
+        destination,
+        linux_fallback_files,
+    )
+
+
+def _activate_windows_contained_directory_no_replace(
+    staged: Path,
+    destination: Path,
+) -> None:
+    source_handle = _windows_open_no_follow_handle(
+        staged,
+        directory=True,
+        desired_access=0x10000 | 0x80,  # DELETE | FILE_READ_ATTRIBUTES
+        share_mode=0x1 | 0x2 | 0x4,
+        ancestor_share_mode=0x1 | 0x2 | 0x4,
+    )
+    destination_parent = _windows_open_no_follow_handle(
+        destination.parent,
+        directory=True,
+        desired_access=0x20 | 0x80,  # FILE_TRAVERSE | FILE_READ_ATTRIBUTES
+        share_mode=0x1 | 0x2,
+        ancestor_share_mode=0x1 | 0x2,
+    )
+    try:
+        _windows_rename_handle_relative(
+            source_handle,
+            destination.name,
+            destination_parent,
+            replace_if_exists=False,
+        )
+        if _windows_path_key(
+            _windows_handle_final_path(source_handle)
+        ) != _windows_path_key(destination):
+            raise ConcurrentSourceMutation(
+                f"Authored feature publication is ambiguous: {destination}"
+            )
+    finally:
+        _windows_close_handle(destination_parent)
+        _windows_close_handle(source_handle)
+
+
+def _activate_posix_contained_directory_no_replace(
+    canonical_root: Path,
+    staged: Path,
+    destination: Path,
+    linux_fallback_files: Tuple[str, ...],
+) -> None:
+    source_parent, source_name = _open_contained_parent_descriptor(
+        canonical_root, staged
+    )
+    destination_parent, destination_name = _open_contained_parent_descriptor(
+        canonical_root, destination
+    )
+    try:
+        source_before = os.stat(
+            source_name,
+            dir_fd=source_parent,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISDIR(source_before.st_mode):
+            raise FilesystemError(f"Staged feature is not a directory: {staged}")
+        expected_identity = _rename_posix_directory_with_linux_fallback(
+            canonical_root,
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+            source_before,
+            destination,
+            linux_fallback_files,
+        )
+        _verify_posix_published_identity(
+            destination_parent,
+            destination_name,
+            expected_identity,
+            destination,
+        )
+        _verify_current_contained_identity(
+            canonical_root,
+            destination,
+            expected_identity,
+        )
+    finally:
+        os.close(destination_parent)
+        os.close(source_parent)
+
+
+def _rename_posix_directory_with_linux_fallback(
+    canonical_root: Path,
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+    source_before: os.stat_result,
+    destination: Path,
+    linux_fallback_files: Tuple[str, ...],
+) -> tuple[int, int]:
+    try:
+        _posix_rename_directory_no_replace(
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        )
+        return source_before.st_dev, source_before.st_ino
+    except OSError as exc:
+        unsupported = {
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        resumable = (
+            exc.errno == errno.EEXIST
+            and sys.platform.startswith("linux")
+            and bool(linux_fallback_files)
+            and _linux_destination_has_add_marker(
+                destination_parent,
+                destination_name,
+            )
+        )
+        if exc.errno not in unsupported and not resumable:
+            raise
+        if not sys.platform.startswith("linux"):
+            raise FilesystemError(
+                "Safe atomic no-replace feature publication is unavailable on "
+                "this filesystem; the authored feature was not activated"
+            ) from exc
+        if not linux_fallback_files:
+            raise FilesystemError(
+                "Safe Linux fallback publication requires the exact add scaffold plan"
+            ) from exc
+        return _publish_linux_add_scaffold(
+            canonical_root,
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+            source_before,
+            destination,
+            linux_fallback_files,
+        )
+
+
+def _linux_destination_has_add_marker(parent: int, name: str) -> bool:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        destination = _open_read_descriptor(name, flags, dir_fd=parent)
+    except OSError:
+        return False
+    try:
+        marker = os.stat(
+            FEATURE_ADD_INCOMPLETE_MARKER,
+            dir_fd=destination,
+            follow_symlinks=False,
+        )
+        return stat.S_ISREG(marker.st_mode)
+    except OSError:
+        return False
+    finally:
+        os.close(destination)
+
+
+def _verify_posix_published_identity(
+    destination_parent: int,
+    destination_name: str,
+    expected_identity: tuple[int, int],
+    destination: Path,
+) -> None:
+    published = os.stat(
+        destination_name,
+        dir_fd=destination_parent,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISDIR(published.st_mode)
+        or (published.st_dev, published.st_ino) != expected_identity
+    ):
+        raise ConcurrentSourceMutation(
+            f"Authored feature publication is ambiguous: {destination}"
+        )
+
+
+def _verify_current_contained_identity(
+    canonical_root: Path,
+    destination: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    current_parent: int | None = None
+    try:
+        current_parent, current_name = _open_contained_parent_descriptor(
+            canonical_root,
+            destination,
+        )
+        current = os.stat(
+            current_name,
+            dir_fd=current_parent,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != expected_identity
+        ):
+            raise ConcurrentSourceMutation(
+                f"Authored feature publication is ambiguous: {destination}"
+            )
+    except ConcurrentSourceMutation:
+        raise
+    except OSError as exc:
+        raise ConcurrentSourceMutation(
+            f"Authored feature publication is ambiguous: {destination}"
+        ) from exc
+    finally:
+        if current_parent is not None:
+            os.close(current_parent)
+
+
+def _posix_rename_directory_no_replace(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+) -> None:
+    """Use the host's atomic no-replace rename primitive with retained dirfds."""
+
+    import ctypes
+
+    library = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(source_name)
+    destination = os.fsencode(destination_name)
+    result = -1
+    if sys.platform == "darwin":
+        rename = library.renameatx_np
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            source_parent,
+            source,
+            destination_parent,
+            destination,
+            0x00000004,  # RENAME_EXCL
+        )
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = library.renameat2
+        except AttributeError as exc:
+            raise FilesystemError(
+                "Atomic no-replace feature publication is unavailable on this host"
+            ) from exc
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            source_parent,
+            source,
+            destination_parent,
+            destination,
+            1,  # RENAME_NOREPLACE
+        )
+    else:
+        raise FilesystemError(
+            "Atomic no-replace feature publication is unavailable on this host"
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination_name)
+
+
+@dataclass(frozen=True)
+class _AddScaffold:
+    root_mode: int
+    directories: Tuple[Tuple[Tuple[str, ...], int], ...]
+    files: Tuple[Tuple[Tuple[str, ...], bytes, int], ...]
+
+
+def _publish_linux_add_scaffold(
+    canonical_root: Path,
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+    source_before: os.stat_result,
+    destination: Path,
+    expected_files: Tuple[str, ...],
+) -> tuple[int, int]:
+    """Publish the known fresh-add scaffold without a directory rename."""
+
+    source = _open_matching_add_directory(
+        source_parent,
+        source_name,
+        source_before,
+        "Staged feature changed before Linux fallback publication",
+    )
+    try:
+        scaffold = _capture_add_scaffold(source, source_before, expected_files)
+    finally:
+        os.close(source)
+    marker = _add_marker_payload(destination_name, scaffold)
+
+    try:
+        target = _linux_mkdir_open_directory(
+            destination_parent,
+            destination_name,
+            _LINUX_ADD_INCOMPLETE_ROOT_MODE,
+            destination,
+        )
+        created = True
+    except FileExistsError:
+        target = _open_add_destination(
+            destination_parent,
+            destination_name,
+            destination,
+        )
+        created = False
+    try:
+        target_stat = os.fstat(target)
+        if created:
+            _write_add_file_exclusive(
+                target,
+                FEATURE_ADD_INCOMPLETE_MARKER,
+                marker,
+                0o600,
+            )
+            _add_publication_checkpoint("after-marker", FEATURE_ADD_INCOMPLETE_MARKER)
+        directories, existing_files = _open_incomplete_add(
+            target,
+            scaffold,
+            marker,
+            destination,
+        )
+        try:
+            _fill_incomplete_add(directories, scaffold, existing_files)
+            _require_complete_add(directories, scaffold, marker, destination)
+            _fchmod(target, scaffold.root_mode)
+            _verify_current_contained_identity(
+                canonical_root,
+                destination,
+                (target_stat.st_dev, target_stat.st_ino),
+            )
+            _add_publication_checkpoint(
+                "before-complete",
+                FEATURE_ADD_INCOMPLETE_MARKER,
+            )
+            os.unlink(FEATURE_ADD_INCOMPLETE_MARKER, dir_fd=target)
+        finally:
+            for descriptor in directories.values():
+                os.close(descriptor)
+        return target_stat.st_dev, target_stat.st_ino
+    finally:
+        os.close(target)
+
+
+def _open_matching_add_directory(
+    parent: int,
+    name: str,
+    expected: os.stat_result,
+    message: str,
+) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = _open_read_descriptor(name, flags, dir_fd=parent)
+    except OSError as exc:
+        raise ConcurrentSourceMutation(message) from exc
+    opened = os.fstat(descriptor)
+    if not stat.S_ISDIR(opened.st_mode) or not _same_observed_entry(expected, opened):
+        os.close(descriptor)
+        raise ConcurrentSourceMutation(message)
+    return descriptor
+
+
+def _capture_add_scaffold(
+    source: int,
+    source_before: os.stat_result,
+    expected_files: Tuple[str, ...],
+) -> _AddScaffold:
+    parsed_files = tuple(
+        validate_persisted_relative_path(relative).parts
+        for relative in expected_files
+    )
+    if len(set(parsed_files)) != len(parsed_files) or any(
+        parts == (FEATURE_ADD_INCOMPLETE_MARKER,) for parts in parsed_files
+    ):
+        raise FilesystemError("Linux add fallback scaffold plan is invalid")
+    directory_paths = tuple(
+        sorted(
+            {
+                parts[:index]
+                for parts in parsed_files
+                for index in range(1, len(parts))
+            },
+            key=lambda parts: (len(parts), parts),
+        )
+    )
+    descriptors: dict[Tuple[str, ...], int] = {(): os.dup(source)}
+    directories: list[Tuple[Tuple[str, ...], int]] = []
+    files: list[Tuple[Tuple[str, ...], bytes, int]] = []
+    try:
+        for parts in directory_paths:
+            parent = descriptors[parts[:-1]]
+            metadata = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+            child = _open_matching_add_directory(
+                parent,
+                parts[-1],
+                metadata,
+                "Staged feature directory changed during Linux fallback",
+            )
+            descriptors[parts] = child
+            directories.append((parts, stat.S_IMODE(metadata.st_mode)))
+        for parts in parsed_files:
+            parent = descriptors[parts[:-1]]
+            content, mode = _read_add_file(parent, parts[-1])
+            files.append((parts, content, mode))
+        if not _same_observed_entry(source_before, os.fstat(source)):
+            raise ConcurrentSourceMutation(
+                "Staged feature changed during Linux fallback publication"
+            )
+        return _AddScaffold(
+            stat.S_IMODE(source_before.st_mode),
+            tuple(directories),
+            tuple(files),
+        )
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+
+
+def _read_add_file(parent: int, name: str) -> tuple[bytes, int]:
+    metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise FilesystemError(f"Fresh add scaffold entry is not regular: {name}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = _open_read_descriptor(name, flags, dir_fd=parent)
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_observed_entry(metadata, opened):
+            raise ConcurrentSourceMutation("Fresh add scaffold changed while read")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not _same_observed_entry(opened, after) or not _same_observed_entry(
+            after,
+            named,
+        ):
+            raise ConcurrentSourceMutation("Fresh add scaffold changed while read")
+        return b"".join(chunks), stat.S_IMODE(opened.st_mode)
+    finally:
+        os.close(descriptor)
+
+
+def _add_marker_payload(destination_name: str, scaffold: _AddScaffold) -> bytes:
+    marker = {
+        "schema_version": 1,
+        "kind": "supernote-feature-add-incomplete",
+        "destination": destination_name,
+        "root_mode": scaffold.root_mode,
+        "directories": [
+            {"path": "/".join(parts), "mode": mode}
+            for parts, mode in scaffold.directories
+        ],
+        "files": [
+            {
+                "path": "/".join(parts),
+                "mode": mode,
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+            for parts, content, mode in scaffold.files
+        ],
+    }
+    return (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _open_add_destination(
+    parent: int,
+    name: str,
+    destination: Path,
+) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = _open_read_descriptor(name, flags, dir_fd=parent)
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except OSError as exc:
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), name) from exc
+    if not stat.S_ISDIR(named.st_mode) or not _same_entry_identity(opened, named):
+        os.close(descriptor)
+        raise ConcurrentSourceMutation(
+            f"Authored feature publication is ambiguous: {destination}"
+        )
+    return descriptor
+
+
+def _linux_mkdir_open_directory(
+    parent: int,
+    name: str,
+    mode: int,
+    destination: Path,
+) -> int:
+    """Exclusively create, immediately open, and retain one add directory."""
+
+    descriptor: int | None = None
+    try:
+        os.mkdir(name, mode, dir_fd=parent)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = _open_read_descriptor(name, flags, dir_fd=parent)
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not _same_entry_identity(opened, named)
+            or os.listdir(descriptor)
+        ):
+            raise ConcurrentSourceMutation(
+                f"Created authored feature directory was substituted: {destination}"
+            )
+        return descriptor
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _open_incomplete_add(
+    root: int,
+    scaffold: _AddScaffold,
+    marker: bytes,
+    destination: Path,
+) -> tuple[dict[Tuple[str, ...], int], set[Tuple[str, ...]]]:
+    try:
+        marker_content, marker_mode = _read_add_file(
+            root,
+            FEATURE_ADD_INCOMPLETE_MARKER,
+        )
+    except (FileNotFoundError, FilesystemError) as exc:
+        raise FileExistsError(
+            errno.EEXIST,
+            "pre-existing feature is not a matching incomplete add",
+            str(destination),
+        ) from exc
+    if marker_mode != 0o600 or marker_content != marker:
+        raise FilesystemError(
+            f"Incomplete authored feature publication marker changed: {destination}"
+        )
+    directories: dict[Tuple[str, ...], int] = {(): os.dup(root)}
+    try:
+        for parts, expected_mode in scaffold.directories:
+            parent = directories.get(parts[:-1])
+            if parent is None:
+                continue
+            try:
+                metadata = os.stat(
+                    parts[-1],
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            child = _open_matching_add_directory(
+                parent,
+                parts[-1],
+                metadata,
+                "Incomplete add directory changed while inspected",
+            )
+            if stat.S_IMODE(metadata.st_mode) != expected_mode:
+                os.close(child)
+                raise FilesystemError(
+                    f"Incomplete authored feature publication was modified: {destination}"
+                )
+            directories[parts] = child
+        existing_files = _validate_add_state(
+            directories,
+            scaffold,
+            marker,
+            destination,
+            complete=False,
+        )
+        return directories, existing_files
+    except BaseException:
+        for descriptor in directories.values():
+            os.close(descriptor)
+        raise
+
+
+def _validate_add_state(
+    directories: dict[Tuple[str, ...], int],
+    scaffold: _AddScaffold,
+    marker: bytes,
+    destination: Path,
+    *,
+    complete: bool,
+) -> set[Tuple[str, ...]]:
+    _validate_add_root_mode(directories[()], destination)
+    _validate_add_directories(directories, scaffold, destination, complete=complete)
+    _validate_add_marker(directories[()], marker, destination)
+    return _validate_add_files(
+        directories,
+        scaffold,
+        destination,
+        complete=complete,
+    )
+
+
+def _validate_add_root_mode(root: int, destination: Path) -> None:
+    if stat.S_IMODE(os.fstat(root).st_mode) != _LINUX_ADD_INCOMPLETE_ROOT_MODE:
+        raise FilesystemError(
+            f"Incomplete authored feature publication was modified: {destination}"
+        )
+
+
+def _validate_add_directories(
+    directories: dict[Tuple[str, ...], int],
+    scaffold: _AddScaffold,
+    destination: Path,
+    *,
+    complete: bool,
+) -> None:
+    expected_children: dict[Tuple[str, ...], set[str]] = {
+        parts: set() for parts in ((), *(parts for parts, _mode in scaffold.directories))
+    }
+    for parts, _mode in scaffold.directories:
+        expected_children[parts[:-1]].add(parts[-1])
+    for parts, _content, _mode in scaffold.files:
+        expected_children[parts[:-1]].add(parts[-1])
+    expected_children[()].add(FEATURE_ADD_INCOMPLETE_MARKER)
+    expected_directory_modes = dict(scaffold.directories)
+    for parts, descriptor in directories.items():
+        names = set(os.listdir(descriptor))
+        allowed = expected_children[parts]
+        if not names.issubset(allowed) or (complete and names != allowed):
+            raise FilesystemError(
+                f"Incomplete authored feature publication has unrelated entries: {destination}"
+            )
+        for child_parts, child in directories.items():
+            if not child_parts or child_parts[:-1] != parts:
+                continue
+            named = os.stat(
+                child_parts[-1],
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            retained = os.fstat(child)
+            if (
+                not _same_entry_identity(named, retained)
+                or stat.S_IMODE(retained.st_mode)
+                != expected_directory_modes[child_parts]
+            ):
+                raise ConcurrentSourceMutation(
+                    "Incomplete add directory changed while inspected"
+                )
+
+
+def _validate_add_marker(root: int, marker: bytes, destination: Path) -> None:
+    marker_content, marker_mode = _read_add_file(
+        root,
+        FEATURE_ADD_INCOMPLETE_MARKER,
+    )
+    if marker_content != marker or marker_mode != 0o600:
+        raise FilesystemError(
+            f"Incomplete authored feature publication marker changed: {destination}"
+        )
+
+
+def _validate_add_files(
+    directories: dict[Tuple[str, ...], int],
+    scaffold: _AddScaffold,
+    destination: Path,
+    *,
+    complete: bool,
+) -> set[Tuple[str, ...]]:
+    existing: set[Tuple[str, ...]] = set()
+    for parts, expected_content, expected_mode in scaffold.files:
+        parent = directories.get(parts[:-1])
+        if parent is None:
+            if complete:
+                raise FilesystemError(
+                    f"Incomplete authored feature publication is incomplete: {destination}"
+                )
+            continue
+        try:
+            content, mode = _read_add_file(parent, parts[-1])
+        except FileNotFoundError:
+            if complete:
+                raise FilesystemError(
+                    f"Incomplete authored feature publication is incomplete: {destination}"
+                )
+            continue
+        if content != expected_content or mode != expected_mode:
+            raise FilesystemError(
+                f"Incomplete authored feature publication was modified: {destination}"
+            )
+        existing.add(parts)
+    return existing
+
+
+def _fill_incomplete_add(
+    directories: dict[Tuple[str, ...], int],
+    scaffold: _AddScaffold,
+    existing_files: set[Tuple[str, ...]],
+) -> None:
+    for parts, mode in scaffold.directories:
+        if parts in directories:
+            continue
+        parent = directories[parts[:-1]]
+        child = _linux_mkdir_open_directory(
+            parent,
+            parts[-1],
+            mode,
+            Path("/").joinpath(*parts),
+        )
+        _fchmod(child, mode)
+        directories[parts] = child
+        _add_publication_checkpoint("after-directory", "/".join(parts))
+    for parts, content, mode in scaffold.files:
+        if parts in existing_files:
+            continue
+        _write_add_file_exclusive(
+            directories[parts[:-1]],
+            parts[-1],
+            content,
+            mode,
+        )
+        _add_publication_checkpoint("after-file", "/".join(parts))
+
+
+def _write_add_file_exclusive(
+    parent: int,
+    name: str,
+    content: bytes,
+    mode: int,
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, mode, dir_fd=parent)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        _fchmod(descriptor, mode)
+        os.fsync(descriptor)
+        retained = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not _same_entry_identity(retained, named):
+            raise ConcurrentSourceMutation("Created add file changed before completion")
+    finally:
+        os.close(descriptor)
+
+
+def _require_complete_add(
+    directories: dict[Tuple[str, ...], int],
+    scaffold: _AddScaffold,
+    marker: bytes,
+    destination: Path,
+) -> None:
+    if len(directories) != len(scaffold.directories) + 1:
+        raise FilesystemError(
+            f"Incomplete authored feature publication is incomplete: {destination}"
+        )
+    _validate_add_state(
+        directories,
+        scaffold,
+        marker,
+        destination,
+        complete=True,
+    )
+
+
+def _add_publication_checkpoint(_boundary: str, _relative: str) -> None:
+    """Fault-injection boundary for the Linux fresh-add fallback."""
+
+
+def replace_generated_regular_no_follow(
+    root: Path,
+    staged: Path,
+    destination: Path,
+) -> None:
+    """Replace one generated leaf through retained, non-redirected parent authority."""
+
+    ensure_contained_parent_directories(root, destination)
+    if _windows_host():
+        source_descriptor = _windows_open_conditional_regular_descriptor(staged)
+        parent_handle = _windows_open_conditional_parent_handle(destination.parent)
+        try:
+            if not _windows_descriptor_path_matches(source_descriptor, staged):
+                raise ConcurrentSourceMutation(
+                    f"Generated staging entry changed before publication: {staged}"
+                )
+            _windows_rename_descriptor_replace(
+                source_descriptor,
+                destination,
+                root_directory=parent_handle,
+            )
+            if not _windows_descriptor_path_matches(source_descriptor, destination):
+                raise ConcurrentSourceMutation(
+                    f"Generated publication is ambiguous: {destination}"
+                )
+        finally:
+            _close_descriptor(source_descriptor)
+            _windows_close_handle(parent_handle)
+        return
+
+    staged_parent, staged_name = _open_contained_parent_descriptor(root, staged)
+    destination_parent, destination_name = _open_contained_parent_descriptor(
+        root, destination
+    )
+    try:
+        source_stat = os.stat(
+            staged_name,
+            dir_fd=staged_parent,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise FilesystemError(f"Generated staging entry is not regular: {staged}")
+        try:
+            destination_stat = os.stat(
+                destination_name,
+                dir_fd=destination_parent,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            destination_stat = None
+        if destination_stat is not None and not stat.S_ISREG(destination_stat.st_mode):
+            raise FilesystemError(
+                f"Generated destination is not a regular file: {destination}"
+            )
+        os.rename(
+            staged_name,
+            destination_name,
+            src_dir_fd=staged_parent,
+            dst_dir_fd=destination_parent,
+        )
+    finally:
+        os.close(destination_parent)
+        os.close(staged_parent)
+
+
+def remove_generated_regular_no_follow(root: Path, destination: Path) -> None:
+    """Remove one verified generated regular leaf without following links."""
+
+    if _windows_host():
+        descriptor = _windows_open_conditional_regular_descriptor(destination)
+        try:
+            if not _windows_descriptor_path_matches(descriptor, destination):
+                raise ConcurrentSourceMutation(
+                    f"Generated deletion target changed: {destination}"
+                )
+            _windows_delete_regular_descriptor(descriptor)
+        finally:
+            _close_descriptor(descriptor)
+        return
+
+    parent, name = _open_contained_parent_descriptor(root, destination)
+    try:
+        metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise FilesystemError(
+                f"Generated deletion target is not a regular file: {destination}"
+            )
+        os.unlink(name, dir_fd=parent)
+    finally:
+        os.close(parent)
+
+
+def _windows_delete_regular_descriptor(descriptor: int) -> None:
+    """Mark the exact retained Windows regular file for deletion on close."""
+
+    if not _windows_host():
+        raise OSError("Windows handle operations are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = (("DeleteFile", wintypes.BOOL),)
+
+    disposition = FileDispositionInfo(True)
+    set_info = _windows_kernel32().SetFileInformationByHandle
+    set_info.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_info.restype = wintypes.BOOL
+    handle = _windows_descriptor_handle(descriptor)
+    if not set_info(
+        wintypes.HANDLE(handle),
+        4,  # FileDispositionInfo
+        ctypes.byref(disposition),
+        ctypes.sizeof(disposition),
+    ):
+        raise _windows_error()
+
+
 def hash_entry_no_follow(path: Path) -> Optional[str]:
     """Hash content, modes, entry kinds, and exact symlink target text."""
 
@@ -2684,102 +3664,6 @@ def source_tree_changes(
     return tuple(changed)
 
 
-def source_tree_changes_after_restore(
-    root: Path,
-    before: SourceTreeInventory,
-    after: SourceTreeInventory,
-) -> Tuple[str, ...]:
-    """Compare rollback state while accepting only stable timestamp representation.
-
-    Some filesystems can report subsecond creation mtimes but round every
-    explicit ``utime`` request. A recovery copy therefore cannot reproduce the
-    originally observed value even though its bytes, kind, and mode are exact.
-    Ordinary inventory comparison stays strict; this narrower comparison is
-    only for a completed restore and requires a fresh same-filesystem probe.
-    """
-
-    root = root.resolve(strict=True)
-    changed = []
-    for relative in sorted(set(before) | set(after)):
-        if relative not in before:
-            changed.append(f"created:{relative}")
-        elif relative not in after:
-            changed.append(f"deleted:{relative}")
-        elif before[relative] != after[relative] and not _restored_inventory_entry_matches(
-            root,
-            before[relative],
-            after[relative],
-        ):
-            changed.append(f"modified:{relative}")
-    return tuple(changed)
-
-
-def _restored_inventory_entry_matches(
-    root: Path,
-    before: Tuple[str, int, int, Optional[str]],
-    after: Tuple[str, int, int, Optional[str]],
-) -> bool:
-    if before[:2] + before[3:] != after[:2] + after[3:]:
-        return False
-    kind = before[0]
-    if kind not in {"file", "symlink"}:
-        return False
-    expected_mtime_ns = before[2]
-    represented = _probe_stable_mtime_representation(
-        root,
-        kind,
-        expected_mtime_ns,
-    )
-    return (
-        represented is not None
-        and represented != expected_mtime_ns
-        and after[2] == represented
-    )
-
-
-def _probe_stable_mtime_representation(
-    root: Path,
-    kind: str,
-    requested_mtime_ns: int,
-) -> int | None:
-    """Return a non-exact stable mtime representation on ``root``'s filesystem."""
-
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix=".sn-module-gen-timestamp-probe-",
-            dir=root.parent,
-        ) as temporary:
-            probe = Path(temporary) / "entry"
-            if kind == "file":
-                probe.write_bytes(b"")
-            elif kind == "symlink":
-                probe.symlink_to("target")
-            else:
-                return None
-            before = probe.lstat()
-            if before.st_dev != root.lstat().st_dev:
-                return None
-            os.utime(
-                probe,
-                ns=(before.st_atime_ns, requested_mtime_ns),
-                follow_symlinks=False,
-            )
-            applied = probe.lstat()
-            if applied.st_mtime_ns == requested_mtime_ns:
-                return None
-            os.utime(
-                probe,
-                ns=(applied.st_atime_ns, applied.st_mtime_ns),
-                follow_symlinks=False,
-            )
-            stable = probe.lstat()
-            if stable.st_mtime_ns != applied.st_mtime_ns:
-                return None
-            return applied.st_mtime_ns
-    except (NotImplementedError, OSError):
-        return None
-
-
 def protected_source_snapshot_roots(root: Path) -> Tuple[Path, ...]:
     """Return non-overlapping roots covering exactly the inventoried state.
 
@@ -2932,7 +3816,7 @@ def _apply_contained_directory_metadata(
         descriptor = _open_contained_directory_descriptor(root, relative)
         try:
             before = os.fstat(descriptor)
-            os.fchmod(descriptor, mode)
+            _fchmod(descriptor, mode)
             os.utime(descriptor, ns=(atime_ns, mtime_ns))
             applied = os.fstat(descriptor)
             _verify_applied_directory_metadata(before, applied, mode)
@@ -3466,243 +4350,6 @@ def _restore_backup_entry_atomic(source: Path, destination: Path) -> None:
         remove_entry_no_follow(displaced)
 
 
-def retain_directory_metadata_recovery(
-    plugin_root: Path,
-    metadata: ProtectedDirectoryMetadata,
-    *,
-    transaction_id: str,
-    outcome: str,
-) -> tuple[Path, str, str]:
-    """Persist an out-of-tree, fresh-process recovery bundle for metadata."""
-
-    root = plugin_root.resolve(strict=True)
-    metadata = validate_protected_directory_metadata(
-        root,
-        metadata,
-        allow_missing=True,
-    )
-    if (
-        len(transaction_id) != 32
-        or any(character not in "0123456789abcdef" for character in transaction_id)
-        or outcome not in {"rollback", "commit", "abandon"}
-    ):
-        raise FilesystemError("Transaction metadata recovery binding is invalid")
-    bundle_id = uuid.uuid4().hex
-    recovery = Path(tempfile.mkdtemp(prefix="sn-module-gen-metadata-recovery-")).resolve(
-        strict=True
-    )
-    manifest = {
-        "schema_version": 2,
-        "recovery_kind": "transaction-directory-metadata",
-        "plugin_root": str(root),
-        "transaction_id": transaction_id,
-        "outcome": outcome,
-        "bundle_id": bundle_id,
-        "entries": [],
-        "directories": [
-            {
-                "destination": relative,
-                "mode": mode,
-                "atime_ns": atime_ns,
-                "mtime_ns": mtime_ns,
-            }
-            for relative, (mode, atime_ns, mtime_ns) in sorted(metadata.items())
-        ],
-    }
-    path = recovery / "recovery-manifest.json"
-    payload = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(
-        "utf-8"
-    )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        os.close(descriptor)
-    return recovery, bundle_id, hashlib.sha256(payload).hexdigest()
-
-
-def validate_transaction_metadata_recovery(
-    recovery_path: Path,
-    plugin_root: Path,
-    *,
-    transaction_id: str,
-    outcome: str,
-    bundle_id: str,
-    manifest_sha256: str,
-) -> ProtectedDirectoryMetadata:
-    """Validate a transaction-owned metadata-only recovery bundle without mutation."""
-
-    root = plugin_root.resolve(strict=True)
-    path = Path(recovery_path)
-    _validate_metadata_recovery_directory(path)
-    payload = _read_private_metadata_recovery_manifest(path)
-    if hashlib.sha256(payload).hexdigest() != manifest_sha256:
-        raise FilesystemError("Transaction metadata recovery manifest was modified")
-    manifest = _parse_metadata_recovery_manifest(payload)
-    _validate_metadata_recovery_binding(
-        manifest,
-        root=root,
-        transaction_id=transaction_id,
-        outcome=outcome,
-        bundle_id=bundle_id,
-    )
-    metadata = _metadata_recovery_directories(manifest["directories"])
-    return validate_protected_directory_metadata(root, metadata, allow_missing=True)
-
-
-def _validate_metadata_recovery_directory(path: Path) -> None:
-    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
-    try:
-        recovery_metadata = path.lstat()
-    except OSError as exc:
-        raise FilesystemError(
-            "Transaction metadata recovery ancestry is unsafe"
-        ) from exc
-    if (
-        not path.is_absolute()
-        or path.parent != temporary_root
-        or not path.name.startswith("sn-module-gen-metadata-recovery-")
-        or entry_kind(path) != "directory"
-        or path.resolve(strict=True) != path
-        or (
-            hasattr(os, "geteuid")
-            and getattr(recovery_metadata, "st_uid", -1) != os.geteuid()
-        )
-        or (
-            os.name != "nt"
-            and stat.S_IMODE(recovery_metadata.st_mode) & 0o077
-        )
-    ):
-        raise FilesystemError("Transaction metadata recovery ancestry is unsafe")
-
-
-def _read_private_metadata_recovery_manifest(path: Path) -> bytes:
-    manifest_path = _validate_no_follow_path(
-        path,
-        "recovery-manifest.json",
-        allowed_final_kinds={"file"},
-    )
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(manifest_path, flags)
-    except OSError as exc:
-        raise FilesystemError("Transaction metadata recovery manifest is unavailable") from exc
-    try:
-        value = os.fstat(descriptor)
-        if not stat.S_ISREG(value.st_mode):
-            raise FilesystemError(
-                "Transaction metadata recovery manifest is not a regular file"
-            )
-        if (
-            (
-                hasattr(os, "geteuid")
-                and getattr(value, "st_uid", -1) != os.geteuid()
-            )
-            or (os.name != "nt" and stat.S_IMODE(value.st_mode) & 0o077)
-        ):
-            raise FilesystemError(
-                "Transaction metadata recovery manifest is not private"
-            )
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            payload = handle.read()
-    finally:
-        os.close(descriptor)
-    return payload
-
-
-def _parse_metadata_recovery_manifest(payload: bytes) -> dict[str, object]:
-    try:
-        manifest = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise FilesystemError("Transaction metadata recovery manifest is invalid") from exc
-    if not isinstance(manifest, dict):
-        raise FilesystemError("Transaction metadata recovery binding is invalid")
-    return manifest
-
-
-def _validate_metadata_recovery_binding(
-    manifest: dict[str, object],
-    *,
-    root: Path,
-    transaction_id: str,
-    outcome: str,
-    bundle_id: str,
-) -> None:
-    expected_fields = {
-        "schema_version",
-        "recovery_kind",
-        "plugin_root",
-        "transaction_id",
-        "outcome",
-        "bundle_id",
-        "entries",
-        "directories",
-    }
-    if (
-        set(manifest) != expected_fields
-        or manifest.get("schema_version") != 2
-        or manifest.get("recovery_kind") != "transaction-directory-metadata"
-        or (
-            (
-                _windows_path_key(Path(str(manifest.get("plugin_root"))))
-                != _windows_path_key(root)
-            )
-            if _windows_host()
-            else manifest.get("plugin_root") != str(root)
-        )
-        or manifest.get("transaction_id") != transaction_id
-        or manifest.get("outcome") != outcome
-        or manifest.get("bundle_id") != bundle_id
-        or manifest.get("entries") != []
-        or not isinstance(manifest.get("directories"), list)
-    ):
-        raise FilesystemError("Transaction metadata recovery binding is invalid")
-
-
-def _metadata_recovery_directories(raw_directories: object) -> ProtectedDirectoryMetadata:
-    if not isinstance(raw_directories, list):
-        raise FilesystemError("Transaction metadata recovery binding is invalid")
-    metadata: ProtectedDirectoryMetadata = {}
-    for raw in raw_directories:
-        if not isinstance(raw, dict) or set(raw) != {
-            "destination",
-            "mode",
-            "atime_ns",
-            "mtime_ns",
-        }:
-            raise FilesystemError("Transaction metadata recovery entry is invalid")
-        relative = raw.get("destination")
-        values = (raw.get("mode"), raw.get("atime_ns"), raw.get("mtime_ns"))
-        if not isinstance(relative, str) or not all(
-            isinstance(item, int) and not isinstance(item, bool) for item in values
-        ):
-            raise FilesystemError("Transaction metadata recovery entry is invalid")
-        if relative in metadata:
-            raise FilesystemError("Transaction metadata recovery entries are duplicated")
-        mode, atime_ns, mtime_ns = values
-        assert isinstance(mode, int)
-        assert isinstance(atime_ns, int)
-        assert isinstance(mtime_ns, int)
-        metadata[relative] = (mode, atime_ns, mtime_ns)
-    return metadata
-
-
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def validate_source_symlink_support(
     roots: Iterable[Path],
     *,
@@ -3960,14 +4607,7 @@ def _read_symlink_identity_bound(
             raise ConcurrentSourceMutation(
                 f"Source symbolic link changed while it was {operation}: {path}"
             )
-        applied_atime_ns = _restore_symlink_observation_atime(
-            path,
-            operation,
-            authority,
-            before,
-            after,
-        )
-        return target, before, applied_atime_ns
+        return target, before, after.st_atime_ns
     finally:
         _close_symlink_metadata_authority(authority)
 
@@ -3981,7 +4621,7 @@ def _open_read_symlink_authority(
         handle = _windows_open_no_follow_handle(
             path,
             directory=False,
-            write_metadata=True,
+            write_metadata=False,
             allow_reparse_leaf=True,
         )
         authority = ("windows", handle)
@@ -3997,30 +4637,6 @@ def _open_read_symlink_authority(
     if authority is None:
         raise ConcurrentSourceMutation(f"Source symbolic link cannot be read safely: {path}")
     return before, authority
-
-
-def _restore_symlink_observation_atime(
-    path: Path,
-    operation: str,
-    authority: tuple[str, int],
-    before: os.stat_result,
-    after: os.stat_result,
-) -> int:
-    if after.st_atime_ns == before.st_atime_ns:
-        return after.st_atime_ns
-    applied_atime_ns = _apply_symlink_authority_metadata(
-        authority,
-        before,
-        atime_only=True,
-    )
-    restored = path.lstat()
-    if not _same_observed_entry(before, restored) or (
-        restored.st_atime_ns != applied_atime_ns
-    ):
-        raise ConcurrentSourceMutation(
-            f"Source symbolic link changed while it was {operation}: {path}"
-        )
-    return restored.st_atime_ns
 
 
 def _copy_symlink(source: Path, destination: Path) -> tuple[int, int, int]:
@@ -4181,7 +4797,7 @@ def _apply_descriptor_metadata(
         return
     before = os.fstat(descriptor)
     desired_mode = stat.S_IMODE(metadata.st_mode)
-    os.fchmod(descriptor, desired_mode)
+    _fchmod(descriptor, desired_mode)
     os.utime(descriptor, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
     applied = os.fstat(descriptor)
     _verify_stable_applied_entry_metadata(before, applied, desired_mode)
@@ -4222,7 +4838,7 @@ def _update_entry_hash(
     relative: Path,
     applied_atimes: Dict[str, int] | None = None,
 ) -> None:
-    metadata = path.lstat()
+    metadata = _path_lstat(path)
     kind = entry_kind(path)
     digest.update(relative.as_posix().encode("utf-8"))
     digest.update(b"\0")
@@ -4256,7 +4872,7 @@ def _file_sha256(path: Path) -> str:
 
 
 def _update_digest_from_file(digest: _Digest, path: Path) -> int:
-    """Hash a file while restoring any access-time side effect of reading it."""
+    """Hash one coherently read file without rewriting metadata."""
 
     descriptor, before = _open_observed(path)
     try:
@@ -4282,20 +4898,22 @@ def _is_build_or_cache_path(relative: str) -> bool:
     if not parts:
         return False
     first = parts[0]
-    if first in {
-        ".git",
-        "node_modules",
-        ".idea",
-        "build",
-        ".gradle",
-        ".cxx",
-        ".kotlin",
-    }:
-        return True
-    if first == ".supernote-module-transaction.json":
-        return True
-    if first.startswith(
-        (".supernote-module-transaction-", ".sn-module-gen-plan-")
+    if (
+        first
+        in {
+            ".git",
+            ".supernote-module",
+            "node_modules",
+            ".idea",
+            "build",
+            ".gradle",
+            ".cxx",
+            ".kotlin",
+            ".supernote-module-transaction.json",
+        }
+        or first.startswith(
+            (".supernote-module-transaction-", ".sn-module-gen-plan-")
+        )
     ):
         return True
     if parts[:2] in {
@@ -4303,6 +4921,8 @@ def _is_build_or_cache_path(relative: str) -> bool:
         ("android", ".gradle"),
         ("android", ".cxx"),
         ("android", ".kotlin"),
+        ("android", ".supernote-module"),
+        ("android", "supernote-runtime"),
     }:
         return True
     if parts[:3] == ("android", "app", "build"):
@@ -4322,9 +4942,11 @@ def _is_build_or_cache_path(relative: str) -> bool:
     ):
         return True
     feature_offset = _feature_component_count(parts)
-    return feature_offset is not None and parts[
-        feature_offset : feature_offset + 2
-    ] in {
+    if feature_offset is None:
+        return False
+    if parts[feature_offset : feature_offset + 1] == (".supernote-generated",):
+        return True
+    return parts[feature_offset : feature_offset + 2] in {
         ("android", "build"),
         ("android", ".gradle"),
         ("android", ".cxx"),

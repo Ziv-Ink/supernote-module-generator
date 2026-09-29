@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -397,7 +398,7 @@ def test_equivalent_cpp_and_jvm_semantics_generate_identical_public_typescript()
 
 
 def test_generated_contract_and_expect_error_fixture_pass_real_tsc(tmp_path: Path):
-    tsc = shutil.which("tsc")
+    tsc = os.environ.get("SNMG_TSC_COMMAND") or shutil.which("tsc")
     if tsc is None:
         pytest.skip("TypeScript compiler is unavailable")
     fixture_root = Path(__file__).parent / "fixtures/typescript"

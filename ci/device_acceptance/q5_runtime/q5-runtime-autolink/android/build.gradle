@@ -1,0 +1,20 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+android {
+    namespace 'com.zivink.q5runtimehost'
+    compileSdk rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        minSdk rootProject.ext.minSdkVersion
+    }
+}
+
+dependencies {
+    implementation('com.facebook.react:react-android')
+    implementation project(':supernote-module-runtime')
+}
+
+kotlin {
+    jvmToolchain(17)
+}

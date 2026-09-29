@@ -2,28 +2,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Mapping
 
 from . import binding_codegen
 from .jvm_manifest import read_jvm_manifest
-from .jvm_projection import project_jvm_owners
 from .project_model import ProjectModel
 from .filesystem import iter_tree_no_follow
 from .semantic import SemanticApi
 from .semantic_ir import FeatureSemanticIR, SemanticIR, SemanticIRError
-
-
-def load_jvm_frontend_output(
-    project: ProjectModel,
-    manifest_root: Path,
-) -> Dict[str, SemanticApi]:
-    """Load exact KSP build output without permitting it to write source output."""
-
-    manifests = load_jvm_frontend_manifests(project, manifest_root)
-    return {
-        feature_id: project_jvm_owners(raw.owners, feature_id=feature_id)
-        for feature_id, raw in manifests.items()
-    }
 
 
 def load_jvm_frontend_manifests(

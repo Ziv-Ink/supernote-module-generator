@@ -4,8 +4,6 @@ import io
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 
@@ -13,7 +11,6 @@ from supernote_module_generator.cli import main
 from supernote_module_generator.devconfig import configured_developer_environment
 from supernote_module_generator.models import CommandResult
 from supernote_module_generator.platform_tools import gradle_wrapper_path
-from supernote_module_generator.transaction import JOURNAL_NAME, Transaction
 
 
 def _plugin(tmp_path: Path) -> Path:
@@ -148,20 +145,15 @@ def test_absent_or_null_devconfig_values_preserve_the_launch_environment(
         assert application.issues == ()
 
 
-def test_devconfig_read_preserves_atime_and_refuses_a_symlink_without_following(
+def test_devconfig_read_never_repairs_metadata_and_refuses_a_symlink_without_following(
     tmp_path: Path,
     monkeypatch,
 ):
     root = _plugin(tmp_path)
     config = root / "devconfig.json"
     config.write_text("{}\n", encoding="utf-8")
-    metadata = config.stat()
-    old_atime = 946684800_000_000_000
-    os.utime(config, ns=(old_atime, metadata.st_mtime_ns))
-
     with configured_developer_environment(root) as application:
         assert application.issues == ()
-    assert config.stat().st_atime_ns == old_atime
 
     external = tmp_path.parent / f"{tmp_path.name}-external-devconfig.json"
     external.write_text('{"javaHome":"/must-not-follow"}\n', encoding="utf-8")
@@ -318,8 +310,8 @@ def test_malformed_devconfig_is_reported_in_json_without_blocking_safe_commands(
     assert "Could not read devconfig.json" in payload["warnings"][0]["message"]
 
 
-def test_add_update_build_and_doctor_share_the_devconfig_environment(
-    tmp_path: Path, monkeypatch, make_directory_symlink
+def test_add_update_validate_and_doctor_share_the_devconfig_environment(
+    tmp_path: Path, monkeypatch
 ):
     root = _plugin(tmp_path)
     java_home, android_sdk, adb = _tools(tmp_path)
@@ -330,44 +322,47 @@ def test_add_update_build_and_doctor_share_the_devconfig_environment(
     monkeypatch.setenv("ADB_BIN", "/wrong/adb")
     observed: list[tuple[str, str, str, str, str]] = []
 
-    def record(command, *, cwd, timeout, stream=None, env=None):
-        observed.append(
-            (
-                str(command[-1]),
-                os.environ["JAVA_HOME"],
-                os.environ["ANDROID_HOME"],
-                os.environ["ANDROID_SDK_ROOT"],
-                os.environ["ADB_BIN"],
+    def record(command: str):
+        def run(self, *args, **kwargs):
+            observed.append(
+                (
+                    command,
+                    os.environ["JAVA_HOME"],
+                    os.environ["ANDROID_HOME"],
+                    os.environ["ANDROID_SDK_ROOT"],
+                    os.environ["ADB_BIN"],
+                )
             )
-        )
-        return subprocess.CompletedProcess(command, 0, "", "")
+            return CommandResult(command)
+
+        return run
 
     monkeypatch.setattr(
-        "supernote_module_generator.feature_cli_operations.run_process", record
+        "supernote_module_generator.cli.FeatureCliOperationService.add",
+        record("add"),
     )
-    monkeypatch.setattr("supernote_module_generator.validation.run_process", record)
+    monkeypatch.setattr(
+        "supernote_module_generator.cli.FeatureCliOperationService.update",
+        record("update"),
+    )
+    monkeypatch.setattr(
+        "supernote_module_generator.cli.FeatureCliOperationService.validate",
+        record("validate"),
+    )
 
     add_code, _, add_error = _invoke(
         root,
-        ["add", "document", "--starter", "cpp", "--skip-install", "--yes"],
+        ["add", "document", "--starter", "cpp", "--yes"],
     )
     assert add_code == 0, add_error
-    feature = root / "local_modules/document"
-    update_code, _, update_error = _invoke(
-        root, ["update", "document", "--skip-install", "--yes"]
-    )
+    update_code, _, update_error = _invoke(root, ["update"])
     assert update_code == 0, update_error
-    link = root / "node_modules/document"
-    link.parent.mkdir()
-    make_directory_symlink(link, feature)
-    validate_code, _, validate_error = _invoke(
-        root, ["validate", "document", "--build"]
-    )
+    validate_code, _, validate_error = _invoke(root, ["validate"])
     assert validate_code == 0, validate_error
 
     doctor_environment: dict[str, str] = {}
 
-    def doctor(self, scope, *, build=False):
+    def doctor(self, scope):
         doctor_environment.update(
             {
                 name: os.environ[name]
@@ -387,46 +382,10 @@ def test_add_update_build_and_doctor_share_the_devconfig_environment(
     assert _invoke(root, ["--json", "doctor"])[0] == 0
 
     expected = (str(java_home), str(android_sdk), str(android_sdk), str(adb))
-    assert [entry[0] for entry in observed] == [":app:assembleDebug"]
+    assert [entry[0] for entry in observed] == ["add", "update", "validate"]
     assert all(entry[1:] == expected for entry in observed)
     assert tuple(doctor_environment.values()) == expected
     assert os.environ["JAVA_HOME"] == "/wrong/jdk"
     assert os.environ["ANDROID_HOME"] == "/wrong/sdk"
     assert os.environ["ANDROID_SDK_ROOT"] == "/wrong/sdk-root"
     assert os.environ["ADB_BIN"] == "/wrong/adb"
-
-
-def test_startup_recovery_reconciles_with_the_devconfig_environment(
-    tmp_path: Path, monkeypatch
-):
-    root = _plugin(tmp_path)
-    java_home, android_sdk, adb = _tools(tmp_path)
-    _write_config(root, java_home, android_sdk, adb)
-    monkeypatch.setenv("JAVA_HOME", "/wrong/jdk")
-    monkeypatch.setenv("ANDROID_HOME", "/wrong/sdk")
-    marker = root / "recovery-environment.txt"
-    script = (
-        "import os, pathlib, sys; "
-        f"expected={(str(java_home), str(android_sdk), str(adb))!r}; "
-        "actual=(os.environ.get('JAVA_HOME'), os.environ.get('ANDROID_HOME'), "
-        "os.environ.get('ADB_BIN')); "
-        f"pathlib.Path({str(marker)!r}).write_text('|'.join(actual)); "
-        "sys.exit(0 if actual == expected else 9)"
-    )
-    package = root / "package.json"
-    transaction = Transaction(root, "update", ["document"])
-    transaction.snapshot([package])
-    package.write_text('{"name":"changed"}\n', encoding="utf-8")
-    transaction.mark_external([sys.executable, "-c", script])
-    assert transaction.rollback(reconcile=lambda command: False).status == "partial"
-    assert (root / JOURNAL_NAME).is_file()
-
-    code, _, stderr = _invoke(root, ["validate", "--all"])
-
-    assert code == 0, stderr
-    assert marker.read_text(encoding="utf-8") == "|".join(
-        (str(java_home), str(android_sdk), str(adb))
-    )
-    assert not (root / JOURNAL_NAME).exists()
-    assert os.environ["JAVA_HOME"] == "/wrong/jdk"
-    assert os.environ["ANDROID_HOME"] == "/wrong/sdk"

@@ -1,0 +1,11 @@
+{
+  "name": "SnmgQ5R7Auth",
+  "desc": "Disposable Q5 R7-F2 lifecycle acceptance v2",
+  "iconPath": "",
+  "versionName": "1.0.1",
+  "versionCode": "2",
+  "pluginID": "a9ce0d1477f83edf",
+  "pluginKey": "snmg-q5-r7-auth-device-0909",
+  "jsMainPath": "index",
+  "uses-permissions": []
+}

@@ -20,3 +20,8 @@ PLUGIN_REGISTRY_KIND = "supernote_module_plugin_runtime_registry"
 
 GENERATED_OWNERSHIP_SCHEMA_VERSION = "1.0"
 GENERATED_OWNERSHIP_KIND = "supernote_module_plugin_runtime_ownership"
+
+NPM_DISTRIBUTION_SCHEMA_VERSION = "2.0"
+NPM_DISTRIBUTION_KIND = "supernote_module_distribution"
+NPM_MODULE_PROTOCOL_VERSION = "2.0"
+NPM_RUNTIME_PROTOCOL_VERSION = "2.0"

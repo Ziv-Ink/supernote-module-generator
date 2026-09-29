@@ -25,6 +25,8 @@ from .filesystem import (
     ProtectedSourceRestoreError,
     finish_protected_source_guard,
     read_regular_bytes_no_follow,
+    source_tree_changes,
+    source_tree_inventory,
 )
 from .platform_tools import (
     gradle_wrapper_command,
@@ -43,7 +45,156 @@ _GRADLE_ASSIGNMENT = re.compile(
     r"['\"]\s*\])\s*=\s*"
     r"(?P<value>\"[^\"]+\"|'[^']+'|\d+)\s*;?\s*$"
 )
-ANDROID_CMAKE_VERSION = "3.22.1"
+ANDROID_CMAKE_VERSION = "3.24.4"
+MINIMUM_ANDROID_CMAKE_VERSION = "3.24"
+_PROPERTIES_WHITESPACE = " \t\f"
+
+
+class _PropertiesParseError(ValueError):
+    """A Java-properties input cannot be interpreted without guessing."""
+
+
+def _properties_logical_lines(text: str) -> List[Tuple[str, int]]:
+    logical: List[Tuple[str, int]] = []
+    pending: Optional[str] = None
+    pending_line = 0
+    # java.util.Properties recognizes only CR, LF, and CRLF as natural-line
+    # terminators. Form-feed is property whitespace, not a line boundary.
+    natural_lines = re.split(r"\r\n|\r|\n", text)
+    for line_number, natural in enumerate(natural_lines, start=1):
+        if pending is None:
+            stripped = natural.lstrip(_PROPERTIES_WHITESPACE)
+            # A comment is discarded as a complete natural line. Its trailing
+            # backslash cannot continue the comment into the following
+            # property line.
+            if stripped.startswith(("#", "!")):
+                continue
+            current = natural
+            pending_line = line_number
+        else:
+            current = pending + natural.lstrip(_PROPERTIES_WHITESPACE)
+        trailing_backslashes = len(current) - len(current.rstrip("\\"))
+        if trailing_backslashes % 2 == 1:
+            pending = current[:-1]
+            continue
+        logical.append((current, pending_line))
+        pending = None
+    if pending is not None:
+        logical.append((pending, pending_line))
+    return logical
+
+
+def _decode_property_fragment(fragment: str, *, line_number: int) -> str:
+    decoded: List[str] = []
+    index = 0
+    escapes = {"t": "\t", "n": "\n", "r": "\r", "f": "\f"}
+    while index < len(fragment):
+        character = fragment[index]
+        if character != "\\":
+            decoded.append(character)
+            index += 1
+            continue
+        index += 1
+        if index >= len(fragment):
+            raise _PropertiesParseError(
+                f"trailing escape at logical line starting on line {line_number}"
+            )
+        escaped = fragment[index]
+        index += 1
+        if escaped in escapes:
+            decoded.append(escapes[escaped])
+            continue
+        if escaped != "u":
+            # java.util.Properties drops the slash for all non-Unicode escapes,
+            # including escaped separators, whitespace, and backslashes.
+            decoded.append(escaped)
+            continue
+        digits = fragment[index : index + 4]
+        if len(digits) != 4 or re.fullmatch(r"[0-9A-Fa-f]{4}", digits) is None:
+            raise _PropertiesParseError(
+                f"malformed Unicode escape at logical line starting on line {line_number}"
+            )
+        decoded.append(chr(int(digits, 16)))
+        index += 4
+    value = "".join(decoded)
+    try:
+        return value.encode("utf-16", errors="surrogatepass").decode("utf-16")
+    except UnicodeError as exc:
+        raise _PropertiesParseError(
+            f"invalid Unicode surrogate escape at logical line starting on line {line_number}"
+        ) from exc
+
+
+def _split_property(line: str, *, line_number: int) -> Optional[Tuple[str, str]]:
+    length = len(line)
+    key_start = 0
+    while key_start < length and line[key_start] in _PROPERTIES_WHITESPACE:
+        key_start += 1
+    if key_start == length or line[key_start] in "#!":
+        return None
+
+    key_end = key_start
+    preceding_backslash = False
+    while key_end < length:
+        character = line[key_end]
+        if not preceding_backslash and (
+            character in "=:" or character in _PROPERTIES_WHITESPACE
+        ):
+            break
+        if character == "\\":
+            preceding_backslash = not preceding_backslash
+        else:
+            preceding_backslash = False
+        key_end += 1
+
+    value_start = key_end
+    while value_start < length and line[value_start] in _PROPERTIES_WHITESPACE:
+        value_start += 1
+    if value_start < length and line[value_start] in "=:":
+        value_start += 1
+    while value_start < length and line[value_start] in _PROPERTIES_WHITESPACE:
+        value_start += 1
+
+    return (
+        _decode_property_fragment(line[key_start:key_end], line_number=line_number),
+        _decode_property_fragment(line[value_start:], line_number=line_number),
+    )
+
+
+def _parse_java_properties(content: bytes) -> List[Tuple[str, str, int]]:
+    # Gradle/Android local.properties follows java.util.Properties.load(InputStream):
+    # bytes are ISO-8859-1 and non-Latin text is represented with \uXXXX escapes.
+    text = content.decode("iso-8859-1")
+    parsed: List[Tuple[str, str, int]] = []
+    for line, line_number in _properties_logical_lines(text):
+        item = _split_property(line, line_number=line_number)
+        if item is not None:
+            parsed.append((item[0], item[1], line_number))
+    return parsed
+
+
+def _properties_value(
+    root: Path,
+    relative: str,
+    key: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    path = root / relative
+    if not path.exists():
+        return None, None
+    try:
+        content, _metadata = read_regular_bytes_no_follow(path)
+        properties = _parse_java_properties(content)
+    except (FilesystemError, _PropertiesParseError) as exc:
+        return None, f"Could not read {relative}: {exc}"
+    found = [(value, line_number) for candidate, value, line_number in properties if candidate == key]
+    if not found:
+        return None, None
+    value, line_number = found[-1]
+    if not value:
+        return None, f"{key} in {relative} is empty at line {line_number}."
+    # Java Properties uses the final value when a key is repeated. Matching that
+    # behavior keeps Doctor's selection identical to Gradle's selection.
+    return value, None
 
 
 @dataclass(frozen=True)
@@ -275,9 +426,8 @@ class DoctorService:
             self.platform_name == "nt" or os.access(path, os.X_OK)
         )
 
-    def execute(self, scope: str, *, build: bool = False) -> CommandResult:
+    def execute(self, scope: str) -> CommandResult:
         checks: List[DoctorCheckResult] = []
-        build_result: Optional[CommandResult] = None
         with self._phase("Checking project", "Checked project"):
             try:
                 root = resolve_plugin_root(self.cwd)
@@ -330,7 +480,9 @@ class DoctorService:
             )
         )
 
-        guard = ProtectedSourceGuard(root) if valid_root else None
+        baseline = source_tree_inventory(root) if valid_root else None
+        interrupted = False
+        stage_exception: Optional[Exception] = None
         try:
             with self._phase("Checking JavaScript tools", "Checked JavaScript tools"):
                 checks.extend(self._javascript_checks(root, valid_root))
@@ -338,91 +490,58 @@ class DoctorService:
                 checks.extend(self._android_checks(root, valid_root, selection))
             if scope == "plugin":
                 with self._phase("Checking native tools", "Checked native tools"):
-                    checks.extend(self._native_checks(selection))
-            if scope == "plugin":
-                with self._phase("Checking JSI runtime", "Checked JSI runtime"):
-                    checks.extend(self._jsi_runtime_checks())
-            if build:
-                with self._phase("Building project", "Built project"):
-                    build_result = self._project_build_result(root, valid_root)
-                    checks.append(
-                        self._project_build_check(root, valid_root, build_result)
-                    )
-        except BaseException as exc:
-            if guard is None:
-                raise
-            stage_result = (
-                self._stage_failure_result(scope, checks, exc, build_result)
-                if isinstance(exc, Exception)
-                else None
+                    checks.extend(self._native_checks(root, selection))
+        except KeyboardInterrupt:
+            interrupted = True
+        except Exception as exc:
+            stage_exception = exc
+        mutations = (
+            source_tree_changes(baseline, source_tree_inventory(root))
+            if baseline is not None
+            else ()
+        )
+        if mutations:
+            checks.append(self._source_mutation_check(mutations, restored=False))
+            result = (
+                self._stage_failure_result(scope, checks, stage_exception, None)
+                if stage_exception is not None
+                else self._final_result(
+                    scope,
+                    checks,
+                    changes=self._mutation_changes(mutations),
+                )
             )
-            try:
-                mutations, finish_interrupted = self._finish_guard(guard)
-            except ProtectedSourceRestoreError as restore_exc:
-                return self._guard_failure_result(
-                    scope,
-                    checks,
-                    restore_exc,
-                    interrupted=(
-                        isinstance(exc, KeyboardInterrupt)
-                        or restore_exc.interrupted
+            result.status = "partial"
+            result.exit_code = 3
+            result.changes = self._mutation_changes(mutations)
+            result.metadata.update(
+                {
+                    "cancellation_requested": interrupted,
+                    "cancellation_status": "partial" if interrupted else "not_requested",
+                    "cancellation_message": (
+                        "Doctor was interrupted; a concurrent source edit was retained."
+                        if interrupted
+                        else None
                     ),
-                    build_result=stage_result or build_result,
-                )
-            if isinstance(exc, KeyboardInterrupt):
-                return self._cancelled_result(
-                    scope,
-                    checks,
-                    mutations,
-                    build_result=build_result,
-                )
-            if stage_result is not None and finish_interrupted:
-                return self._cancelled_result(
-                    scope,
-                    checks,
-                    mutations,
-                    build_result=stage_result,
-                )
-            if mutations:
-                checks.append(self._source_mutation_check(mutations, restored=True))
-                return self._final_result(
-                    scope,
-                    checks,
-                    changes=self._mutation_changes(mutations),
-                    rollback=RollbackResult(True, "completed", []),
-                    build_result=stage_result or build_result,
-                )
-            if stage_result is not None:
-                return stage_result
-            raise
-        if guard is not None:
-            try:
-                mutations, finish_interrupted = self._finish_guard(guard)
-            except ProtectedSourceRestoreError as exc:
-                return self._guard_failure_result(
-                    scope,
-                    checks,
-                    exc,
-                    interrupted=exc.interrupted,
-                    build_result=build_result,
-                )
-            if finish_interrupted:
-                return self._cancelled_result(
-                    scope,
-                    checks,
-                    mutations,
-                    build_result=build_result,
-                )
-            if mutations:
-                checks.append(self._source_mutation_check(mutations, restored=True))
-                return self._final_result(
-                    scope,
-                    checks,
-                    changes=self._mutation_changes(mutations),
-                    rollback=RollbackResult(True, "completed", []),
-                    build_result=build_result,
-                )
-        return self._final_result(scope, checks, build_result=build_result)
+                }
+            )
+            return result
+        if stage_exception is not None:
+            return self._stage_failure_result(scope, checks, stage_exception, None)
+        if interrupted:
+            return CommandResult(
+                "doctor",
+                status="cancelled",
+                exit_code=130,
+                doctor=self._doctor_result(scope, checks),
+                metadata={
+                    "phase_label": "Doctor",
+                    "cancellation_requested": True,
+                    "cancellation_status": "completed",
+                    "cancellation_message": "Doctor was interrupted; no source change was observed.",
+                },
+            )
+        return self._final_result(scope, checks)
 
     def _finish_guard(
         self,
@@ -922,11 +1041,6 @@ class DoctorService:
         failed: Sequence[DoctorCheckResult],
     ) -> str:
         failed_ids = {check.id for check in failed}
-        if "android_project_build" in failed_ids:
-            return (
-                "Review the Doctor build diagnostics, correct the first integrity or "
-                "compiler failure, then rerun `sn-module-gen doctor --build`."
-            )
         if failed_ids in ({"gradle_wrapper"}, {"gradle_wrapper", "gradle_jvm"}):
             wrapper = next(check for check in failed if check.id == "gradle_wrapper")
             relative = (
@@ -1494,10 +1608,11 @@ class DoctorService:
 
     def _native_checks(
         self,
+        root: Path,
         selection: GradleToolchainSelection,
     ) -> List[DoctorCheckResult]:
         sdk, sdk_error, sdk_environment = _android_sdk_selection()
-        cmake = self._selected_cmake_check(sdk, sdk_error)
+        cmake = self._selected_cmake_check(root, sdk, sdk_error)
         ndk_env = os.environ.get("ANDROID_NDK_HOME") or os.environ.get("ANDROID_NDK_ROOT")
         selected_version = selection.value("ndkVersion")
         selection_error = selection.errors.get("ndkVersion")
@@ -1686,53 +1801,93 @@ class DoctorService:
 
     def _selected_cmake_check(
         self,
+        root: Path,
         sdk: Optional[Path],
         sdk_error: Optional[str],
     ) -> DoctorCheckResult:
         executable_name = "cmake.exe" if self.platform_name == "nt" else "cmake"
-        executable = (
-            sdk / "cmake" / ANDROID_CMAKE_VERSION / "bin" / executable_name
-            if sdk is not None
-            else None
+        selected_version, version_error = _properties_value(
+            root,
+            "android/gradle.properties",
+            "supernoteModuleCmakeVersion",
         )
+        selected_version = selected_version or ANDROID_CMAKE_VERSION
+        cmake_dir, directory_error = _properties_value(
+            root,
+            "android/local.properties",
+            "cmake.dir",
+        )
+        configured_directory = None
+        if cmake_dir is not None:
+            configured_directory = Path(cmake_dir).expanduser().resolve()
+            executable = configured_directory / "bin" / executable_name
+            selection_source = "android/local.properties cmake.dir"
+        else:
+            executable = (
+                sdk / "cmake" / selected_version / "bin" / executable_name
+                if sdk is not None
+                else None
+            )
+            selection_source = "generated Android externalNativeBuild configuration"
         command = [str(executable), "--version"] if executable else []
         found = bool(executable and self._is_executable(executable))
         passed = False
         detected = None
         if found:
             passed, detected, _ = self._probe(command)
-            passed = passed and _version_tuple(detected) == _version_tuple(
-                ANDROID_CMAKE_VERSION
+            passed = (
+                passed
+                and _version_tuple(detected) == _version_tuple(selected_version)
+                and _version_tuple(detected)
+                >= _version_tuple(MINIMUM_ANDROID_CMAKE_VERSION)
             )
-        if sdk_error:
+        configuration_error = version_error or directory_error
+        if configuration_error:
+            message = configuration_error
+        elif sdk_error and cmake_dir is None:
             message = sdk_error
         elif not found:
             message = (
-                f"Project-selected Android SDK CMake {ANDROID_CMAKE_VERSION} was not found."
+                f"Project-selected CMake {selected_version} was not found."
             )
         elif not passed:
             message = (
-                f"Project-selected Android SDK CMake {ANDROID_CMAKE_VERSION} could not be probed."
+                f"Project-selected CMake {selected_version} must execute as that exact "
+                f"version and be CMake {MINIMUM_ANDROID_CMAKE_VERSION} or newer."
             )
         else:
             message = (
-                f"Project-selected Android SDK CMake {ANDROID_CMAKE_VERSION} executed successfully."
+                f"Project-selected CMake {selected_version} executed successfully."
             )
         return DoctorCheckResult(
             "cmake",
             "CMake",
             "required",
-            "passed" if passed and sdk_error is None else "failed",
+            "passed"
+            if passed
+            and configuration_error is None
+            and (sdk_error is None or cmake_dir is not None)
+            else "failed",
             detected,
             str(executable) if executable is not None else None,
             message,
             _capability_metadata(
                 configured=True,
                 found=found,
-                selected=executable is not None and sdk_error is None,
+                selected=(
+                    executable is not None
+                    and configuration_error is None
+                    and (sdk_error is None or cmake_dir is not None)
+                ),
                 executable_probed=passed,
-                selection_source="generated Android externalNativeBuild configuration",
-                selected_version=ANDROID_CMAKE_VERSION,
+                selection_source=selection_source,
+                selected_version=selected_version,
+                minimum_version=MINIMUM_ANDROID_CMAKE_VERSION,
+                configured_directory=(
+                    str(configured_directory)
+                    if configured_directory is not None
+                    else None
+                ),
                 sdk_selection_error=sdk_error,
                 command=command,
             ),
@@ -1753,83 +1908,3 @@ class DoctorService:
             flags=re.MULTILINE,
         )
         return match.group(1).strip() if match else None
-
-    def _jsi_runtime_checks(self) -> List[DoctorCheckResult]:
-        return [
-            DoctorCheckResult(
-                "selinux_policy",
-                "JSI execution policy",
-                "advisory",
-                "warning",
-                None,
-                None,
-                "Target PluginHost and SELinux execution policy were not inspected; generated JSI files do not prove runtime execution.",
-                _capability_metadata(),
-            )
-        ]
-
-    def _project_build_result(
-        self,
-        root: Path,
-        valid_root: bool,
-    ) -> Optional[CommandResult]:
-        if not valid_root:
-            return None
-        from .cli_operations import CliOperationService
-
-        return CliOperationService(root).check(build=True)
-
-    def _project_build_check(
-        self,
-        root: Path,
-        valid_root: bool,
-        result: Optional[CommandResult],
-    ) -> DoctorCheckResult:
-        command = ["sn-module-gen", "check", "--build"]
-        if not valid_root:
-            return DoctorCheckResult(
-                "android_project_build",
-                "Android project build",
-                "required",
-                "failed",
-                None,
-                str(root),
-                "A full project build is unavailable outside a plugin root.",
-                _capability_metadata(command=command),
-            )
-        if result is None:
-            raise AssertionError("valid project build check requires a command result")
-        validation = result.validation
-        passed = bool(
-            result.status == "success"
-            and result.exit_code == 0
-            and validation is not None
-            and validation.structural == "passed"
-            and validation.integration == "passed"
-            and validation.dependency_link == "passed"
-            and validation.build == "passed"
-        )
-        return DoctorCheckResult(
-            "android_project_build",
-            "Android project build",
-            "required",
-            "passed" if passed else "failed",
-            None,
-            str(root / "android"),
-            "Authoritative generated-state validation and the full Android build passed."
-            if passed
-            else "Authoritative generated-state validation or the full Android build failed.",
-            _capability_metadata(
-                configured=True,
-                found=True,
-                selected=True,
-                executable_probed=True,
-                compiler_probed=passed,
-                project_built=passed,
-                device_tested=False,
-                command=command,
-                validation=validation.to_dict() if validation is not None else None,
-                issues=list(validation.issues) if validation is not None else [],
-                diagnostics=list(result.diagnostics),
-            ),
-        )

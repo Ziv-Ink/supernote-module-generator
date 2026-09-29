@@ -1,0 +1,10 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'SnmgQ5R7Auth'
+include ':app'
+include ':supernote-module-annotations'
+project(':supernote-module-annotations').projectDir = file('.supernote-module/runtime/annotations')
+include ':supernote-module-runtime'
+project(':supernote-module-runtime').projectDir = file('.supernote-module/runtime')
+includeBuild('../node_modules/@react-native/gradle-plugin')

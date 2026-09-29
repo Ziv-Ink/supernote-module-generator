@@ -297,7 +297,7 @@ def test_integrity_manifest_is_timestamp_free_and_records_every_owned_hash():
     )
     value = json.loads(manifest.render())
 
-    assert value["schema_version"] == "1.0"
+    assert value["schema_version"] == "2.0"
     assert "timestamp" not in value
     assert value["artifacts"][0]["sha256"] == artifact.sha256
     assert value["artifacts"][0]["generation_id"] == ir.generation_id

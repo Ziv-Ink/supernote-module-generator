@@ -46,9 +46,6 @@ files = [
     "src/supernote_module_generator/jsi_binding_decisions.py",
     "src/supernote_module_generator/models.py",
     "src/supernote_module_generator/semantic_types.py",
-    "src/supernote_module_generator/template_contract.py",
-    "src/supernote_module_generator/transaction.py",
-    "src/supernote_module_generator/transaction_registry.py",
 ]
 check_untyped_defs = true
 disallow_any_generics = true

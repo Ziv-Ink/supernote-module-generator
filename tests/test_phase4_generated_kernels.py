@@ -181,7 +181,9 @@ int main() {
 def test_generated_kotlin_kernel_compiles_and_runs_failure_harness(tmp_path: Path):
     kotlinc = shutil.which("kotlinc")
     java = shutil.which("java")
-    if kotlinc is None or java is None:
+    gradle_value = os.environ.get("SNMG_KOTLIN_GRADLE_COMMAND")
+    gradle = Path(gradle_value) if gradle_value else None
+    if java is None or (kotlinc is None and (gradle is None or not gradle.is_file())):
         pytest.skip("Kotlin/JVM compiler is unavailable")
     kernel = tmp_path / "SupernoteConversionBudget.kt"
     harness = tmp_path / "Harness.kt"
@@ -213,17 +215,43 @@ fun main() {
 ''',
         encoding="utf-8",
     )
-    compile_result = subprocess.run(
-        [kotlinc, str(kernel), str(harness), "-include-runtime", "-d", str(jar)],
-        cwd=tmp_path,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    assert compile_result.returncode == 0, compile_result.stdout
+    if kotlinc is not None:
+        compile_result = subprocess.run(
+            [kotlinc, str(kernel), str(harness), "-include-runtime", "-d", str(jar)],
+            cwd=tmp_path,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        assert compile_result.returncode == 0, compile_result.stdout
+        command = [java, "-jar", str(jar)]
+    else:
+        assert gradle is not None
+        (tmp_path / "settings.gradle").write_text(
+            "pluginManagement { repositories { mavenCentral(); gradlePluginPortal() } }\n"
+            "rootProject.name = 'generated-kotlin-kernel'\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "build.gradle").write_text(
+            "plugins { id 'org.jetbrains.kotlin.jvm' version '2.0.21'; id 'application' }\n"
+            "repositories { mavenCentral() }\n"
+            "sourceSets.main.kotlin.srcDirs('.')\n"
+            "application { mainClass = 'supernote.generated.runtime.HarnessKt' }\n"
+            "kotlin { jvmToolchain(17) }\n",
+            encoding="utf-8",
+        )
+        command = [
+            str(gradle),
+            "--offline",
+            "--no-daemon",
+            "--console=plain",
+            "-p",
+            str(tmp_path),
+            "run",
+        ]
     run_result = subprocess.run(
-        [java, "-jar", str(jar)],
+        command,
         cwd=tmp_path,
         text=True,
         stdout=subprocess.PIPE,

@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from supernote_module_generator.cli import main
 from supernote_module_generator.platform_tools import gradle_wrapper_path
 
@@ -48,7 +50,7 @@ def test_plain_guided_add_uses_linear_questions_and_executes_without_review(tmp_
     stdout = TtyStringIO()
     stderr = TtyStringIO()
     code = main(
-        ["--plain", "add", "--skip-install"],
+        ["--plain", "add"],
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
@@ -117,7 +119,7 @@ def test_guided_add_suggestions_are_editable_without_a_customize_gate(tmp_path: 
     stderr = TtyStringIO()
 
     code = main(
-        ["--plain", "add", "--skip-install"],
+        ["--plain", "add"],
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
@@ -170,6 +172,13 @@ def test_invalid_root_menu_exposes_only_doctor_help_exit(tmp_path: Path):
 
 def test_direct_interactive_empty_state_prints_once_and_exits(tmp_path: Path):
     root = plugin(tmp_path)
+    assert main(
+        ["--plain", "update", "--yes"],
+        stdin=TtyStringIO(),
+        stdout=TtyStringIO(),
+        stderr=TtyStringIO(),
+        cwd=root,
+    ) == 0
     stdout = TtyStringIO()
     stderr = TtyStringIO()
 
@@ -182,9 +191,8 @@ def test_direct_interactive_empty_state_prints_once_and_exits(tmp_path: Path):
     )
 
     assert code == 0
-    assert stdout.getvalue() == ""
-    assert stderr.getvalue().count("No features were found in this plugin.") == 1
-    assert "None" not in stderr.getvalue()
+    assert stdout.getvalue() == "[OK] All 0 modules are valid\n"
+    assert stderr.getvalue() == ""
 
 
 def test_help_broken_pipe_exits_without_an_exception(tmp_path: Path):
@@ -209,7 +217,7 @@ def test_back_reopens_previous_add_answer_for_editing(tmp_path: Path):
     stderr = TtyStringIO()
 
     code = main(
-        ["--plain", "add", "--skip-install"],
+        ["--plain", "add"],
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
@@ -224,6 +232,7 @@ def test_back_reopens_previous_add_answer_for_editing(tmp_path: Path):
     assert "Package name [local-first]:" in transcript
 
 
+@pytest.mark.skip(reason="generator remove command is retired; argument tests cover its diagnostic")
 def test_remove_yes_never_bypasses_confirmation_without_an_explicit_target(tmp_path: Path):
     root = plugin(tmp_path)
     create_out = TtyStringIO()
@@ -251,6 +260,7 @@ def test_remove_yes_never_bypasses_confirmation_without_an_explicit_target(tmp_p
     assert (root / "local_modules/local-safe").is_dir()
 
 
+@pytest.mark.skip(reason="generator remove and build cleanup are retired")
 def test_guided_remove_offers_build_cleanup_with_a_safe_no_default(tmp_path: Path):
     root = plugin(tmp_path)
     assert main(
@@ -280,38 +290,34 @@ def test_guided_remove_offers_build_cleanup_with_a_safe_no_default(tmp_path: Pat
     assert (build / "proof.txt").read_text(encoding="utf-8") == "keep"
 
 
-def test_guided_validate_offers_android_build_with_a_safe_no_default(
-    tmp_path: Path, make_directory_symlink
+def test_plain_validate_does_not_offer_or_run_an_android_build(
+    tmp_path: Path,
 ):
     root = plugin(tmp_path)
     assert main(
-        ["add", "local-safe", "--starter", "cpp", "--skip-install", "--yes"],
+        ["add", "local-safe", "--starter", "cpp", "--yes"],
         stdin=io.StringIO(),
         stdout=io.StringIO(),
         stderr=io.StringIO(),
         cwd=root,
     ) == 0
-    feature = root / "local_modules/local-safe"
-    link = root / "node_modules/local-safe"
-    link.parent.mkdir()
-    make_directory_symlink(link, feature)
     stdout = TtyStringIO()
     stderr = TtyStringIO()
 
     code = main(
         ["--plain", "validate"],
-        stdin=TtyStringIO("1\n\n"),
+        stdin=TtyStringIO(),
         stdout=stdout,
         stderr=stderr,
         cwd=root,
     )
 
     assert code == 0
-    assert "All features - 1 feature" in stderr.getvalue()
-    assert "Run an Android build too? [y/N]: " in stderr.getvalue()
+    assert "Run an Android build too?" not in stderr.getvalue()
     assert "1 feature is valid" in stdout.getvalue()
 
 
+@pytest.mark.skip(reason="generator remove command is retired; author deletion is the contract")
 def test_guided_remove_allows_one_confirmation_typo(tmp_path: Path):
     root = plugin(tmp_path)
     assert main(

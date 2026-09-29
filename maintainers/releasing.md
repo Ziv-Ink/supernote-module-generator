@@ -4,9 +4,12 @@ This procedure is for maintainers publishing `sn-module-gen`. It is not part of
 the workflow for developers building Supernote plugins.
 
 Publish only from a clean checkout after the package version, changelog,
-templates, and linked Wiki documentation are final. Publication is gated by
-the exact release commit; a successful workflow from another commit is not
-release evidence.
+generated runtime resources, and linked Wiki documentation are final.
+Publication is gated by the exact release commit; a successful workflow from
+another commit is not release evidence.
+
+The release-quality Python matrix covers the declared minimum Python 3.9 and
+every stable minor through the current supported Python 3.14.
 
 ## Prepare
 
@@ -53,75 +56,38 @@ sn-module-gen --version
 sn-module-gen --help
 ```
 
-Generate features with the C/C++ starter, Kotlin/Java starter, and both starters
-from the wheel. At minimum, verify names, source paths, explicit markers,
-declarations, ownership metadata, one plugin runtime component, generator
-version, and links. The required automated fixture starts from the remotely
-reachable pinned official plugin-template commit recorded in
-`.github/workflows/quality.yml`, then applies and verifies the packaged
-official-template capability, materializes the tagged root-README examples,
-checks out the pinned Wiki revision, and requires:
+Rebuild a wheel from the source distribution with the pinned release tools and
+the commit's `SOURCE_DATE_EPOCH`; it must be byte-identical to the directly
+built wheel. Also build a wheel from the source distribution with the declared
+minimum backend (`setuptools==58.0.4`, `wheel==0.37.0`), install it separately,
+and smoke the public console entry point.
 
-- a second `update --all` to be a true no-op;
-- generated JavaScript lint and TypeScript checking with no warnings;
-- `check --build` to pass Gradle, KSP, Kotlin, CMake, JNI, and JSI compilation;
-- the external read-only state hook to run during the Android build;
-- the official plugin build and package-verification scripts to pass.
+The required generator-only matrix installs the canonical wheel outside the
+source checkout and pins `SUPERNOTE_MODULE_COMMAND` to that absolute console
+executable. On native Ubuntu, macOS, and Windows, with CMake 3.24.4 and each
+runner's current CMake, it must:
 
-The same release gate runs native host qualification on Ubuntu, macOS, and
-Windows. It checks platform path and command selection, operation locking,
-symlink capability/preflight behavior, spaces, Unicode, Windows long paths,
-both Bash and PowerShell launch-script
-syntax, and the exact `npm run run` outcome against a fake ADB device. A tap is
-not runtime proof: without a plugin-specific marker the scripts must say that
-launch was attempted but runtime success was not verified.
+- run installed `add`, plain `update`, and project-wide `validate` for C++,
+  Kotlin, Java, and mixed authored features;
+- run publisher KSP and pack the production-generated module/runtime payloads;
+- install those immutable tarballs in two unrelated consumer roots after the
+  publisher becomes unavailable;
+- trap every consumer generator invocation and prove consumer KSP is absent;
+- compile, link, and execute the actual generated C++/JVM/JavaScript/runtime
+  paths in Debug and Release;
+- reject stale payloads, incompatible identities, stale receivers, and a
+  guard-disabled sensitivity mutant;
+- retain JUnit and structured success or failure evidence for every matrix row.
 
-Every root README and Wiki command/output record is inventoried directly from
-its source and classified. Only `sn-module-gen` arguments are grammar-checked;
-each executable or Android/device command names its execution gate, while each
-placeholder or explanatory-output record states why it is not runnable. The
-pinned Wiki's bounded stateful release-command block is additionally executed
-against a second disposable official-template project. That project must be a
-true generator no-op after generation, remain source-identical through
-`check --build`, pass
-lint and TypeScript, compile Gradle/KSP/Kotlin/CMake/JNI/JSI, and produce a
-package accepted by the official verifier.
+The official plugin template, Wiki, existing plugin repositories, app
+build/package/deploy scripts, and device packages are separate products. The
+generator release workflow does not invoke or mutate them and makes no
+app-package or device-runtime claim.
 
-The exact `file_reader_test` revision is stored as a checked-in Git bundle and
-cloned only into a disposable CI directory. Its non-migration scenarios 7.1
-through 7.7 run against the built wheel; retained authorized device evidence
-qualifies scenarios 7.9 and 7.10. The dirty live developer checkout is never a
-release input.
-
-The same pinned revision also seeds two separate disposable host fixtures for
-the bounded final integration pack. One fixture runs in a dedicated NOTE and
-denies `plugin.permission.FILE:WRITE`; the other runs in a dedicated PDF/DOC
-context and allows `plugin.permission.FILE:READ` once. Each package compiles and
-executes the same 15 source-backed checks spanning generated C++/JSI, generated
-Kotlin/JVM, safe Android build information, mixed-family calls, PluginManager,
-common host APIs, the NOTE/DOC-specific API, and permission status/request/result.
-This is a focused two-context release gate, not the separate 100-plugin matrix.
-The definitions live in `ci/device_acceptance/`, and CI retains both identities
-and installable packages as exact-commit artifacts.
-The retained Nomad result in
-`maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/` is reparsed by
-the real-project acceptance runner and must match the same 15-check source
-manifest before scenario 7.11 can pass.
-
-The fixture installs and uses the wheel produced from that same commit. It must
-not use an editable checkout or a globally installed `sn-module-gen`.
-Do not claim Android/package/device validation unless that tier was actually
-run.
-
-Before release, review:
-
-- the root quick example and Wiki Add a Feature workflow against a working
-  external plugin fixture;
-- the Wiki initial-capability boundaries and dated device/JSI evidence;
-- Update/Remove ownership and source-preservation behavior;
-- documented CLI options against parser/help metadata;
-- repository links, Wiki pages/slugs, and generated README links;
-- release notes for user-visible template, command, or support changes.
+Before release, review the root quick example, current add/update/validate
+grammar, authored/generated ownership boundaries, npm runtime/module protocol,
+repository links, generated README links, and release notes for user-visible
+generator or support changes.
 
 Clone or inspect `supernote-module-generator.wiki.git` during release review.
 Confirm that the Wiki describes the release being published or clearly labels
@@ -166,17 +132,21 @@ Keep the repository URL and the `main` default branch. Before release, confirm
 that the public description names `sn-module-gen` and that the topics include
 `sn-module-gen`, `supernote`, `code-generator`, `python`, `android`, `cpp`,
 `kotlin`, `jni`, `jsi`, `react-native`, and `pypi`. The default-branch README
-and the live Wiki must describe the same public `0.1.2` contract before the tag
+and the live Wiki must describe the same public `0.1.3` contract before the tag
 is created.
 
 ## Publish
 
-Confirm `main` CI is green and `0.1.2` is not already present on PyPI. Run
+Confirm `main` CI is green and `0.1.3` is not already present on PyPI. Run
 any required device canary for loader or lifecycle changes and link its evidence
-from the release notes. Review `maintainers/release-notes-v0.1.2.md`; it must
-distinguish the complete APFS/ext4 installed-CLI workflows from focused eCryptFS
-coverage, and must retain the native-Windows and device-lifecycle limitations.
-Create the signed or annotated `v0.1.2` tag
+from the release notes. Review `maintainers/release-notes-v0.1.3.md`; it must
+distinguish generator/package checks from the accepted Mac/Linux relative Bash
+evidence and the one proven device native invocation. Retain the unsupported
+external linked-source, unchanged PowerShell, shared Bash failure-masking,
+Mac Dashboard JDK 21, Windows Android, and device-lifecycle limitations.
+Historical 0.1.2 notes retain the complete APFS/ext4 installed-CLI workflows and
+focused eCryptFS coverage for that earlier candidate only.
+Create the signed or annotated `v0.1.3` tag
 from the approved release SHA, push that exact tag, and then create the GitHub
 release from the existing tag:
 
@@ -186,15 +156,15 @@ A later loader, lifecycle, PluginHost, or firmware change requires new evidence;
 do not reuse this record as proof for a different candidate or target.
 
 ```bash
-git tag --annotate v0.1.2 "$RELEASE_SHA" --message 'sn-module-gen 0.1.2'
-git push origin v0.1.2
-gh release create v0.1.2 --verify-tag \
-  --title 'sn-module-gen 0.1.2' \
-  --notes-file maintainers/release-notes-v0.1.2.md
+git tag --annotate v0.1.3 "$RELEASE_SHA" --message 'sn-module-gen 0.1.3'
+git push origin v0.1.3
+gh release create v0.1.3 --verify-tag \
+  --title 'sn-module-gen 0.1.3' \
+  --notes-file maintainers/release-notes-v0.1.3.md
 ```
 
 Set `RELEASE_SHA` to the independently approved exact commit. The workflow
-rejects every tag except `v0.1.2`, verifies that it matches the embedded package
+rejects every tag except `v0.1.3`, verifies that it matches the embedded package
 version, and refuses prerelease publication.
 
 The release builder derives `SOURCE_DATE_EPOCH` from the exact source commit,
@@ -207,7 +177,7 @@ bytes.
 
 Publishing the release runs `.github/workflows/publish.yml`. The reusable
 quality workflow checks out `github.sha`, verifies that exact checkout, runs the
-complete Python/static/package/generated-Android matrix, and builds the release
+complete Python/static/package/installed-generator matrix, and builds the release
 artifacts once. Only after every job passes does the isolated publishing job
 download the SHA-named artifact and its SHA-256 provenance, verify both again,
 obtain the PyPI credential, and upload it. A separate least-privilege job attaches

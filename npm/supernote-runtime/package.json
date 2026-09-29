@@ -1,0 +1,28 @@
+{
+  "name": "@supernote/runtime",
+  "version": "0.1.0",
+  "description": "Shared runtime and direct-dependency discovery for generated Supernote modules",
+  "main": "index.js",
+  "files": [
+    "README.md",
+    "android",
+    "cmake/CMakeLists.txt",
+    "cmake/SupernoteModules.cmake",
+    "compose-packages.js",
+    "consumer-rules.pro",
+    "gradle/supernote-modules.gradle",
+    "index.js",
+    "jvm",
+    "native",
+    "react-native.config.js",
+    "runtime-manifest.json",
+    "resolve-packages.js"
+  ],
+  "supernoteNativeRuntime": {
+    "kind": "supernote_module_runtime",
+    "manifest": "runtime-manifest.json",
+    "nativeAbi": "supernote-jsi-v1",
+    "protocol": "2.0",
+    "schemaVersion": "2.0"
+  }
+}

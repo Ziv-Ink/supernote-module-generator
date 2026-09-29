@@ -259,6 +259,22 @@ def _iter_source_tree_no_follow(root: Path):
     yield from sorted(entries)
 
 
+def _iter_marked_source_files(source_root: Path):
+    """Yield ordinary source-tree files that declare a Supernote API marker."""
+
+    for path in _iter_source_tree_no_follow(source_root):
+        if not path.is_file() or not _cpp_source_route(path.suffix).inspect:
+            continue
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise CodegenError(
+                f"could not inspect C/C++ source file {path}: {exc}"
+            ) from exc
+        if b"@Supernote" in content:
+            yield path
+
+
 OBJECT_ANNOTATION = re.compile(
     r"@SupernoteExportObject"
     r"(?:\(\s*name\s*=\s*\"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\"\s*\))?"
@@ -745,7 +761,7 @@ def _parse_function_source(
             exc.message,
         ) from exc
 
-    relative = str(path.relative_to(module_root))
+    relative = path.relative_to(module_root).as_posix()
     signature = ",".join(parameter.cpp_type for parameter in parameters)
     return CppFunctionSource(
         provenance=SourceProvenance(
@@ -834,7 +850,7 @@ def _reject_untagged_global_functions(
     for path, lexed in lexed_sources.items():
         if path.suffix.lower() not in CPP_SUFFIXES:
             continue
-        source = str(path.relative_to(module_root))
+        source = path.relative_to(module_root).as_posix()
         tokens = [
             token for token in lexed.tokens if token.conditional_depth == 0
         ]
@@ -1679,7 +1695,7 @@ def _parse_generated_class_source(
     stack_by_declaration = dict(member_bindings.stacks_by_declaration)
     consumed = set(member_bindings.consumed_comment_offsets)
 
-    relative = str(path.relative_to(module_root))
+    relative = path.relative_to(module_root).as_posix()
     constructors, methods, fields, has_user_constructor = _parse_generated_class_members(
         module_root=module_root,
         path=path,
@@ -1762,8 +1778,8 @@ def scan_cpp_class_source_model(
         raise CodegenError(f"missing C/C++ source directory: {source_root}")
     _, module_name = _scan_context(module_root, None, module_name)
     classes: list[CppClassSource] = []
-    for path in _iter_source_tree_no_follow(source_root):
-        if not path.is_file() or path.suffix.lower() not in CPP_HEADER_SUFFIXES:
+    for path in _iter_marked_source_files(source_root):
+        if path.suffix.lower() not in CPP_HEADER_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8")
         lexed = _lex_source(text)
@@ -1909,7 +1925,7 @@ def _parse_cpp_enum_source(
             module_root, path, name_token.line, module_name, name_token.value,
             "a marked enum class requires at least one valid constant",
         )
-    relative = str(path.relative_to(module_root))
+    relative = path.relative_to(module_root).as_posix()
     return (
         CppEnumSource(
             SourceProvenance(
@@ -1934,8 +1950,8 @@ def scan_cpp_enum_source_model(
     source_root = module_root / "android/src/main/cpp"
     _, resolved_name = _scan_context(module_root, None, module_name)
     result: list[CppEnumSource] = []
-    for path in _iter_source_tree_no_follow(source_root):
-        if not path.is_file() or path.suffix.lower() not in CPP_HEADER_SUFFIXES:
+    for path in _iter_marked_source_files(source_root):
+        if path.suffix.lower() not in CPP_HEADER_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8")
         lexed = _lex_source(text)
@@ -2094,9 +2110,7 @@ def scan_cpp_source_model(
         raise CodegenError(f"missing C/C++ source directory: {source_root}")
 
     _, module_name = _scan_context(module_root, None, module_name)
-    all_sources = [
-        path for path in _iter_source_tree_no_follow(source_root) if path.is_file()
-    ]
+    all_sources = list(_iter_marked_source_files(source_root))
     lexed_sources = _inspect_cpp_source_files(
         module_root,
         all_sources,
@@ -3368,6 +3382,21 @@ bool supernote_array_has_own_index(
   auto key = facebook::jsi::String::createFromUtf8(
       runtime, std::to_string(index));
   auto result = has_own.callWithThis(runtime, array, std::move(key));
+  return result.isBool() && result.getBool();
+}
+
+bool supernote_object_has_own_property(
+    facebook::jsi::Runtime &runtime,
+    const facebook::jsi::Object &object,
+    const char *property) {
+  auto object_constructor =
+      runtime.global().getPropertyAsObject(runtime, "Object");
+  auto prototype =
+      object_constructor.getPropertyAsObject(runtime, "prototype");
+  auto has_own =
+      prototype.getPropertyAsFunction(runtime, "hasOwnProperty");
+  auto key = facebook::jsi::String::createFromUtf8(runtime, property);
+  auto result = has_own.callWithThis(runtime, object, std::move(key));
   return result.isBool() && result.getBool();
 }
 

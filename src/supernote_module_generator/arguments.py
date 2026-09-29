@@ -6,9 +6,22 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .errors import ConfigurationError
 
-COMMANDS = (
-    "add", "update", "validate", "check", "repair", "remove", "template", "doctor", "help"
-)
+COMMANDS = ("add", "update", "validate", "doctor", "help")
+RETIRED_COMMANDS = {
+    "check": (
+        "check was removed; use plain `sn-module-gen validate` to check the "
+        "project or plain `sn-module-gen update` to regenerate it"
+    ),
+    "repair": "repair was removed; use plain `sn-module-gen update` to regenerate the project",
+    "remove": (
+        "remove was removed; delete the authored module and remove its npm/Yarn "
+        "dependency, then run plain `sn-module-gen update`"
+    ),
+    "template": (
+        "template commands were removed; template and app scripts are outside "
+        "the generator"
+    ),
+}
 GLOBAL_BOOLEANS = {
     "-h": "help",
     "--help": "help",
@@ -28,55 +41,36 @@ COMMAND_VALUE_OPTIONS: Dict[str, Dict[str, str]] = {
         "--javascript-name": "javascript_name",
         "--android-namespace": "android_namespace",
         "--package-version": "package_version",
-        "--package-manager": "package_manager",
     },
-    "update": {"--package-manager": "package_manager"},
+    "update": {},
     "validate": {},
-    "check": {"--jvm-manifest-root": "jvm_manifest_root"},
-    "repair": {},
-    "remove": {"--package-manager": "package_manager"},
-    "template": {},
     "doctor": {},
     "help": {},
 }
 COMMAND_BOOLEAN_OPTIONS: Dict[str, Dict[str, str]] = {
     "add": {
-        "--skip-install": "skip_install",
-        "--build": "build",
         "--yes": "yes",
         "-y": "yes",
     },
     "update": {
-        "--skip-install": "skip_install",
-        "--build": "build",
-        "--yes": "yes",
-        "-y": "yes",
-        "--all": "all",
-        "--dry-run": "dry_run",
-        "--diff": "diff",
-    },
-    "validate": {"--all": "all", "--build": "build"},
-    "check": {"--build": "build", "--build-hook": "build_hook"},
-    "repair": {
-        "--dry-run": "dry_run",
-        "--diff": "diff",
         "--yes": "yes",
         "-y": "yes",
     },
-    "remove": {
-        "--all": "all",
-        "--delete-build-files": "delete_build_files",
-        "--skip-install": "skip_install",
-        "--yes": "yes",
-        "-y": "yes",
-    },
-    "template": {
-        "--dry-run": "dry_run",
-        "--yes": "yes",
-        "-y": "yes",
-    },
-    "doctor": {"--build": "build"},
+    "validate": {},
+    "doctor": {},
     "help": {},
+}
+
+_RETIRED_OPTIONS = {
+    "--all": "selective operation was removed; use the plain project-wide command",
+    "--build": "app builds were removed from the generator; run the author-owned build separately",
+    "--build-hook": "build hooks were removed; run plain `sn-module-gen validate` directly",
+    "--delete-build-files": "the generator no longer removes author build output",
+    "--diff": "update preview/diff was removed; use plain `sn-module-gen validate` to check correctness",
+    "--dry-run": "update preview/diff was removed; use plain `sn-module-gen validate` to check correctness",
+    "--jvm-manifest-root": "external build-hook manifests are not a public command input",
+    "--package-manager": "dependency installation is author-owned; use npm or Yarn directly",
+    "--skip-install": "dependency installation is author-owned; use npm or Yarn directly",
 }
 
 
@@ -182,6 +176,21 @@ def _consume_value_option(
     return index + 1
 
 
+def _consume_boolean_option(
+    *,
+    raw: str,
+    option: str,
+    attached: Optional[str],
+    destinations: Dict[str, str],
+    selected: Set[str],
+    index: int,
+) -> int:
+    if attached is not None:
+        raise ConfigurationError(f'unknown option "{raw}"')
+    selected.add(destinations[option])
+    return index + 1
+
+
 def _consume_token(
     arguments: List[str],
     index: int,
@@ -197,10 +206,17 @@ def _consume_token(
         return index + 1, True
     option, attached = _split_option(raw)
     if option in GLOBAL_BOOLEANS:
-        if attached is not None:
-            raise ConfigurationError(f'unknown option "{raw}"')
-        collection.globals_seen.add(GLOBAL_BOOLEANS[option])
-        return index + 1, False
+        return (
+            _consume_boolean_option(
+                raw=raw,
+                option=option,
+                attached=attached,
+                destinations=GLOBAL_BOOLEANS,
+                selected=collection.globals_seen,
+                index=index,
+            ),
+            False,
+        )
     if command is None:
         raise ConfigurationError(f'unknown option "{option}"')
     if option in COMMAND_VALUE_OPTIONS[command]:
@@ -214,10 +230,19 @@ def _consume_token(
         )
         return next_index, False
     if option in COMMAND_BOOLEAN_OPTIONS[command]:
-        if attached is not None:
-            raise ConfigurationError(f'unknown option "{raw}"')
-        collection.booleans.add(COMMAND_BOOLEAN_OPTIONS[command][option])
-        return index + 1, False
+        return (
+            _consume_boolean_option(
+                raw=raw,
+                option=option,
+                attached=attached,
+                destinations=COMMAND_BOOLEAN_OPTIONS[command],
+                selected=collection.booleans,
+                index=index,
+            ),
+            False,
+        )
+    if option in _RETIRED_OPTIONS:
+        raise ConfigurationError(f"{option} was removed: {_RETIRED_OPTIONS[option]}")
     if option.startswith("-"):
         raise ConfigurationError(f'unknown option "{option}"')
     collection.positionals.append(raw)
@@ -252,16 +277,14 @@ def _validate_positionals(
     if command == "help":
         if positional is not None and positional not in COMMAND_HELP_TARGETS:
             raise ConfigurationError(f'unknown command "{positional}"')
-    if (
-        command in {"update", "validate", "remove"}
-        and positional
-        and "all" in collection.booleans
-    ):
-        raise ConfigurationError("--all cannot be used with a module name")
-    if command in {"check", "repair"} and positional is not None:
-        raise ConfigurationError(f"{command} does not accept a module name")
-    if command == "template" and positional not in {"status", "sync"}:
-        raise ConfigurationError("template requires status or sync")
+    if command == "update" and positional is not None:
+        raise ConfigurationError(
+            "update no longer accepts a module name; use plain `sn-module-gen update`"
+        )
+    if command == "validate" and positional is not None:
+        raise ConfigurationError(
+            "validate no longer accepts a module name; use plain `sn-module-gen validate`"
+        )
     return positional
 
 
@@ -282,32 +305,12 @@ def _validate_values(collection: _ArgumentCollection) -> None:
     ]
     if invalid_starters:
         raise ConfigurationError(f'invalid starter family "{invalid_starters[0]}"')
-    if (
-        "package_manager" in collection.provided
-        and collection.values["package_manager"] not in {"npm", "yarn"}
-    ):
-        raise ConfigurationError(
-            f'invalid package manager "{collection.values["package_manager"]}"'
-        )
-
-
-def _validate_template_options(
-    command: Optional[str],
-    positional: Optional[str],
-    collection: _ArgumentCollection,
-) -> None:
-    if command != "template":
-        return
-    if positional == "status" and ({"dry_run", "yes"} & collection.booleans):
-        raise ConfigurationError(
-            "template status does not accept --dry-run or --yes"
-        )
-    if positional == "sync" and {"dry_run", "yes"} <= collection.booleans:
-        raise ConfigurationError("--dry-run and --yes cannot be combined")
 
 
 def parse_arguments(arguments: List[str]) -> ParsedArguments:
     command_index, candidate = _command_index(arguments)
+    if candidate in RETIRED_COMMANDS:
+        raise ConfigurationError(RETIRED_COMMANDS[candidate])
     if candidate is not None and candidate not in COMMANDS:
         raise ConfigurationError(f'unknown command "{candidate}"')
     command = candidate
@@ -315,7 +318,6 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
     positional = _validate_positionals(command, collection)
     output_mode = _output_mode(collection.globals_seen)
     _validate_values(collection)
-    _validate_template_options(command, positional, collection)
     return ParsedArguments(
         command=command,
         positional=positional,
@@ -334,6 +336,4 @@ def parse_arguments(arguments: List[str]) -> ParsedArguments:
     )
 
 
-COMMAND_HELP_TARGETS = {
-    "add", "update", "validate", "check", "repair", "remove", "template", "doctor"
-}
+COMMAND_HELP_TARGETS = {"add", "update", "validate", "doctor"}

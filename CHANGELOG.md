@@ -6,6 +6,21 @@ should also check their installed version with `sn-module-gen --version`.
 
 ## Unreleased
 
+## 0.1.3 - 2026-09-30
+
+- Generate distributable npm/Yarn native modules with package-local bindings,
+  TypeScript declarations, compatibility records, and complete native payloads.
+- Compose installed modules through the shared `@supernote/runtime` package and
+  React Native autolinking, with one generated plugin runtime registration.
+- Separate publisher generation and KSP from consumer builds: consumers use
+  packaged output without running the Python generator or KSP.
+- Keep dependency installation and app builds under author control; plain
+  `update` regenerates all local modules, while project-wide `validate` reports
+  stale, incomplete, unsafe, or incompatible package inputs without publishing.
+- Support copied module-package installation with npm, Yarn classic, and Yarn
+  configured for `node_modules`. External linked author sources and Yarn
+  Plug'n'Play remain unsupported. See the release notes for qualification limits.
+
 ## 0.1.2 - 2026-09-05
 
 - Use the stable timestamp representation actually stored by the host filesystem

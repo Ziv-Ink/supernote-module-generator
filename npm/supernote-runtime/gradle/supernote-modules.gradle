@@ -1,0 +1,24 @@
+// Installed-consumer JVM source integration. The auto-linked runtime owns the
+// one resolver/adapter invocation and supplies its already-validated inventory.
+if (!project.ext.has('supernoteResolvedInventory') ||
+    !project.ext.has('supernoteRuntimePackageRoot')) {
+    throw new GradleException(
+        'Supernote JVM integration requires the auto-linked @supernote/runtime adapter',
+    )
+}
+
+def supernoteInventory = project.ext.supernoteResolvedInventory
+def supernoteRuntimePackageRoot = project.ext.supernoteRuntimePackageRoot as File
+def supernoteJvmRoots = supernoteInventory.modules.collectMany { module ->
+    module.jvmSourceDirs + module.jvmRegistrationSources.collect { source ->
+        new File(source).parentFile.absolutePath
+    }
+}
+supernoteJvmRoots.add(new File(supernoteRuntimePackageRoot, 'jvm').absolutePath)
+supernoteJvmRoots = supernoteJvmRoots.unique().sort()
+
+plugins.withId('com.android.library') {
+    android.sourceSets.main.java.srcDirs(supernoteJvmRoots)
+}
+
+ext.supernoteJvmSourceDirs = supernoteJvmRoots.asImmutable()

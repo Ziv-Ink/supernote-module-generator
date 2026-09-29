@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -18,7 +19,7 @@ from supernote_module_generator.operation_lock import (
     plugin_operation_lock,
 )
 from supernote_module_generator.platform_tools import gradle_wrapper_path
-from supernote_module_generator.transaction import JOURNAL_NAME, Transaction
+from supernote_module_generator.cli import JOURNAL_NAME
 
 
 def plugin(tmp_path: Path) -> Path:
@@ -50,6 +51,51 @@ def invoke(root: Path, arguments: list[str]):
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def _start_lock_holder(root: Path) -> subprocess.Popen[str]:
+    source = Path(__file__).parents[1] / "src"
+    script = (
+        "import pathlib, sys, time\n"
+        "from supernote_module_generator.operation_lock import plugin_operation_lock\n"
+        "with plugin_operation_lock(pathlib.Path(sys.argv[1])):\n"
+        "    print('LOCKED', flush=True)\n"
+        "    time.sleep(60)\n"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(root)],
+        cwd=root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "LOCKED"
+    return process
+
+
+def _stop_lock_holder(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    process.wait(timeout=10)
+
+
+def _directory_alias(root: Path, alias: Path) -> None:
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            pytest.skip(f"Windows junction creation unavailable: {result.stderr}")
+        return
+    alias.symlink_to(root, target_is_directory=True)
+
+
 def test_plugin_directory_lock_is_nonblocking_and_leaves_no_artifact(tmp_path: Path):
     root = plugin(tmp_path)
 
@@ -59,6 +105,30 @@ def test_plugin_directory_lock_is_nonblocking_and_leaves_no_artifact(tmp_path: P
                 pass
 
     assert not list(root.glob("*lock*"))
+
+
+def test_same_root_alias_contends_across_processes(tmp_path: Path):
+    root = plugin(tmp_path / "plugin")
+    alias = tmp_path / "plugin-alias"
+    _directory_alias(root, alias)
+    holder = _start_lock_holder(root)
+    try:
+        with pytest.raises(PluginBusyError, match="already running"):
+            with plugin_operation_lock(alias):
+                pass
+    finally:
+        _stop_lock_holder(holder)
+
+
+def test_owner_death_releases_cross_process_lock(tmp_path: Path):
+    root = plugin(tmp_path / "plugin")
+    holder = _start_lock_holder(root)
+    _stop_lock_holder(holder)
+
+    started = time.monotonic()
+    with plugin_operation_lock(root):
+        pass
+    assert time.monotonic() - started < 5
 
 
 def test_windows_mutex_identity_is_stable_and_contains_no_plugin_path(tmp_path: Path):
@@ -107,7 +177,7 @@ def test_overlapping_cli_command_fails_cleanly_before_mutation(tmp_path: Path):
     with plugin_operation_lock(root):
         code, _, stderr = invoke(
             root,
-            ["add", "blocked", "--starter", "cpp", "--skip-install", "--yes"],
+            ["add", "blocked", "--starter", "cpp", "--yes"],
         )
 
     assert code == 2
@@ -122,7 +192,7 @@ def test_busy_json_preserves_semantic_error_kind_and_phase(tmp_path: Path):
     root = plugin(tmp_path)
 
     with plugin_operation_lock(root):
-        code, stdout, stderr = invoke(root, ["--json", "validate", "--all"])
+        code, stdout, stderr = invoke(root, ["--json", "validate"])
 
     payload = json.loads(stdout)
     assert code == 2
@@ -133,75 +203,6 @@ def test_busy_json_preserves_semantic_error_kind_and_phase(tmp_path: Path):
     assert payload["next_action"] == (
         "Correct the reported problem and rerun Validate."
     )
-
-
-def test_matching_parent_build_hook_reuses_read_only_check_without_lock_race(
-    tmp_path: Path, monkeypatch
-):
-    root = plugin(tmp_path)
-    assert invoke(
-        root,
-        ["--json", "add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
-    )[0] == 0
-    manifest = json.loads((root / ".supernote-module/manifest.json").read_text())
-    monkeypatch.setenv(
-        "SUPERNOTE_MODULE_PARENT_GENERATION_ID", manifest["generation_id"]
-    )
-
-    with plugin_operation_lock(root):
-        code, stdout, stderr = invoke(
-            root, ["--json", "check", "--build-hook"]
-        )
-
-    payload = json.loads(stdout)
-    assert code == 0
-    assert stderr == ""
-    assert payload["status"] == "success"
-    assert payload["validation"]["structural"] == "passed"
-
-
-def test_parent_build_hook_bypass_rejects_wrong_generation_and_active_journal(
-    tmp_path: Path, monkeypatch
-):
-    root = plugin(tmp_path)
-    assert invoke(
-        root,
-        ["--json", "add", "alpha", "--starter", "cpp", "--skip-install", "--yes"],
-    )[0] == 0
-    manifest = json.loads((root / ".supernote-module/manifest.json").read_text())
-
-    monkeypatch.setenv("SUPERNOTE_MODULE_PARENT_GENERATION_ID", "wrong-generation")
-    with plugin_operation_lock(root):
-        wrong_code, wrong_stdout, _ = invoke(
-            root, ["--json", "check", "--build-hook"]
-        )
-    assert wrong_code == 2
-    assert json.loads(wrong_stdout)["error"]["kind"] == "plugin_busy"
-
-    monkeypatch.setenv(
-        "SUPERNOTE_MODULE_PARENT_GENERATION_ID", manifest["generation_id"]
-    )
-    transaction = Transaction(root, "update", ("alpha",))
-    try:
-        with plugin_operation_lock(root):
-            journal_code, journal_stdout, _ = invoke(
-                root, ["--json", "check", "--build-hook"]
-            )
-        assert journal_code == 2
-        assert json.loads(journal_stdout)["error"]["kind"] == "plugin_busy"
-
-        monkeypatch.setenv(
-            "SUPERNOTE_MODULE_PARENT_TRANSACTION_ID", transaction.identifier
-        )
-        with plugin_operation_lock(root):
-            matched_code, matched_stdout, matched_stderr = invoke(
-                root, ["--json", "check", "--build-hook"]
-            )
-        assert matched_code == 0
-        assert matched_stderr == ""
-        assert json.loads(matched_stdout)["status"] == "success"
-    finally:
-        assert transaction.rollback().status == "completed"
 
 
 def test_two_overlapping_add_commands_have_one_clean_winner(
@@ -224,7 +225,7 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
         target=lambda: first_result.append(
             invoke(
                 root,
-                ["add", "first", "--starter", "cpp", "--skip-install", "--yes"],
+                ["add", "first", "--starter", "cpp", "--yes"],
             )
         )
     )
@@ -233,7 +234,7 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
     try:
         second = invoke(
             root,
-            ["add", "second", "--starter", "cpp", "--skip-install", "--yes"],
+            ["add", "second", "--starter", "cpp", "--yes"],
         )
     finally:
         release.set()
@@ -247,21 +248,3 @@ def test_two_overlapping_add_commands_have_one_clean_winner(
     assert not (root / "local_modules/second").exists()
     assert not (root / JOURNAL_NAME).exists()
     assert not list(root.glob(".supernote-module-transaction-*"))
-
-
-def test_busy_command_does_not_recover_an_active_transaction(tmp_path: Path):
-    root = plugin(tmp_path)
-    package = root / "package.json"
-    transaction = Transaction(root, "add", ["active"])
-    transaction.snapshot([package])
-    package.write_text('{"active":true}\n', encoding="utf-8")
-    transaction.mark_write()
-
-    with plugin_operation_lock(root):
-        code, _, stderr = invoke(root, ["validate", "--all"])
-
-    assert code == 2
-    assert "Another sn-module-gen command is already running" in stderr
-    assert package.read_text(encoding="utf-8") == '{"active":true}\n'
-    assert (root / JOURNAL_NAME).is_file()
-    assert transaction.rollback().status == "completed"

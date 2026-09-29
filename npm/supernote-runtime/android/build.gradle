@@ -1,0 +1,117 @@
+import groovy.json.JsonSlurper
+
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+layout.buildDirectory = rootProject.layout.buildDirectory.dir(
+    "react-native-libraries/${project.name}"
+)
+
+def supernoteConsumerRoot = rootProject.projectDir.parentFile.canonicalFile
+def supernoteRuntimeRoot = projectDir.parentFile.canonicalFile
+def supernoteCompositionRoot = layout.buildDirectory
+    .dir('generated/supernote-composition')
+    .get()
+    .asFile
+def supernoteCompositionExec = providers.exec {
+    workingDir supernoteConsumerRoot
+    ignoreExitValue = true
+    commandLine(
+        'node',
+        new File(supernoteRuntimeRoot, 'compose-packages.js').absolutePath,
+        supernoteConsumerRoot.absolutePath,
+        supernoteCompositionRoot.absolutePath,
+    )
+}
+def supernoteCompositionResultValue = supernoteCompositionExec.result.get()
+if (supernoteCompositionResultValue.exitValue != 0) {
+    def supernoteCompositionError = supernoteCompositionExec.standardError.asText.get().trim()
+    throw new GradleException(
+        supernoteCompositionError ?: 'Supernote runtime composition failed without a diagnostic',
+    )
+}
+def supernoteComposition = supernoteCompositionExec.standardOutput.asText.get()
+def supernoteCompositionResult = new JsonSlurper().parseText(supernoteComposition)
+def supernoteInventoryFile = new File(
+    supernoteCompositionResult.inventory as String,
+).canonicalFile
+def supernoteInventory = new JsonSlurper().parse(supernoteInventoryFile)
+ext.supernoteResolvedInventory = supernoteInventory
+ext.supernoteRuntimePackageRoot = supernoteRuntimeRoot
+apply from: new File(supernoteRuntimeRoot, 'gradle/supernote-modules.gradle')
+def supernoteCmakeVersion = providers
+    .gradleProperty('supernoteModuleCmakeVersion')
+    .orElse('3.24.4')
+    .get()
+
+android {
+    namespace 'supernote.generated.runtime'
+    compileSdkVersion rootProject.ext.compileSdkVersion
+    ndkVersion rootProject.ext.ndkVersion
+
+    defaultConfig {
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        consumerProguardFiles new File(supernoteRuntimeRoot, 'consumer-rules.pro')
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments(
+                    '-DANDROID_STL=c++_shared',
+                    "-DSUPERNOTE_COMPOSITION_DIR=${supernoteCompositionRoot.absolutePath}",
+                    "-DSUPERNOTE_COMPOSITION_INVENTORY=${supernoteInventoryFile.absolutePath}",
+                )
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path new File(supernoteRuntimeRoot, 'cmake/CMakeLists.txt')
+            version supernoteCmakeVersion
+            buildStagingDirectory new File(
+                rootProject.projectDir,
+                ".cxx/supernote-runtime/${project.name}",
+            )
+        }
+    }
+    buildFeatures {
+        prefab true
+    }
+    buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake { arguments '-DSUPERNOTE_VARIANT=debug' }
+            }
+        }
+        release {
+            externalNativeBuild {
+                cmake { arguments '-DSUPERNOTE_VARIANT=release' }
+            }
+        }
+    }
+    sourceSets {
+        main.java.srcDirs(project.ext.supernoteJvmSourceDirs)
+    }
+    packaging {
+        jniLibs.excludes += [
+            '**/libc++_shared.so',
+            '**/libfbjni.so',
+            '**/libhermes.so',
+            '**/libjsi.so',
+            '**/libreactnative.so',
+        ]
+    }
+}
+
+dependencies {
+    implementation 'com.facebook.react:react-android'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1'
+    implementation 'org.jspecify:jspecify:1.0.0'
+}
+
+kotlin {
+    jvmToolchain(17)
+}

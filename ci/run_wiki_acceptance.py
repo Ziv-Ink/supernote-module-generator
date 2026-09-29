@@ -9,9 +9,10 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional, Sequence, Union
 
 from supernote_module_generator.arguments import parse_arguments
+from supernote_module_generator.errors import ConfigurationError
 
 
 START = "<!-- sn-module-gen-release-commands:start -->"
@@ -23,6 +24,20 @@ SHELL_FENCES = {"", "bash", "sh", "shell", "powershell", "pwsh"}
 OUTPUT_FENCES = {"text", "console"}
 PLACEHOLDER = re.compile(r"(?:<[^>]+>|\[[^]]+\]|\{\{[^}]+\}\})")
 MARKDOWN_LINK = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
+RETIRED_GRAMMAR_DIAGNOSTICS = (
+    "update no longer accepts a module name",
+    "validate no longer accepts a module name",
+    "--all was removed",
+    "remove was removed",
+    "template commands were removed",
+    "check was removed",
+    "repair was removed",
+    "--build was removed",
+    "--package-manager was removed",
+    "--dry-run was removed",
+    "--skip-install was removed",
+)
+RETIRED_HELP_TARGETS = {"check", "repair", "remove", "template"}
 
 HOST_COMMAND_GATES = {
     "python": "manual-host-setup",
@@ -399,10 +414,31 @@ def _grammar_arguments(command: DocumentedCommand) -> list[str]:
     return arguments
 
 
+def _grammar_disposition(command: DocumentedCommand) -> tuple[str, Optional[str]]:
+    """Classify a pinned documentation command against the current public CLI."""
+
+    if not command.argv or command.argv[0] != "sn-module-gen":
+        return "not_applicable", None
+    try:
+        parse_arguments(_grammar_arguments(command))
+    except ConfigurationError as error:
+        diagnostic = str(error)
+        retired_help = (
+            len(command.argv) > 2
+            and command.argv[1] == "help"
+            and command.argv[2] in RETIRED_HELP_TARGETS
+            and diagnostic.startswith("unknown command")
+        )
+        if retired_help or diagnostic.startswith(RETIRED_GRAMMAR_DIAGNOSTICS):
+            return "retired", diagnostic
+        raise
+    return "current", None
+
+
 def audit_commands(
     wiki_root: Path,
     readme: Path,
-    generator_command: str,
+    generator_command: Union[str, Sequence[str]],
     output: Path,
 ) -> tuple[DocumentedCommand, ...]:
     validate_wiki_links(wiki_root)
@@ -417,14 +453,21 @@ def audit_commands(
             raise ValueError(
                 f"{command.source}:{command.line}: classified record lacks gate or reason"
             )
-        if not command.argv or command.argv[0] != "sn-module-gen":
+        grammar_status, _diagnostic = _grammar_disposition(command)
+        if grammar_status == "not_applicable":
             continue
-        parse_arguments(_grammar_arguments(command))
+        if grammar_status == "retired":
+            if command.source == readme.name:
+                raise ValueError(
+                    f"{command.source}:{command.line}: current README uses retired "
+                    "generator grammar"
+                )
+            continue
         if command.classification == "placeholder":
             continue
         if command.execution_gate == "documentation-smoke":
             subprocess.run(
-                (generator_command, *command.argv[1:]),
+                (*_generator_argv(generator_command), *command.argv[1:]),
                 check=True,
                 stdout=subprocess.DEVNULL,
             )
@@ -433,13 +476,20 @@ def audit_commands(
         classifications[command.classification] = (
             classifications.get(command.classification, 0) + 1
         )
+    manifest_records = []
+    for command in commands:
+        record = command.manifest()
+        grammar_status, diagnostic = _grammar_disposition(command)
+        record["grammar_status"] = grammar_status
+        record["grammar_diagnostic"] = diagnostic
+        manifest_records.append(record)
     output.write_text(
         json.dumps(
             {
-                "schema_version": "1.1",
+                "schema_version": "1.2",
                 "record_count": len(commands),
                 "classifications": classifications,
-                "records": [command.manifest() for command in commands],
+                "records": manifest_records,
             },
             indent=2,
             sort_keys=True,
@@ -473,20 +523,30 @@ def read_commands(page: Path) -> tuple[tuple[str, ...], ...]:
     return commands
 
 
-def run_checkpoint_scenario(plugin_root: Path, generator_command: str) -> None:
+def _generator_argv(command: Union[str, Sequence[str]]) -> tuple[str, ...]:
+    return (command,) if isinstance(command, str) else tuple(command)
+
+
+def run_checkpoint_scenario(
+    plugin_root: Path,
+    generator_command: Union[str, Sequence[str]],
+) -> None:
     commands = (
         (
             "add", "wiki-feature", "--starter", "cpp", "--starter", "kotlin",
             "--javascript-name", "WikiFeature", "--android-namespace",
-            "com.example.wiki_feature", "--package-manager", "npm", "--yes",
+            "com.example.wiki_feature", "--yes",
         ),
-        ("update", "wiki-feature", "--dry-run"),
-        ("update", "wiki-feature", "--yes"),
-        ("check",),
-        ("repair", "--dry-run"),
+        ("update", "--yes"),
+        ("validate",),
+        ("doctor",),
     )
     for command in commands:
-        subprocess.run((generator_command, *command), check=True, cwd=plugin_root)
+        subprocess.run(
+            (*_generator_argv(generator_command), *command),
+            check=True,
+            cwd=plugin_root,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

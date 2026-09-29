@@ -1,241 +1,129 @@
-"""Stage and activate one already-authorized generation plan."""
+"""Rerunnable publication for disposable generated output."""
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+import json
 import shutil
 import tempfile
-from typing import Callable, Iterable
+from typing import Callable
 
-from .errors import ConcurrentSourceMutation
-from .generation_plan import ArtifactChange, GenerationPlan, PlanConflictError
-from .integrity_manifest import INTEGRITY_MANIFEST_PATH
-from .transaction import Transaction
+from .filesystem import (
+    _windows_api_path,
+    _windows_host,
+    entry_kind,
+    remove_generated_regular_no_follow,
+    replace_generated_regular_no_follow,
+)
+from .generation_plan import GenerationPlan
+from .integrity_manifest import INCOMPLETE_MARKER_PATH, INTEGRITY_MANIFEST_PATH
 
 
 class GenerationPlanExecutor:
+    """Publish generated leaves without retaining or restoring prior output bytes."""
+
     def __init__(
         self,
         root: Path,
         *,
         validate_preconditions: Callable[[GenerationPlan], None],
         validate_path_precondition: Callable[[GenerationPlan, str], None],
+        validate_completion_preconditions: Callable[[GenerationPlan], None],
     ) -> None:
         self.root = root
         self.validate_preconditions = validate_preconditions
         self.validate_path_precondition = validate_path_precondition
+        self.validate_completion_preconditions = validate_completion_preconditions
 
-    def execute(
-        self,
-        plan: GenerationPlan,
-        transaction: Transaction,
-        *,
-        commit: bool,
-    ) -> None:
+    def execute(self, plan: GenerationPlan, *, finalize: bool = True) -> None:
         staging = Path(tempfile.mkdtemp(prefix=".sn-module-gen-plan-", dir=self.root))
-        transaction.track_created(staging)
-        self._stage_plan(plan, staging)
-        transaction.checkpoint("after_staging")
-        self.validate_preconditions(plan)
-        ordered, manifest_change = self._ordered_changes(plan)
-        replaced = self._detach_planned_paths(plan, transaction, ordered)
-        conditional, ordinary = self._prepare_replacements(
-            plan,
-            transaction,
-            staging,
-            ordered,
-            manifest_change,
-        )
-        self._activate_replacements(
-            plan,
-            transaction,
-            conditional,
-            ordinary,
-            replaced=replaced,
-        )
-        self._checkpoint_completed_edits(
-            plan,
-            transaction,
-            manifest_change=manifest_change,
-        )
-        shutil.rmtree(staging)
-        if commit:
-            transaction.commit()
+        try:
+            self._stage_plan(plan, staging)
+            self.validate_preconditions(plan)
+            self._publish_incomplete_marker(plan, staging)
+            self._delete_stale_output(plan)
+            self._publish_output(plan, staging, finalize=finalize)
+            if finalize:
+                self._clear_incomplete_marker()
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def _stage_plan(self, plan: GenerationPlan, staging: Path) -> None:
         for artifact in plan.artifacts:
-            self._stage_bytes(
-                staging,
-                artifact.path,
-                artifact.content,
-                mode=artifact.expected_mode,
-                description="artifact",
+            target = staging.joinpath(*PurePosixPath(artifact.path).parts)
+            writable = (
+                Path(_windows_api_path(target)) if _windows_host() else target
             )
-        for dependency_action in plan.dependency_actions:
-            self._stage_bytes(
-                staging,
-                dependency_action.path,
-                dependency_action.content,
-                mode=dependency_action.previous_mode,
-                description="dependency",
-            )
-        for wiring_action in plan.wiring_actions:
-            self._stage_bytes(
-                staging,
-                wiring_action.path,
-                wiring_action.content,
-                mode=wiring_action.previous_mode,
-                description="wiring",
-            )
+            writable.parent.mkdir(parents=True, exist_ok=True)
+            writable.write_bytes(artifact.content)
+            if artifact.expected_mode is not None:
+                writable.chmod(artifact.expected_mode)
+            if writable.read_bytes() != artifact.content:
+                raise RuntimeError(
+                    f"staged generated artifact verification failed: {artifact.path}"
+                )
 
-    @staticmethod
-    def _stage_bytes(
-        staging: Path,
-        relative: str,
-        content: bytes,
-        *,
-        mode: int | None,
-        description: str,
+    def _publish_incomplete_marker(
+        self, plan: GenerationPlan, staging: Path
     ) -> None:
-        target = staging.joinpath(*PurePosixPath(relative).parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-        if mode is not None:
-            target.chmod(mode)
-        if target.read_bytes() != content:
-            raise RuntimeError(f"staged {description} verification failed: {relative}")
-
-    @staticmethod
-    def _ordered_changes(
-        plan: GenerationPlan,
-    ) -> tuple[list[ArtifactChange], ArtifactChange | None]:
-        ordered = sorted(
-            plan.changes,
-            key=lambda change: (
-                change.path == INTEGRITY_MANIFEST_PATH,
-                change.path,
-            ),
+        relative = INCOMPLETE_MARKER_PATH
+        marker = staging.joinpath(*PurePosixPath(relative).parts)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "generation_id": plan.generation_id,
+                    "operation": plan.operation,
+                    "status": "incomplete",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        manifest_change = next(
-            (
-                change
-                for change in ordered
-                if change.path == INTEGRITY_MANIFEST_PATH
-            ),
-            None,
+        replace_generated_regular_no_follow(
+            self.root,
+            marker,
+            self.root.joinpath(*PurePosixPath(relative).parts),
         )
-        return ordered, manifest_change
 
-    def _detach_planned_paths(
-        self,
-        plan: GenerationPlan,
-        transaction: Transaction,
-        ordered: Iterable[ArtifactChange],
-    ) -> bool:
-        replaced = False
-        for change in ordered:
-            if change.path == INTEGRITY_MANIFEST_PATH:
+    def _clear_incomplete_marker(self) -> None:
+        marker = self.root / INCOMPLETE_MARKER_PATH
+        if entry_kind(marker) is not None:
+            remove_generated_regular_no_follow(self.root, marker)
+
+    def _delete_stale_output(self, plan: GenerationPlan) -> None:
+        for relative in plan.deletes:
+            if relative == INTEGRITY_MANIFEST_PATH:
                 continue
-            self.validate_path_precondition(plan, change.path)
-            if change.action.value == "delete":
-                transaction.detach(
-                    self.root.joinpath(*PurePosixPath(change.path).parts)
-                )
-                replaced = self._checkpoint_first_replacement(transaction, replaced)
-        for action in plan.tree_removals:
-            self.validate_path_precondition(plan, action.path)
-            transaction.detach(
-                self.root.joinpath(*PurePosixPath(action.path).parts)
-            )
-            replaced = self._checkpoint_first_replacement(transaction, replaced)
-        return replaced
-
-    @staticmethod
-    def _checkpoint_first_replacement(
-        transaction: Transaction,
-        replaced: bool,
-    ) -> bool:
-        if not replaced:
-            transaction.checkpoint("after_first_file_replacement")
-        return True
-
-    def _prepare_replacements(
-        self,
-        plan: GenerationPlan,
-        transaction: Transaction,
-        staging: Path,
-        ordered: Iterable[ArtifactChange],
-        manifest_change: ArtifactChange | None,
-    ) -> tuple[list[tuple[Path, Path, str, int]], list[tuple[str, Path, Path]]]:
-        replacement_paths = [
-            change.path
-            for change in ordered
-            if change.path != INTEGRITY_MANIFEST_PATH
-            and change.action.value != "delete"
-        ]
-        replacement_paths.extend(action.path for action in plan.dependency_actions)
-        replacement_paths.extend(action.path for action in plan.wiring_actions)
-        if manifest_change is not None:
-            replacement_paths.append(INTEGRITY_MANIFEST_PATH)
-        conditional_root = transaction.state_dir / "template"
-        conditional_root.mkdir(parents=True, exist_ok=True)
-        conditional: list[tuple[Path, Path, str, int]] = []
-        ordinary: list[tuple[str, Path, Path]] = []
-        preconditions = {item.path: item for item in plan.preconditions}
-        for index, relative in enumerate(replacement_paths):
-            self.validate_path_precondition(plan, relative)
-            source = staging.joinpath(*PurePosixPath(relative).parts)
             destination = self.root.joinpath(*PurePosixPath(relative).parts)
-            precondition = preconditions[relative]
-            if (
-                precondition.kind == "file"
-                and precondition.content_sha256 is not None
-                and precondition.mode is not None
-            ):
-                candidate = conditional_root / str(index)
-                shutil.copy2(source, candidate)
-                conditional.append(
-                    (
-                        candidate,
-                        destination,
-                        precondition.content_sha256,
-                        precondition.mode,
-                    )
-                )
-            else:
-                ordinary.append((relative, source, destination))
-        return conditional, ordinary
+            if entry_kind(destination) is None:
+                continue
+            self.validate_path_precondition(plan, relative)
+            remove_generated_regular_no_follow(self.root, destination)
 
-    def _activate_replacements(
+    def _publish_output(
         self,
         plan: GenerationPlan,
-        transaction: Transaction,
-        conditional: list[tuple[Path, Path, str, int]],
-        ordinary: list[tuple[str, Path, Path]],
+        staging: Path,
         *,
-        replaced: bool,
+        finalize: bool,
     ) -> None:
-        if conditional:
-            try:
-                transaction.replace_regular_batch_if_matches(conditional)
-            except ConcurrentSourceMutation as exc:
-                raise PlanConflictError(str(exc)) from exc
-            replaced = self._checkpoint_first_replacement(transaction, replaced)
-        for relative, source, destination in ordinary:
-            self.validate_path_precondition(plan, relative)
-            transaction.replace(source, destination)
-            replaced = self._checkpoint_first_replacement(transaction, replaced)
-
-    @staticmethod
-    def _checkpoint_completed_edits(
-        plan: GenerationPlan,
-        transaction: Transaction,
-        *,
-        manifest_change: ArtifactChange | None,
-    ) -> None:
-        if plan.dependency_actions:
-            transaction.checkpoint("after_dependency_edit")
-        if plan.wiring_actions:
-            transaction.checkpoint("after_wiring")
-        if manifest_change is not None:
-            transaction.checkpoint("before_manifest_write")
-            transaction.checkpoint("after_manifest_write")
+        artifacts = sorted(
+            plan.artifacts,
+            key=lambda artifact: (
+                artifact.path == INTEGRITY_MANIFEST_PATH,
+                artifact.path,
+            ),
+        )
+        for artifact in artifacts:
+            if artifact.path == INTEGRITY_MANIFEST_PATH:
+                if not finalize:
+                    continue
+                self.validate_completion_preconditions(plan)
+            else:
+                self.validate_path_precondition(plan, artifact.path)
+            source = staging.joinpath(*PurePosixPath(artifact.path).parts)
+            destination = self.root.joinpath(*PurePosixPath(artifact.path).parts)
+            replace_generated_regular_no_follow(self.root, source, destination)

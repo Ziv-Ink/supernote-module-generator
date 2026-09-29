@@ -94,7 +94,7 @@ def test_clean_wheel_installs_only_the_public_console_script(tmp_path: Path) -> 
         capture_output=True,
         text=True,
     )
-    assert version.stdout == "sn-module-gen 0.1.2\n"
+    assert version.stdout == "sn-module-gen 0.1.3\n"
 
 
 def test_release_license_and_manifest_are_present():
@@ -174,7 +174,7 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "types: [published]" in workflow
     assert "permissions: {}" in workflow
     assert "Require the exact stable release tag" in workflow
-    assert 'test "$RELEASE_TAG" = "v0.1.2"' in workflow
+    assert 'test "$RELEASE_TAG" = "v0.1.3"' in workflow
     assert 'test "$RELEASE_PRERELEASE" = "false"' in workflow
     assert "name: pypi" in workflow
     assert "url: https://pypi.org/project/sn-module-gen/" in workflow
@@ -212,7 +212,7 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "ref: ${{ github.sha }}" in quality
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in quality
     assert "Release tag ${RELEASE_TAG} does not match package version" in quality
-    assert "EXPECTED_RELEASE_TAG: v0.1.2" in quality
+    assert "EXPECTED_RELEASE_TAG: v0.1.3" in quality
     assert "release_provenance.py record" in quality
     assert "reproducible_release_build.py" in quality
     assert "Build byte-reproducible wheel and source distribution twice" in quality
@@ -232,15 +232,21 @@ def test_pypi_release_uses_scoped_trusted_publishing():
     assert "Install and smoke the source distribution" in quality
     assert "pip install --no-deps --no-build-isolation" in quality
     assert 'schemas/command-result.schema.json' in quality
-    assert "Generated Android plugin" in quality
-    assert "supernote-plugin-template" in quality
-    assert "af3f36f6d6f61d9dbd153b0ebb444a3d3621d25f" in quality
-    assert "template_launch_contract.py sync" in quality
-    assert "template_launch_contract.py verify" in quality
-    assert "update-no-op" in quality
-    assert "check-build" in quality
-    assert "npm run build" in quality
-    assert "npm run verify" in quality
+    assert "Rebuild the canonical wheel from the source distribution" in quality
+    assert 'cmp dist/*.whl "$RUNNER_TEMP/sdist-wheel"/*.whl' in quality
+    assert "setuptools==58.0.4 wheel==0.37.0" in quality
+    assert "tests/test_q5_installed_qualification.py" in quality
+    assert "tests/test_q5_combined_installed_acceptance.py" in quality
+    assert "generator-acceptance-${{ runner.os }}-cmake-${{ matrix.cmake }}" in quality
+    for excluded_surface in (
+        "Generated Android plugin",
+        "supernote-plugin-template",
+        "template_launch_contract.py sync",
+        "template_launch_contract.py verify",
+        "npm run build",
+        "npm run verify",
+    ):
+        assert excluded_surface not in quality
     assert "Stable 2.0.0 is blocked" not in workflow
 
 
@@ -251,8 +257,8 @@ def _release_asset_preflight(
     provenance = tmp_path / "provenance"
     dist.mkdir()
     provenance.mkdir()
-    (dist / "sn_module_gen-0.1.2-py3-none-any.whl").write_bytes(b"wheel")
-    (dist / "sn_module_gen-0.1.2.tar.gz").write_bytes(b"sdist")
+    (dist / "sn_module_gen-0.1.3-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "sn_module_gen-0.1.3.tar.gz").write_bytes(b"sdist")
     (provenance / "SHA256SUMS").write_text("checksums\n", encoding="utf-8")
     (provenance / "release-provenance.json").write_text("{}\n", encoding="utf-8")
     inventory = tmp_path / "release.json"
@@ -288,7 +294,7 @@ def test_release_asset_preflight_rejects_one_existing_mismatched_asset(
         tmp_path,
         [
             {
-                "name": "sn_module_gen-0.1.2-py3-none-any.whl",
+                "name": "sn_module_gen-0.1.3-py3-none-any.whl",
                 "digest": "sha256:different-build-bytes",
             }
         ],
@@ -347,11 +353,11 @@ def test_release_provenance_records_and_reverifies_built_distributions(
     assert manifest["repository"] == "Ziv-Ink/supernote-module-generator"
     assert manifest["source_commit"] == commit
     assert manifest["distribution"] == "sn-module-gen"
-    assert manifest["version"] == "0.1.2"
-    assert manifest["release_tag"] == "v0.1.2"
+    assert manifest["version"] == "0.1.3"
+    assert manifest["release_tag"] == "v0.1.3"
     assert {artifact["filename"] for artifact in manifest["artifacts"]} == {
-        "sn_module_gen-0.1.2-py3-none-any.whl",
-        "sn_module_gen-0.1.2.tar.gz",
+        "sn_module_gen-0.1.3-py3-none-any.whl",
+        "sn_module_gen-0.1.3.tar.gz",
     }
     for artifact in manifest["artifacts"]:
         path = dist / artifact["filename"]
@@ -460,8 +466,8 @@ def test_release_build_is_byte_reproducible_across_isolated_wall_clock_builds(
     assert evidence["builds"] == 2
     assert evidence["separation_seconds"] == 2.0
     assert {artifact["filename"] for artifact in evidence["artifacts"]} == {
-        "sn_module_gen-0.1.2-py3-none-any.whl",
-        "sn_module_gen-0.1.2.tar.gz",
+        "sn_module_gen-0.1.3-py3-none-any.whl",
+        "sn_module_gen-0.1.3.tar.gz",
     }
     for artifact in evidence["artifacts"]:
         package = dist / artifact["filename"]
@@ -531,7 +537,7 @@ def test_release_build_is_byte_reproducible_across_isolated_wall_clock_builds(
         capture_output=True,
         text=True,
     )
-    assert version.stdout == "sn-module-gen 0.1.2\n"
+    assert version.stdout == "sn-module-gen 0.1.3\n"
     subprocess.run((str(launcher), "--help"), check=True, capture_output=True, text=True)
 
     (source / "untracked-release-input").write_text("dirty\n", encoding="utf-8")
@@ -586,9 +592,9 @@ def test_patch_release_notes_and_old_distribution_retirement_are_bounded():
     assert "does not provide migration or compatibility" in " ".join(
         initial_notes.split()
     )
-    assert "--notes-file maintainers/release-notes-v0.1.2.md" in guide
-    assert 'git tag --annotate v0.1.2 "$RELEASE_SHA"' in guide
-    assert "gh release create v0.1.2 --verify-tag" in guide
+    assert "--notes-file maintainers/release-notes-v0.1.3.md" in guide
+    assert 'git tag --annotate v0.1.3 "$RELEASE_SHA"' in guide
+    assert "gh release create v0.1.3 --verify-tag" in guide
     assert "complete APFS/ext4 installed-CLI workflows" in " ".join(
         guide.split()
     )
@@ -610,6 +616,20 @@ def test_patch_release_notes_and_old_distribution_retirement_are_bounded():
         "pypi",
     ):
         assert f"`{topic}`" in guide
+
+
+def test_current_release_notes_preserve_qualification_boundaries():
+    notes = (ROOT / "maintainers/release-notes-v0.1.3.md").read_text(encoding="utf-8")
+    normalized = " ".join(notes.split())
+    assert notes.startswith("# sn-module-gen 0.1.3")
+    for contract in (
+        "2026-09-30", "@supernote/runtime", "npm", "Yarn", "publisher",
+        "consumer", "F7API2", "One native invocation", "second invocation",
+        "external linked author sources", "PowerShell", "stale-output",
+        "failure-masking", "JDK 21", "Windows Android", "82.49%", "82.03%",
+    ):
+        assert contract in normalized
+    assert "## 0.1.3 - 2026-09-30" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
 def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(
@@ -653,27 +673,25 @@ def test_unpacked_sdist_contains_and_executes_release_qualification_inputs(
     root = next(unpacked.iterdir())
     required = (
         ".github/workflows/quality.yml",
-        "ci/fixtures/supernote-module-generator-wiki.bundle",
-        "ci/fixtures/file_reader_test-9f626ed.bundle",
-        "ci/device_acceptance/cases.json",
-        "ci/device_acceptance/App.tsx.tmpl",
-        "ci/device_acceptance/DeviceCounter.hpp",
-        "ci/device_acceptance/FeatureApi.kt",
-        "ci/device_acceptance/device_probe.cpp",
-        "maintainers/device-evidence/README.md",
-        "maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/note-reactnative.log",
-        "maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/doc-evidence.json",
-        "maintainers/device-evidence/v4-bounded-note-doc-2026-08-27/doc-allow-dialog.png",
+        "maintainers/release-notes-v0.1.3.md",
+        "npm/supernote-runtime/runtime-manifest.json",
+        "npm/supernote-runtime/native/include/supernote/runtime.hpp",
+        "src/supernote_module_generator/node/resolve-packages.js",
+        "tests/test_q5_installed_qualification.py",
+        "tests/test_q5_combined_installed_acceptance.py",
     )
     assert all((root / relative).is_file() for relative in required)
+    assert not (root / "evidence").exists()
+    assert not (root / "AGENTS.md").exists()
     subprocess.run(
         (
             sys.executable,
             "-m",
             "pytest",
             "-q",
-            "tests/test_device_acceptance_pack.py",
-            "tests/test_release_qualification.py",
+            "tests/test_packaging.py::test_package_contains_only_the_active_workflow_and_runtime_templates",
+            "tests/test_release_qualification.py::test_reusable_release_gate_covers_platforms_compileall_and_coverage",
+            "tests/test_release_qualification.py::test_release_gate_is_generator_only_and_uses_installed_artifacts",
         ),
         cwd=root,
         check=True,

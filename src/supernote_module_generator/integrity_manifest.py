@@ -16,15 +16,14 @@ from .generation_plan import OwnedArtifact
 from .naming import NPM_NAME
 from .semantic_ir import CPP_FRONTEND_VERSION, JVM_FRONTEND_VERSION
 from .schemas import (
-    FEATURE_MANIFEST_KIND,
-    FEATURE_MANIFEST_SCHEMA_VERSION,
     GENERATED_OWNERSHIP_KIND,
     GENERATED_OWNERSHIP_SCHEMA_VERSION,
 )
 
 
-INTEGRITY_MANIFEST_SCHEMA_VERSION = "1.0"
+INTEGRITY_MANIFEST_SCHEMA_VERSION = "2.0"
 INTEGRITY_MANIFEST_PATH = ".supernote-module/manifest.json"
+INCOMPLETE_MARKER_PATH = ".supernote-module/incomplete.json"
 RUNTIME_ROOT = "android/.supernote-module/runtime"
 TEMPLATE_CAPABILITY_VERSION = "launch-verification-v1"
 
@@ -34,12 +33,30 @@ _SEMVER_RE = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
+_FEATURE_GENERATED_REQUIRED_FILES = (
+    ".supernote-generated/README.md",
+    ".supernote-generated/android/CMakeLists.txt",
+    ".supernote-generated/android/conversion.json",
+    ".supernote-generated/android/feature.cpp",
+    ".supernote-generated/android/internal.cpp",
+    ".supernote-generated/android/internal.hpp",
+    ".supernote-generated/android/jvm/JvmRegistration.java",
+    ".supernote-generated/android/package_registration.cpp",
+    ".supernote-generated/android/package_registration.hpp",
+    ".supernote-generated/android/registration.json",
+    ".supernote-generated/android/semantic.json",
+    ".supernote-generated/index.d.ts",
+    ".supernote-generated/index.js",
+    ".supernote-generated/ownership.json",
+    ".supernote-generated/package-manifest.json",
+)
+_FEATURE_GENERATED_OPTIONAL_FILES = (
+    ".supernote-generated/android/jvm_feature.cpp",
+    ".supernote-generated/android/jvm/KspAdapters.kt",
+)
 _FEATURE_GENERATED_FILES = (
-    ".supernote-module.json",
-    "index.d.ts",
-    "index.js",
-    "package.json",
-    "README.md",
+    *_FEATURE_GENERATED_REQUIRED_FILES,
+    *_FEATURE_GENERATED_OPTIONAL_FILES,
 )
 
 
@@ -79,7 +96,9 @@ class LoadedIntegrityManifest:
     features: Tuple["ManifestFeature", ...]
     artifacts: Tuple[ManifestArtifactRecord, ...]
     wiring: Tuple["WiringRecord", ...]
-    template_capability: str
+    # Kept as a read-side compatibility property for the retired template module.
+    # It is no longer serialized or validated as a generator contract.
+    template_capability: str = TEMPLATE_CAPABILITY_VERSION
     authority_hashes: Tuple[Tuple[str, str], ...] = ()
 
     def manifest(self) -> Dict[str, object]:
@@ -91,7 +110,6 @@ class LoadedIntegrityManifest:
             "features": [item.manifest() for item in self.features],
             "artifacts": [item.manifest() for item in self.artifacts],
             "wiring": [item.manifest() for item in self.wiring],
-            "template_capability": self.template_capability,
             "frontend_versions": {
                 "cpp": CPP_FRONTEND_VERSION,
                 "jvm": JVM_FRONTEND_VERSION,
@@ -133,7 +151,6 @@ class IntegrityManifest:
     features: Tuple[ManifestFeature, ...]
     artifacts: Tuple[OwnedArtifact, ...]
     wiring: Tuple[WiringRecord, ...] = ()
-    template_capability: str = TEMPLATE_CAPABILITY_VERSION
 
     def manifest(self) -> Dict[str, object]:
         value: Dict[str, object] = {
@@ -144,7 +161,6 @@ class IntegrityManifest:
             "features": [item.manifest() for item in self.features],
             "artifacts": [item.manifest() for item in self.artifacts],
             "wiring": [item.manifest() for item in self.wiring],
-            "template_capability": self.template_capability,
             "frontend_versions": {
                 "cpp": CPP_FRONTEND_VERSION,
                 "jvm": JVM_FRONTEND_VERSION,
@@ -184,7 +200,6 @@ class IntegrityManifest:
             tuple(sorted(features, key=lambda item: item.package_name)),
             ordered_artifacts,
             tuple(sorted(wiring, key=lambda item: (item.path, item.marker))),
-            TEMPLATE_CAPABILITY_VERSION,
         )
 
 
@@ -221,7 +236,7 @@ def load_integrity_manifest(
         result.features,
         result.artifacts,
         result.wiring,
-        result.template_capability,
+        TEMPLATE_CAPABILITY_VERSION,
         tuple(sorted(authority_hashes.items())),
     )
 
@@ -268,7 +283,6 @@ def _parse_manifest_header(raw: Dict[str, object]) -> Tuple[str, str, str]:
         "features",
         "artifacts",
         "wiring",
-        "template_capability",
         "frontend_versions",
     }
     if set(raw) != expected_fields:
@@ -297,8 +311,6 @@ def _parse_manifest_header(raw: Dict[str, object]) -> Tuple[str, str, str]:
         "jvm": JVM_FRONTEND_VERSION,
     }:
         raise IntegrityManifestError("frontend versions are incompatible")
-    if raw.get("template_capability") != TEMPLATE_CAPABILITY_VERSION:
-        raise IntegrityManifestError("template capability is incompatible")
     assert isinstance(generation_id, str)
     assert isinstance(plugin, dict)
     plugin_id = plugin["id"]
@@ -361,11 +373,11 @@ def _require_ownership_anchors(
     artifacts: Tuple[ManifestArtifactRecord, ...],
 ) -> None:
     for feature in features:
-        metadata_path = f"{feature.root}/.supernote-module.json"
+        metadata_path = f"{feature.root}/.supernote-generated/ownership.json"
         if not any(
             artifact.path == metadata_path
             and artifact.owner == f"feature:{feature.package_name}"
-            and artifact.kind == "feature-metadata"
+            and artifact.kind == "feature-generated-metadata"
             for artifact in artifacts
         ):
             raise IntegrityManifestError(
@@ -464,12 +476,16 @@ def _validate_feature_live_ownership(
     artifact_by_path: dict[str, ManifestArtifactRecord],
 ) -> tuple[str, str]:
     owner = f"feature:{feature.package_name}"
-    metadata_relative = f"{feature.root}/.supernote-module.json"
+    metadata_relative = f"{feature.root}/.supernote-generated/ownership.json"
     metadata, metadata_content, metadata_stat = _read_owned_json(
         root, metadata_relative
     )
     _require_feature_metadata_identity(
-        metadata, metadata_relative, feature, manifest.generator_version
+        metadata,
+        metadata_relative,
+        feature,
+        manifest.generator_version,
+        manifest.generation_id,
     )
     assert isinstance(metadata, dict)
     generated = _canonical_generated_files(
@@ -481,7 +497,7 @@ def _validate_feature_live_ownership(
             f"{metadata_relative}: unrecognized generated feature artifact "
             f"{unexpected[0]!r}"
         )
-    if generated != _FEATURE_GENERATED_FILES:
+    if not set(_FEATURE_GENERATED_REQUIRED_FILES).issubset(generated):
         raise IntegrityManifestError(
             f"{metadata_relative}: generated_files inventory is incomplete or noncanonical"
         )
@@ -501,17 +517,28 @@ def _require_feature_metadata_identity(
     relative: str,
     feature: ManifestFeature,
     generator_version: str,
+    generation_id: str,
 ) -> None:
     if not isinstance(metadata, dict):
         raise IntegrityManifestError(
             f"{relative}: feature metadata must be a JSON object"
         )
-    if (
-        metadata.get("schema_version") != FEATURE_MANIFEST_SCHEMA_VERSION
-        or metadata.get("kind") != FEATURE_MANIFEST_KIND
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "feature_id",
+        "package_name",
+        "generator_version",
+        "generation_id",
+        "generated_files",
+    }
+    if set(metadata) != expected_fields or (
+        metadata.get("schema_version") != "1.0"
+        or metadata.get("kind") != "supernote-feature-generated-ownership"
         or metadata.get("feature_id") != feature.feature_id
-        or metadata.get("npm_name") != feature.package_name
+        or metadata.get("package_name") != feature.package_name
         or metadata.get("generator_version") != generator_version
+        or metadata.get("generation_id") != generation_id
     ):
         raise IntegrityManifestError(
             f"{relative}: feature identity or generator version disagrees"

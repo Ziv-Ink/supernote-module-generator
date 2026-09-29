@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .errors import FilesystemError
+from .filesystem import read_regular_bytes_no_follow
 from .semantic import SourceProvenance
 from .schemas import (
     JVM_SOURCE_MANIFEST_KIND as JVM_MANIFEST_KIND,
@@ -99,8 +101,9 @@ def read_jvm_manifest(
     expected_feature_id: str | None = None,
 ) -> JvmSourceManifest:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        content, _metadata = read_regular_bytes_no_follow(path)
+        raw = json.loads(content.decode("utf-8"))
+    except (FilesystemError, OSError, ValueError) as exc:
         raise JvmManifestError(f"{path}: JVM manifest could not be read: {exc}") from exc
     try:
         value = _object(raw, "manifest")

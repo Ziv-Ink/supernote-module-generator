@@ -66,10 +66,24 @@ types are valid. There is no automatic-member compatibility mode.
 
 ## One generated runtime per plugin
 
-The generator creates one plugin-level native build component containing
-shared runtime services and all generated feature bindings. Logical features
-remain independent ownership units, but they do not compile separate worker
-pools, JVM services, or runtime singletons.
+The generator creates one plugin-level native runtime component containing
+only shared services, bootstrap, and registry sources. Each logical feature is
+a package-owned PIC `STATIC` target containing its authored wrappers and
+generated adapters. For JVM features, the publisher's KSP-produced Kotlin
+adapter is copied byte-for-byte into the package-owned generated JVM source
+root, hashed with the rest of the npm payload, and compiled by consumers
+without KSP. The shared component links those targets with CMake
+`LINK_ONLY`, so feature-specific PUBLIC compile requirements do not leak into
+common or sibling compilation. Features do not create separate worker pools,
+JVM services, or runtime singletons.
+
+Static targets are the primary reusable dependency form. The author hook also
+supports normal CMake `INTERFACE`, nested `STATIC`, `IMPORTED STATIC`, and
+explicit source-built or `IMPORTED SHARED` target relationships; it does not
+make the generator a dependency manager. A successful native-host shared link
+and load proves only that host toolchain and architecture. Android runtime-file
+packaging, Android ABI compatibility, PluginHost loading, and device behavior
+remain separate qualification tiers.
 
 Each installed JavaScript runtime gets a generation-identified RuntimeSession;
 each feature gets a child FeatureSession. Background work never stores a

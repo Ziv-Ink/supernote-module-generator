@@ -184,6 +184,26 @@ def test_manifest_round_trip_is_deterministic_versioned_and_backend_specific(
     assert "jsi" not in json.dumps(raw).lower()
 
 
+def test_manifest_reader_accepts_short_path_and_fails_closed_for_bad_inputs(
+    tmp_path: Path,
+):
+    manifest = JvmSourceManifest(
+        FEATURE_ID, "2.0.0.dev0", (ordinary_kotlin_owner(),)
+    )
+    valid = tmp_path / "valid.json"
+    write_jvm_manifest(valid, manifest)
+
+    assert read_jvm_manifest(valid, expected_feature_id=FEATURE_ID) == manifest
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{", encoding="utf-8")
+    with pytest.raises(JvmManifestError, match="JVM manifest could not be read"):
+        read_jvm_manifest(malformed, expected_feature_id=FEATURE_ID)
+
+    with pytest.raises(JvmManifestError, match="JVM manifest could not be read"):
+        read_jvm_manifest(tmp_path / "missing.json", expected_feature_id=FEATURE_ID)
+
+
 def test_seeded_manifest_mutation_fuzz_rejects_every_invalid_shape(tmp_path: Path):
     seed = 0x4A56_4D33
     rng = random.Random(seed)

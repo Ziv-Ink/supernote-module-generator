@@ -1,0 +1,108 @@
+{
+  "kind": "supernote_runtime_distribution",
+  "nativeAbi": "supernote-jsi-v1",
+  "payload": [
+    {
+      "path": "android/build.gradle",
+      "sha256": "ff658f5bc622440f5a46d92c9ff2f73b147ae044ab7a004dc7e94302e91f4992"
+    },
+    {
+      "path": "android/src/main/AndroidManifest.xml",
+      "sha256": "343d5be1ac17cdd45d1a2f2ddc616c509290e655869125a9422a96d88aa66066"
+    },
+    {
+      "path": "android/src/main/java/supernote/generated/runtime/SupernoteModule.kt",
+      "sha256": "262c70afaf322482265ccccd73ad67dd9adc5a3f14ad33d79f22296868358889"
+    },
+    {
+      "path": "cmake/CMakeLists.txt",
+      "sha256": "2e06bd2fbbea6e87c4c5b9639c9df4cfa1c38e5ef7fe63b53a8a8db1513f33c3"
+    },
+    {
+      "path": "cmake/SupernoteModules.cmake",
+      "sha256": "d223bf5df855bfeb4ebf5295b1d645e004a6354edceac9ca6edc65b0a71a0133"
+    },
+    {
+      "path": "compose-packages.js",
+      "sha256": "de7de552e3eb89bf76544b6ff940eda304138953928817b9ec25b06cd3b30128"
+    },
+    {
+      "path": "consumer-rules.pro",
+      "sha256": "1edcb47bdceafdb48c31f09072a9654ad906f9fa64201a1f479230e46cf8995e"
+    },
+    {
+      "path": "gradle/supernote-modules.gradle",
+      "sha256": "53de4e2b9785e8b3c215b29e8580d30971c9f514d9a00f8a41b78a9f5f623dea"
+    },
+    {
+      "path": "jvm/supernote/generated/annotations/SupernoteConstructor.java",
+      "sha256": "878c72dcffecd74a0fef85f3fdb7b80f84896fd995faecfb820f12f5db7174f3"
+    },
+    {
+      "path": "jvm/supernote/generated/annotations/SupernotePluginAsync.java",
+      "sha256": "d3b52b1d2b56df02296f70f9948733e9bb7048c5fe6d3f448284548bc36297d0"
+    },
+    {
+      "path": "jvm/supernote/generated/annotations/SupernotePluginExport.java",
+      "sha256": "fa40d18a4eeed5c21d3f5e7f0c5dede715a5c354049229c8564bcaf683e395a5"
+    },
+    {
+      "path": "jvm/supernote/generated/annotations/SupernotePluginInternal.java",
+      "sha256": "61332fa22c0aafe0b337d44bb61b80b2203f31a7f392cc60b0524bef8bc90c62"
+    },
+    {
+      "path": "jvm/supernote/generated/annotations/SupernotePluginObject.java",
+      "sha256": "cf2e291cc2c00892378b2b3620424aa834f1faa4c7984bf0598cbf4786e7594c"
+    },
+    {
+      "path": "jvm/supernote/generated/annotations/SupernotePluginValue.java",
+      "sha256": "c0e5addcf498c7f1a790b45d36f005dd9a18977f5e5b112e358c5f3623c90496"
+    },
+    {
+      "path": "jvm/supernote/generated/runtime/SupernoteConversionBudget.kt",
+      "sha256": "573e7afef84ce5278268a182db6d3057f39fbce25290c46017282221f2fc02b9"
+    },
+    {
+      "path": "jvm/supernote/generated/runtime/SupernoteCoroutineBridge.kt",
+      "sha256": "0891ad31442c6481bc8b3206e96a3051d465638c1459507857714b4869521fd7"
+    },
+    {
+      "path": "native/include/supernote/conversion.hpp",
+      "sha256": "9e99f8d1bbecc556be164377260667fcb4876095e019c386e1eac3038a13121b"
+    },
+    {
+      "path": "native/include/supernote/cpp_objects.hpp",
+      "sha256": "70b78d1a4a4ef0073a686866b2c708a5c47e2b96ed1db808b786eda834c1bdfd"
+    },
+    {
+      "path": "native/include/supernote/runtime.hpp",
+      "sha256": "94e4ddccf385357ca30b151fdb4433b2687a28ba280343ba76785ab960f07e18"
+    },
+    {
+      "path": "native/src/runtime_bootstrap.cpp",
+      "sha256": "d5e66f6de96eb18e49d76c30ee12abb557bc44934db6c521baa8772d49dd636c"
+    },
+    {
+      "path": "native/src/runtime_registration_bridge.c",
+      "sha256": "8a8db1de18b542370c56271cc578badabc3258fc6df3ed740a521f0d32d2477b"
+    },
+    {
+      "path": "native/src/runtime_services.cpp",
+      "sha256": "17aea44994aa5e382d15158e3ca36bc955882b4b9fb8874557c76f8ddddf6ef1"
+    },
+    {
+      "path": "native/src/runtime_services.hpp",
+      "sha256": "93ddec44c6319fe4401761e0fc3785a65e838ea3a98a60c030372e33ab0c1947"
+    },
+    {
+      "path": "react-native.config.js",
+      "sha256": "8be8defb3f53ab1769b39a1ac77d804d443cf79f3758887ebd20e0a0dc0ce5e2"
+    },
+    {
+      "path": "resolve-packages.js",
+      "sha256": "a48f6b747af96885a56a9635a879a40e8ca6b9adfff35d818b7e9cb2a3639531"
+    }
+  ],
+  "protocol": "2.0",
+  "schemaVersion": "2.0"
+}

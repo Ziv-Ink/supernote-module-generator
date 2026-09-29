@@ -105,18 +105,17 @@ def test_every_plain_command_route_is_ascii(tmp_path: Path):
                 "cpp",
                 "--description",
                 "café — 模块 🙂",
-                "--skip-install",
                 "--yes",
             ],
         ),
-        run_plain(root, ["update", "local-unicode", "--skip-install", "--yes"]),
-        run_plain(root, ["validate", "local-unicode"], "n\n"),
+        run_plain(root, ["update"]),
+        run_plain(root, ["validate"]),
         run_plain(root, ["doctor"]),
         run_plain(root, ["validate", "missing-module"]),
-        run_plain(root, ["remove", "local-unicode", "--skip-install", "--yes"]),
+        run_plain(root, ["remove", "local-unicode"]),
     ]
 
-    expected_codes = [0, 0, 1, None, 2, 0]
+    expected_codes = [0, 0, 0, None, 2, 2]
     for expected_code, (code, stdout, stderr) in zip(expected_codes, runs):
         if expected_code is not None:
             assert code == expected_code
@@ -129,7 +128,7 @@ def test_plain_interactive_routes_and_dynamic_values_are_ascii(
     root = plugin(tmp_path)
     code, stdout, stderr = run_plain(
         root,
-        ["add", "--skip-install"],
+        ["add"],
         "1,2\nlocal-mixed\ncafé — 模块 🙂\n\n\n\n",
     )
 
@@ -141,6 +140,7 @@ def test_plain_interactive_routes_and_dynamic_values_are_ascii(
 
 def test_plain_combined_with_json_remains_ascii_and_keeps_duration_ms(tmp_path: Path):
     root = plugin(tmp_path)
+    assert run_plain(root, ["update", "--yes"])[0] == 0
 
     code, stdout, stderr = run_plain(root, ["--json", "validate"])
 
