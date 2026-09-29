@@ -238,13 +238,21 @@ def test_release_guide_uses_the_language_neutral_feature_model():
     assert "immutable tarballs" in normalized
     assert "exact release commit" in normalized
     assert "byte-identical to the directly" in normalized
-    assert "CMake 3.24.4" in normalized
+    assert "CMake 3.24.3" in normalized
     assert "consumer KSP is absent" in normalized
     assert "app build/package/deploy scripts" in normalized
     assert "separate products" in normalized
     assert "never rebuilds an unqualified artifact" in normalized
     assert "all three module types" not in guide
     assert "Add a Module" not in guide
+
+
+def test_release_docs_distinguish_host_and_android_cmake_versions():
+    for relative in ("docs/TESTING.md", "maintainers/releasing.md"):
+        normalized = " ".join((ROOT / relative).read_text(encoding="utf-8").split())
+        assert "host-native minimum is CMake 3.24.3, installed from PyPI" in normalized
+        assert "Android SDK CMake default of 3.24.4" in normalized
+        assert "pin does not change Android tool selection or SDK requirements" in normalized
 
 
 def test_public_material_does_not_reference_private_deploy_script():

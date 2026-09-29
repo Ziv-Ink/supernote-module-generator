@@ -269,6 +269,22 @@ def test_reusable_release_gate_covers_platforms_compileall_and_coverage() -> Non
     assert "test_windows_atime_neutralization_preserves_concurrent_mtime" in platform_paths
 
 
+def test_host_minimum_cmake_matrix_and_install_pin_agree() -> None:
+    quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
+    job = quality.split("\n  generator-qualification:\n", 1)[1]
+    job = re.split(r"\n  [\w-]+:\n", job, maxsplit=1)[0]
+    matrix = re.search(r'cmake: \["([\d.]+)", current\]', job)
+    selection = re.search(
+        r"- name: Select the minimum CMake\s+"
+        r"if: matrix\.cmake == '([\d.]+)'\s+"
+        r"run: python -m pip install cmake==([\d.]+)\s*(?:\n|$)",
+        job,
+    )
+    assert matrix is not None
+    assert selection is not None
+    assert matrix[1] == selection[1] == selection[2] == "3.24.3"
+
+
 def test_release_gate_is_generator_only_and_uses_installed_artifacts() -> None:
     quality = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
     runtime_codegen = (
@@ -277,7 +293,7 @@ def test_release_gate_is_generator_only_and_uses_installed_artifacts() -> None:
 
     assert "SUPERNOTE_MODULE_COMMAND" not in runtime_codegen
     assert '"SUPERNOTE_MODULE_COMMAND": command' in quality
-    assert 'cmake: ["3.24.4", current]' in quality
+    assert 'cmake: ["3.24.3", current]' in quality
     assert "tests/test_q5_installed_qualification.py" in quality
     assert "tests/test_q5_combined_installed_acceptance.py" in quality
     assert "installed-select-toolchain" in quality

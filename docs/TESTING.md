@@ -169,7 +169,7 @@ those already-tested files; they do not build them again.
 ## Installed generator and generated-code acceptance
 
 The `Installed generator` matrix in `quality.yml` runs on native Linux, macOS,
-and Windows with CMake 3.24.4 and each runner's current CMake. Every row installs
+and Windows with CMake 3.24.3 and each runner's current CMake. Every row installs
 the exact canonical wheel in a fresh environment, pins
 `SUPERNOTE_MODULE_COMMAND` to that absolute console executable, and records the
 wheel, source distribution, import path, tool versions, JUnit, and structured
@@ -184,6 +184,10 @@ acceptance evidence. It then:
    paths in Debug and Release;
 6. checks package immutability, compatibility failures, lifecycle rejection,
    and the guard-disabled sensitivity control.
+
+The host-native minimum is CMake 3.24.3, installed from PyPI. This is separate
+from the generated Android SDK CMake default of 3.24.4; the host qualification
+pin does not change Android tool selection or SDK requirements.
 
 Local reproduction requires Node/npm, Java 17, Gradle 8.13, CMake, and a C++23
 compiler. Keep `SUPERNOTE_MODULE_COMMAND` pointed at the `sn-module-gen`

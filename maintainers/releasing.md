@@ -64,7 +64,7 @@ and smoke the public console entry point.
 
 The required generator-only matrix installs the canonical wheel outside the
 source checkout and pins `SUPERNOTE_MODULE_COMMAND` to that absolute console
-executable. On native Ubuntu, macOS, and Windows, with CMake 3.24.4 and each
+executable. On native Ubuntu, macOS, and Windows, with CMake 3.24.3 and each
 runner's current CMake, it must:
 
 - run installed `add`, plain `update`, and project-wide `validate` for C++,
@@ -78,6 +78,10 @@ runner's current CMake, it must:
 - reject stale payloads, incompatible identities, stale receivers, and a
   guard-disabled sensitivity mutant;
 - retain JUnit and structured success or failure evidence for every matrix row.
+
+The host-native minimum is CMake 3.24.3, installed from PyPI. This is separate
+from the generated Android SDK CMake default of 3.24.4; the host qualification
+pin does not change Android tool selection or SDK requirements.
 
 The official plugin template, Wiki, existing plugin repositories, app
 build/package/deploy scripts, and device packages are separate products. The
